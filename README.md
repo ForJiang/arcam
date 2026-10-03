@@ -325,6 +325,27 @@ canvas、无构建、无 CDN。上传的素材常驻**进程内存**（`POST /ap
 - 抠图 / LiDAR 可选依赖（onnxruntime / pillow-heif 等）网页侧同样是懒加载，缺了
   `POST /api/matte` 会回 `{ok:false,error}` 带下载指引，不会 500。
 
+## GitHub Pages 版（纯客户端，免安装）
+
+`site/` 目录是**同一套投影/合成管线的浏览器移植**（原版项目本就是 JS，这是回到本形）：
+GitHub Pages 只伺服静态文件、跑不了 Python 服务，所以把 focal/project/place、摆位、
+接触阴影、场景裁切、scene.json 配方全部移植成了原生 JS（`arcam-core.js` 数学内核 +
+`arcam-render.js` canvas 合成），页面交互与本地版一致：上传照片+立绘 → 参数滑块 →
+实时预览 → 下载 PNG / 立绘层 / 素材包 zip（三件套）/ 复制 scene.json。
+
+- **功能对齐**：全部摆放参数、出图、立绘层、素材包、scene.json 与原版同构；
+  **抠图也在网页版可用**（`vendor/` 内置 isnet-anime-q8.onnx + onnxruntime-web，
+  首次点「抠图」才下载约 44MB 模型）。
+- **网页版没有的**（本地版专属）：LiDAR 深度驱动、视频轨道渲染、环境光烘焙 bakeLit、
+  色调匹配 tone、遮挡抠除（tone 开关保留但合成时忽略，页面上有注明）。
+- **部署**：仓库 Settings → Pages → Source 选 `main` 分支 `/site` 目录即可
+  （推送脚本 `tools/push-to-github.sh` 会一并开启）。站内所有运算都在访客浏览器里，
+  照片立绘不出设备。
+- **正确性基准**：`site/tests/golden.json` 由 Python 管线生成（40 组 focal /
+  200 组 project / 120 组 place / 84 组 placement / 3 组整帧 scene），JS 侧
+  偏差 < 1e-9（引擎 libm 的 1 ulp 差，比阈值低 7 个数量级）；合成调用序列与
+  scene 字段顺序与 Python 逐项对齐。
+
 ## 测试
 
 ```bash

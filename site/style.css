@@ -1,0 +1,244 @@
+/* arcam web UI（GitHub Pages 版） — 原生 CSS，零依赖。
+ * tokens 与组件规格来自 docs/WEB-STYLE.md（挖掘自 sess_0312ae9e）：
+ * 深浅色跟随系统 prefers-color-scheme，不写死颜色；反渐变/反阴影/反玻璃拟态。
+ * 布局与本地 webui/ 逐字同构（左输入/右预览两栏，<900px 上下堆叠），
+ * 仅删掉 LiDAR 专属的 .env-box（Pages 版无深度帧）。 */
+
+:root {
+  color-scheme: light dark; /* 让原生下拉/复选/滚动条也跟随系统（WEB-STYLE §2） */
+  --bg: #ffffff;
+  --surface: #fafafa;
+  --text: #1a1a1a;
+  --muted: #666666;
+  --hint: #777777;
+  --border: #d0d0d0;
+  --input-bg: #ffffff;
+  --input-border: #bbbbbb;
+  --input-fg: #1a1a1a;
+  --btn-bg: #f5f5f5;
+  --btn-bg-hover: #e8e8e8;
+  --btn-border: #444444;
+  --accent: #2563eb;
+  --danger: #b3261e;
+  --ok: #0a7a2f;
+  --info: #555555;
+  --label-fg: #333333;
+  --inline-fg: #444444;
+  --ctrl-h: 34px;
+  --gap: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151a;
+    --surface: #171b21;
+    --text: #e7e9ee;
+    --muted: #9aa2ae;
+    --hint: #8b939e;
+    --border: #2f353f;
+    --input-bg: #1b1f26;
+    --input-border: #3b4351;
+    --input-fg: #e7e9ee;
+    --btn-bg: #232935;
+    --btn-bg-hover: #2d3441;
+    --btn-border: #4a5261;
+    --accent: #6ea8ff;
+    --danger: #f87171;
+    --ok: #4ade80;
+    --info: #97a0ad;
+    --label-fg: #c9cfd9;
+    --inline-fg: #b9c0cb;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+#app {
+  max-width: 1100px; /* 两栏工具页版心（WEB-STYLE 的 860px 是单栏文档页建议，此处放宽） */
+  margin: 24px auto;
+  padding: 0 16px;
+}
+
+/* ---------- 顶栏（WEB-STYLE：h1 20px / .sub 13px muted） ---------- */
+#topbar h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+#app-sub {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* ---------- 卡片（WEB-STYLE §4：1px 边框 / 6px 圆角 / 14px 16px 内边距 / 卡片间 16px） ---------- */
+#layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) 1fr;
+  gap: var(--gap);
+  align-items: start;
+}
+.col, #panel-params, #footer > * {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  background: var(--bg);
+}
+.col h2, #panel-params h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+/* ---------- 上传区（input 同款规格；拖拽高亮只换边框色） ---------- */
+.drop-zone {
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--input-fg);
+  padding: 6px 8px;
+  margin-bottom: 10px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.4;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.drop-zone.drag { border-color: var(--accent); }
+.drop-zone strong { font-size: 13px; }
+.dz-hint { font-size: 12px; color: var(--hint); }
+.dz-name { font-size: 12px; color: var(--accent); word-break: break-all; }
+.dz-name.empty { color: var(--hint); }
+
+.hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--hint);
+  min-height: 16px;
+}
+.hint:empty { min-height: 0; margin: 0; }
+
+/* ---------- 按钮（WEB-STYLE §4：34px 高 / 0 18px / 灰系，无填充色大按钮） ---------- */
+.btn-row { display: flex; gap: var(--gap); flex-wrap: wrap; align-items: center; }
+button {
+  font-family: inherit;
+  height: var(--ctrl-h);
+  padding: 0 18px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--btn-bg);
+  border: 1px solid var(--btn-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+button:hover { background: var(--btn-bg-hover); }
+
+/* ---------- 预览（日志区同款边框/底色，WEB-STYLE §4） ---------- */
+.canvas-wrap {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  margin-bottom: var(--gap);
+}
+#preview-canvas { max-width: 100%; max-height: 62vh; display: block; }
+
+/* scene.json 与日志区同规格：等宽 12.5px / pre-wrap / 断行 */
+#scene-json {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.4;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ---------- 参数面板（WEB-STYLE §4 输入框规格） ---------- */
+#param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px var(--gap);
+}
+.param-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+.param-row label { font-size: 13px; color: var(--label-fg); }
+.param-row .val { font-size: 12px; color: var(--muted); }
+.param-row input[type="number"],
+.param-row select {
+  font-family: inherit;
+  width: 100%;
+  height: var(--ctrl-h);
+  padding: 6px 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--input-fg);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+}
+/* 滑块参考里没有：按 WEB-STYLE §4 推导做法——34px 高 + accent-color 跟随主题 */
+.param-row input[type="range"] {
+  width: 100%;
+  height: var(--ctrl-h);
+  accent-color: var(--accent);
+}
+.param-row-check {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+}
+.param-row-check input { accent-color: var(--accent); width: 16px; height: 16px; }
+
+/* ---------- 状态条 ---------- */
+#footer { display: flex; flex-direction: column; gap: 0; }
+#status-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  font-size: 13px;
+  color: var(--info);
+}
+#status-bar .spacer { flex: 1; }
+#status-msg.ok { color: var(--ok); }
+#status-msg.error { color: var(--danger); }
+#status-time {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+#local-chip {
+  font-size: 12px;
+  color: var(--label-fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+
+#scene-details { font-size: 13px; }
+#scene-details summary { cursor: pointer; color: var(--muted); margin-bottom: 8px; }
+#scene-json { margin: 0; max-height: 320px; overflow: auto; }
+#scene-json:empty { display: none; }
+
+/* ---------- 响应式：<900px 两栏上下堆叠（同本地 webui） ---------- */
+@media (max-width: 900px) {
+  #layout { grid-template-columns: 1fr; }
+  #preview-canvas { max-height: 48vh; }
+  #local-chip { display: none; }
+}

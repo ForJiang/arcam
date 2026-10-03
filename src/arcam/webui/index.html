@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AR 取景器 — arcam web</title>
+<!-- 静态资源由 webapp 的 GET /static/* 提供（WEB-SPEC §1）；零 CDN、零构建。 -->
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<div id="app">
+
+  <header id="topbar">
+    <h1 id="app-title">AR 取景器</h1>
+    <p id="app-sub">让她走出屏幕 · 本地单机工具（照片 + 立绘 + 可选 LiDAR 深度）</p>
+  </header>
+
+  <main id="layout">
+
+    <!-- 左栏：输入 -->
+    <section id="panel-input" class="col">
+      <h2>输入</h2>
+
+      <div class="drop-zone" id="drop-photo">
+        <strong>照片（必选）</strong>
+        <span class="dz-hint">拖拽图片到此处，或点击选择</span>
+        <span class="dz-name" id="photo-name">未选择</span>
+      </div>
+      <input type="file" id="file-photo" accept="image/*" hidden>
+
+      <div class="drop-zone" id="drop-char">
+        <strong>立绘</strong>
+        <span class="dz-hint">带 alpha 的 PNG 最佳；普通图请先点「抠图」</span>
+        <span class="dz-name" id="char-name">未选择</span>
+      </div>
+      <input type="file" id="file-char" accept="image/*" hidden>
+
+      <div class="drop-zone" id="drop-depth">
+        <strong>深度帧（可选）</strong>
+        <span class="dz-hint">LiDAR 深度：png/tif(16bit) / npy / depth / exr / heic</span>
+        <span class="dz-name" id="depth-name">未选择</span>
+      </div>
+      <input type="file" id="file-depth" accept="image/*,.npy,.depth,.exr,.heic" hidden>
+
+      <p class="hint" id="input-hint"></p>
+
+      <div class="btn-row">
+        <button type="button" id="btn-matte">抠图</button>
+        <button type="button" id="btn-lidar">LiDAR 诊断</button>
+        <button type="button" id="btn-rerender">重新渲染</button>
+      </div>
+    </section>
+
+    <!-- 右栏：预览 -->
+    <section id="panel-preview" class="col">
+      <h2>预览</h2>
+      <div class="canvas-wrap">
+        <canvas id="preview-canvas" width="16" height="9"></canvas>
+        <p class="hint" id="preview-empty">上传照片与立绘后自动渲染</p>
+      </div>
+      <div class="env-box" id="env-box" hidden></div>
+      <div class="btn-row">
+        <button type="button" id="btn-png">下载 PNG</button>
+        <button type="button" id="btn-layer">下载立绘层</button>
+        <button type="button" id="btn-bundle">下载素材包 zip</button>
+        <button type="button" id="btn-copy-scene">复制 scene.json</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- 底部：摆放参数（默认值 = 原版 S 默认，WEB-SPEC §2） -->
+  <section id="panel-params">
+    <h2>摆放参数</h2>
+    <div id="param-grid">
+
+      <div class="param-row" id="row-x">
+        <label for="p-x-num">x 横向偏移（米）</label>
+        <input type="number" id="p-x-num" step="0.05" value="0">
+        <input type="range" id="p-x-rng" min="-6" max="6" step="0.05" value="0">
+      </div>
+
+      <div class="param-row" id="row-d">
+        <label for="p-d-num">d 人物距离（米）</label>
+        <input type="number" id="p-d-num" step="0.05" value="4">
+        <input type="range" id="p-d-rng" min="0.5" max="12" step="0.05" value="4">
+      </div>
+
+      <div class="param-row" id="row-h">
+        <label for="p-h-num">h 相机离地高（米）</label>
+        <input type="number" id="p-h-num" step="0.05" value="1.6">
+        <input type="range" id="p-h-rng" min="0.3" max="3" step="0.05" value="1.6">
+      </div>
+
+      <div class="param-row" id="row-hp">
+        <label for="p-hp-num">hp 人物身高（米）</label>
+        <input type="number" id="p-hp-num" step="0.01" value="1.65">
+        <input type="range" id="p-hp-rng" min="0.4" max="2.5" step="0.01" value="1.65">
+      </div>
+
+      <div class="param-row" id="row-feq">
+        <label for="p-feq-num">feq 等效焦距（mm）</label>
+        <input type="number" id="p-feq-num" step="0.5" value="23">
+        <input type="range" id="p-feq-rng" min="10" max="120" step="0.5" value="23">
+      </div>
+
+      <div class="param-row" id="row-pitch">
+        <label for="p-pitch-num">pitch 俯角（度，低头为正）</label>
+        <input type="number" id="p-pitch-num" step="0.5" value="0">
+        <input type="range" id="p-pitch-rng" min="-60" max="60" step="0.5" value="0">
+      </div>
+
+      <div class="param-row" id="row-roll">
+        <label for="p-roll-num">roll 横滚（度，顺时针）</label>
+        <input type="number" id="p-roll-num" step="0.5" value="0">
+        <input type="range" id="p-roll-rng" min="-90" max="90" step="0.5" value="0">
+      </div>
+
+      <div class="param-row">
+        <label for="p-shot">shot 景别</label>
+        <select id="p-shot">
+          <option value="全身" selected>全身</option>
+          <option value="膝上">膝上</option>
+          <option value="腰上">腰上</option>
+          <option value="胸上">胸上</option>
+          <option value="头肩">头肩</option>
+        </select>
+      </div>
+
+      <div class="param-row">
+        <label for="p-frame">frame 画幅</label>
+        <select id="p-frame">
+          <option value="自由">自由</option>
+          <option value="1:1">1:1</option>
+          <option value="4:5">4:5</option>
+          <option value="16:9">16:9</option>
+          <option value="9:16">9:16</option>
+          <option value="满幅" selected>满幅</option>
+        </select>
+      </div>
+
+      <div class="param-row">
+        <label for="p-mode">mode 摆放模式</label>
+        <select id="p-mode">
+          <option value="ground" selected>ground 贴地</option>
+          <option value="free">free 自由半身</option>
+        </select>
+      </div>
+
+      <div class="param-row">
+        <label for="p-rot">rot-basis 立绘对正基准</label>
+        <select id="p-rot">
+          <option value="world" selected>world 跟随世界竖直</option>
+          <option value="frame">frame 永远画面竖直</option>
+        </select>
+      </div>
+
+      <div class="param-row" id="row-edge-bar" hidden>
+        <label for="p-edge-bar">edge-bar 框条吸附（0–4）</label>
+        <select id="p-edge-bar">
+          <option value="0" selected>0 不吸附</option>
+          <option value="1">1 上</option>
+          <option value="2">2 下</option>
+          <option value="3">3 左</option>
+          <option value="4">4 右</option>
+        </select>
+      </div>
+
+      <div class="param-row">
+        <label for="p-char-scale-rng">char-scale 立绘倍率 <span class="val" id="p-char-scale-val">1.00</span></label>
+        <input type="range" id="p-char-scale-rng" min="0.1" max="3" step="0.05" value="1">
+      </div>
+
+      <div class="param-row">
+        <label for="p-size-pct-rng">size-pct 自由模式高度占比 <span class="val" id="p-size-pct-val">60%</span></label>
+        <input type="range" id="p-size-pct-rng" min="10" max="100" step="1" value="60">
+      </div>
+
+      <div class="param-row param-row-check">
+        <label for="p-tone">tone 色调匹配</label>
+        <input type="checkbox" id="p-tone">
+      </div>
+
+    </div>
+  </section>
+
+  <!-- 状态条 + scene.json -->
+  <footer id="footer">
+    <div id="status-bar">
+      <span id="status-msg" role="status">就绪</span>
+      <span class="spacer"></span>
+      <span id="status-time"></span>
+      <span id="local-chip" title="单用户本机回环，数据不出本机">仅在本地运行</span>
+    </div>
+    <details id="scene-details">
+      <summary>scene.json</summary>
+      <pre id="scene-json"></pre>
+    </details>
+  </footer>
+
+</div>
+</body>
+</html>

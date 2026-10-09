@@ -314,3 +314,10 @@ button:hover { background: var(--btn-bg-hover); }
 .check-grid .chk input { accent-color: var(--accent); width: 15px; height: 15px; }
 #preview-canvas { cursor: grab; touch-action: none; }
 #preview-canvas:active { cursor: grabbing; }
+
+/* ---------- 全屏取景（stage 推入 fullscreen 后的样式） ---------- */
+#stage:fullscreen { background: #000; display: flex; align-items: center; justify-content: center; }
+#stage:fullscreen #preview-canvas { max-width: 100vw; max-height: 100vh; }
+#stage:fullscreen #hud-canvas { max-width: 100vw; max-height: 100vh; }
+#stage:fullscreen #cam-video { max-width: 100vw; max-height: 100vh; }
+#stage:fullscreen .tip { bottom: 48px; }

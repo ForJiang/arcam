@@ -2,6 +2,40 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.0] — 2026-10-11
+
+功能再扩充：三个新 CLI 命令 + 网页全屏取景与参数记忆。
+
+### 新增（CLI）
+
+- `arcam watch PHOTO CHAR -o OUT`：监视素材变化自动重出图（轮询式，跨平台最稳；
+  `--once` 只跑一遍；`--interval` 调轮询）。调参时不用反复敲命令。
+- `arcam multi PHOTO CHAR [CHAR...] --spec "x=0.6;d=3.2;scale=0.8"`：**多立绘合成**——
+  一张照片里站多个人，每张各带各的站位。实现是逐张出立绘层再顺序 source-over
+  （数学上与"一气画多个人"等价，且不动冻结的单主体六步管线）；scene.json 记
+  第一张的落位（多主体无原版格式，如实注明）。
+- `arcam stats [--json]`：项目自报——模块/测试/网页 JS 行数、公开 API 数、
+  语言表条数、子命令清单（子命令名从 parser 现抓，新增命令自动进表）。
+
+### 新增（网页）
+
+- **全屏取景**：预览区推入 fullscreen（原版手机端就是整屏取景）；HUD 浮层与
+  拖拽摆位在全屏下照旧，Esc 退出。
+- **参数记忆**：摆放参数存 localStorage，下次打开自动恢复并写回所有控件
+  （原版只存语言；调好一套站位关掉页面不再丢）。改动 500ms 防抖存盘，
+  `beforeunload` 兜底。
+
+### 修复
+
+- webui/app.js 缺 `t()` 薄封装（i18n.js 挂 window.arcamT）——全屏/记忆接线里
+  直接调 `t()` 会在 init 中抛 ReferenceError，把后半段接线全部 abort。补上封装
+  （与 docs 版一致），浏览器实测恢复提示"已恢复上次的参数"正常显示。
+
+### 备注
+
+- 全套 496 passed / 1 skipped；golden 差分 462 向量 0 失败；浏览器实测参数记忆
+  全链路（改 d=7.2 → 防抖存盘 → 重载 → 控件与提示恢复）。
+
 ## [1.3.0] — 2026-10-11
 
 功能扩充版：三个新 CLI 子命令、光影开关组、网页拖拽摆位、GIF 导出。
@@ -235,6 +269,7 @@ cli/video/matting · depth/plane/lidar/webapp · webui/Pages JS），修复 16 �
   `point(u,v,1)·depth`），与径向（cosθ）解释的仲裁结论一致，有回归测试钉住。
 - scene.json 与原版 1:1 同构（字段序/单位/toFixed 口径），未因本次审计变动。
 
+[1.4.0]: https://github.com/ForJiang/arcam/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/ForJiang/arcam/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/ForJiang/arcam/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/ForJiang/arcam/compare/v1.1.1...v1.1.2

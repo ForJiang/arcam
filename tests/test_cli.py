@@ -11,6 +11,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -527,3 +529,78 @@ def test_video_gif_export(tmp_path, photo, char, capsys):
         assert im.n_frames == 9                 # 1s × 8fps + 1
         assert im.info.get("loop") == 0         # 无限循环
         assert im.info.get("duration") == 125 or 100 <= im.info.get("duration", 0) <= 150
+
+
+# ─────────────────────── watch / multi / stats（v1.4.0 新功能） ───────────────────────
+
+def test_watch_once(tmp_path, photo, char):
+    """watch --once：跑一遍就退出（不进入循环）。"""
+    out = tmp_path / "w.png"
+    code = main(["watch", str(photo), str(char), "-o", str(out), "--once", "--pitch", "5"])
+    assert code == 0 and out.is_file()
+
+
+def test_watch_detects_change(tmp_path, photo, char):
+    """watch 循环：素材 mtime 变了就重出一遍（轮询 0.3s）。"""
+    import subprocess, sys, time
+    out = tmp_path / "w.png"
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "arcam", "watch", str(photo), str(char),
+         "-o", str(out), "--interval", "0.3"],
+        cwd=str(ROOT), env={"PYTHONPATH": str(ROOT / "src"), "PATH": "/usr/bin:/bin"},
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        time.sleep(2.5)                        # 等首次渲染
+        first = out.read_bytes()
+        # 改照片（内容变 + mtime 变）
+        from PIL import Image
+        arr = np.asarray(Image.open(photo).convert("RGB")).copy()
+        arr[20:60, 20:60] = 255
+        Image.fromarray(arr).save(photo, quality=92)
+        time.sleep(2.0)                        # 等一轮轮询
+        assert out.read_bytes() != first, "素材改了但输出没变"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_multi_two_chars(tmp_path, photo, char):
+    """multi：两张立绘各带站位叠进同一照片（第二张在 spec 里覆盖）。"""
+    out = tmp_path / "multi.png"
+    code = main(["multi", str(photo), str(char), str(char), "-o", str(out),
+                 "--spec", "x=1.2;d=3.0;scale=0.7"])
+    assert code == 0 and out.is_file()
+    # 与单张渲染不同（第二个人物确实叠上去了）
+    single = tmp_path / "single.png"
+    assert main(["render", str(photo), str(char), "-o", str(single)]) == 0
+    a = np.asarray(Image.open(out).convert("RGB")).astype(int)
+    b = np.asarray(Image.open(single).convert("RGB")).astype(int)
+    assert int((np.abs(a - b).sum(2) > 12).sum()) > 500
+
+
+def test_multi_spec_validation(tmp_path, photo, char):
+    """spec 键不认识 / 段不是 K=V → 退出码 1 + 人话错误。"""
+    import io, contextlib
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        code = main(["multi", str(photo), str(char), str(char), "-o", str(tmp_path / "m.png"),
+                     "--spec", "bogus=1"])
+    assert code == 1
+    assert "不认识" in err.getvalue()
+
+
+def test_stats_reports_project(tmp_path, capsys):
+    """stats：规模/子命令/语言表条数都在（子命令集合与 parser 一致）。"""
+    code = main(["stats"])
+    assert code == 0
+    out = capsys.readouterr().out
+    for token in ("arcam", "Python", "测试", "网页", "子命令", "multi", "watch", "recipe"):
+        assert token in out, f"stats 输出缺 {token}"
+    # --json 可解析
+    import io, contextlib, json as _json
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert main(["stats", "--json"]) == 0
+    data = _json.loads(buf.getvalue())
+    assert data["subcommands"] and "multi" in data["subcommands"]
+    assert data["i18n_entries"] > 150

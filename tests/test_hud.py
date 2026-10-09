@@ -40,7 +40,7 @@ def _img(v: int = 60) -> np.ndarray:
 def test_table_is_complete_and_bilingual():
     """160 条逐条搬运（index.html:600-830），两列都非空、无孤行。"""
     # 160 条原版搬运 + 17 条 webui 新增键（FEATURE-SPEC §3；新增只追加不重排）
-    assert len(TXT) == 182, f"表条数变了：{len(TXT)}"
+    assert len(TXT) == 186, f"表条数变了：{len(TXT)}"
     for k, (zh, en) in TXT.items():
         assert zh and en, f"{k} 有空白列"
         # 画幅比与"已保存"这类中英本就同形（1:1 / 4:5 / {0} {1}），不算漏翻

@@ -11,6 +11,12 @@
 // WEB-SPEC §2：默认值 = 原版 S 默认（index.html:921–937，cli.py _add_placement 同款）。
 // 注意 x/d/h/pitch/roll 在 CLI 里默认 None 是为了区分「显式给过」与「没给」，
 // 所以前端显示用这些 S 默认，但只有用户动过的键才进请求体（见 buildParams）。
+// t() 薄封装：i18n.js 把表挂在 window.arcamT 上（与 docs 版同一张表）。
+// ⚠ 没有这层就直接调 t() 会在 init 里抛 ReferenceError，把后面的接线全 abort。
+function t(key) {
+  return window.arcamT ? window.arcamT.apply(null, arguments) : key;
+}
+
 var S_DEFAULTS = {
   x: 0, d: 4, h: 1.6, hp: 1.65, feq: 23, pitch: 0, roll: 0,
   shot: '全身', char_scale: 1.0, frame: '满幅', rot_basis: 'world',
@@ -738,6 +744,83 @@ function bindDrag() {
   cv.addEventListener('pointercancel', end);
 }
 
+
+/* ================= 9.5 全屏取景 + 参数记忆（v1.4.0） ================= */
+
+//: 全屏取景：把 #stage 推入 fullscreen（原版手机端就是整屏取景）。
+//  HUD 浮层与拖拽在全屏下照旧（canvas 尺寸不变，CSS 放大而已）。
+function bindFullscreen() {
+  $('btn-fullscreen').addEventListener('click', function () {
+    var stage = $('stage');
+    if (!stage) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+      return;
+    }
+    var p = stage.requestFullscreen && stage.requestFullscreen();
+    if (p && p.catch) p.catch(function () {
+      setStatus('浏览器不让全屏（需用户手势；iOS Safari 不支持元素全屏）', null, true);
+    });
+  });
+  document.addEventListener('fullscreenchange', function () {
+    var on = !!document.fullscreenElement;
+    $('btn-fullscreen').textContent = on ? t('btn.exitFullscreen') : t('btn.fullscreen');
+    if (on) setStatus('全屏取景中——拖画面摆位，Esc 退出');
+  });
+}
+
+//: 参数记忆：params 存 localStorage，下次打开自动恢复（原版只存语言，这里多存参数——
+//  调好一套站位后关掉页面不再丢。reset 键清空。
+var PARAM_KEY = 'arcam.params';
+
+function saveParams() {
+  try {
+    localStorage.setItem(PARAM_KEY, JSON.stringify({
+      params: state.params, touched: Array.from(state.touched)
+    }));
+  } catch (e) {}
+}
+
+function restoreParams() {
+  try {
+    var raw = localStorage.getItem(PARAM_KEY);
+    if (!raw) return false;
+    var data = JSON.parse(raw);
+    if (!data || !data.params) return false;
+    // 只恢复 schema 里有的键（旧版本存过的怪键不进来）
+    Object.keys(S_DEFAULTS).forEach(function (k) {
+      if (data.params[k] !== undefined) state.params[k] = data.params[k];
+    });
+    if (data.touched) data.touched.forEach(function (k) { state.touched.add(k); });
+    return true;
+  } catch (e) { return false; }
+}
+
+// 把恢复后的参数写回控件（不写回的话界面和状态不一致）
+function syncControlsFromParams() {
+  NUMERIC.forEach(function (key) {
+    var v = state.params[key];
+    var num = $('p-' + key + '-num'), rng = $('p-' + key + '-rng');
+    if (num) num.value = v;
+    if (rng) rng.value = v;
+  });
+  var sel = { shot: 'p-shot', frame: 'p-frame', mode: 'p-mode',
+              rot_basis: 'p-rot', edge_bar: 'p-edge-bar' };
+  Object.keys(sel).forEach(function (k) {
+    var el = $(sel[k]);
+    if (el) el.value = state.params[k];
+  });
+  $('p-char-scale-rng').value = state.params.char_scale;
+  $('p-char-scale-val').textContent = state.params.char_scale.toFixed(2);
+  $('p-size-pct-rng').value = state.params.size_pct;
+  $('p-size-pct-val').textContent = state.params.size_pct.toFixed(0) + '%';
+  $('p-tone').checked = !!state.params.tone;
+  $('fx-light').checked = !!state.params.light;
+  $('fx-grain').checked = !!state.params.grain;
+  $('fx-shadow').checked = !!state.params.shadow;
+  syncModeVisibility();
+}
+
 /* ================= 8. 初始化 ================= */
 
 function init() {
@@ -766,7 +849,9 @@ function init() {
 
   bindEditLine();
   bindLive();
-
+  bindFx();
+  bindDrag();
+  bindFullscreen();
   syncModeVisibility();
   setStatus('就绪');
   $('status-msg').className = '';
@@ -774,6 +859,20 @@ function init() {
   var hud = $('hud-canvas');
   if (hud) hud.hidden = false;
   drawHudOverlay();
+
+  // 参数记忆：恢复上次的摆放参数（原版只存语言；调好一套站位关掉页面不再丢）
+  if (restoreParams()) {
+    syncControlsFromParams();
+    setStatus(t('note.paramsRestored'));
+  }
+  // 参数改动后防抖存盘（包一层 scheduleRender；渲染节奏不变）
+  var _origSchedule = scheduleRender;
+  scheduleRender = function () {
+    _origSchedule();
+    clearTimeout(scheduleRender._saveT);
+    scheduleRender._saveT = setTimeout(saveParams, 500);
+  };
+  window.addEventListener('beforeunload', saveParams);
 }
 
 init();

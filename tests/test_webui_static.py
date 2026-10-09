@@ -628,7 +628,7 @@ def test_i18n_tables_match_between_python_and_js():
         f"仅 Python {sorted(set(PY_TXT) - set(js_txt))[:5]}"
     for key, (zh, en) in PY_TXT.items():
         assert list(js_txt[key]) == [zh, en], f"{key} 两侧文案不同"
-    assert len(PY_TXT) == 182, f"表条数变了：{len(PY_TXT)}（原版 160 + webui 17 + CLI 1；3D 五键原版就有）"
+    assert len(PY_TXT) == 186, f"表条数变了：{len(PY_TXT)}（原版 160 + webui 17 + CLI 1；3D 五键原版就有）"
 
 
 def test_mmd_3d_wired():

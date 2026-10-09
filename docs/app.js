@@ -659,6 +659,18 @@ function init() {
   bindLive();
   bindFx();
   bindDrag();
+  bindFullscreen();
+  if (restoreParams()) {
+    syncControlsFromParams();
+    setStatus(t('note.paramsRestored'));
+  }
+  const _origSchedule = scheduleRender;
+  scheduleRender = function () {
+    _origSchedule();
+    clearTimeout(scheduleRender._t);
+    scheduleRender._t = setTimeout(saveParams, 500);
+  };
+  window.addEventListener('beforeunload', saveParams);
   bind3D();
   $('hud-canvas').hidden = false;
   drawHudOverlay();
@@ -1174,6 +1186,63 @@ function bindDrag() {
   const end = () => { dragging = false; };
   cv.addEventListener('pointerup', end);
   cv.addEventListener('pointercancel', end);
+}
+
+
+/* ================= 12.7 全屏取景 + 参数记忆（v1.4.0） ================= */
+
+function bindFullscreen() {
+  $('btn-fullscreen').addEventListener('click', () => {
+    const stage = $('stage');
+    if (!stage) return;
+    if (document.fullscreenElement) { document.exitFullscreen(); return; }
+    const p = stage.requestFullscreen && stage.requestFullscreen();
+    if (p && p.catch) p.catch(() => setStatus('浏览器不让全屏（需用户手势；iOS Safari 不支持元素全屏）', null, true));
+  });
+  document.addEventListener('fullscreenchange', () => {
+    const on = !!document.fullscreenElement;
+    $('btn-fullscreen').textContent = on ? t('btn.exitFullscreen') : t('btn.fullscreen');
+    if (on) setStatus('全屏取景中——拖画面摆位，Esc 退出');
+  });
+}
+
+const PARAM_KEY = 'arcam.params';
+
+function saveParams() {
+  try {
+    localStorage.setItem(PARAM_KEY, JSON.stringify({ params: state.params }));
+  } catch (e) {}
+}
+
+function restoreParams() {
+  try {
+    const raw = localStorage.getItem(PARAM_KEY);
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    if (!data || !data.params) return false;
+    Object.keys(S_DEFAULTS).forEach((k) => {
+      if (data.params[k] !== undefined) state.params[k] = data.params[k];
+    });
+    return true;
+  } catch (e) { return false; }
+}
+
+function syncControlsFromParams() {
+  NUMERIC.forEach((key) => {
+    const v = state.params[key];
+    const num = $('p-' + key + '-num'), rng = $('p-' + key + '-rng');
+    if (num) num.value = v;
+    if (rng) rng.value = v;
+  });
+  const sel = { shot: 'p-shot', frame: 'p-frame', mode: 'p-mode', rot_basis: 'p-rot', edge_bar: 'p-edge-bar' };
+  Object.keys(sel).forEach((k) => { const el = $(sel[k]); if (el) el.value = state.params[k]; });
+  $('p-char-scale-rng').value = state.params.char_scale;
+  $('p-char-scale-val').textContent = state.params.char_scale.toFixed(2);
+  $('p-size-pct-rng').value = state.params.size_pct;
+  $('p-size-pct-val').textContent = state.params.size_pct.toFixed(0) + '%';
+  $('p-tone').checked = !!state.params.tone;
+  $('fx-shadow').checked = state.params.shadow !== false;
+  syncModeVisibility();
 }
 
 /* ================= 12. 实时相机 + HUD（FEATURE-SPEC §4/§2） ================= */

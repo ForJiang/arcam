@@ -27,13 +27,16 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
+import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
-from arcam.compose import _merge_env, compose_char_layer, compose_shot
+from arcam.compose import _merge_env, _over, compose_char_layer, compose_shot
 from arcam.geometry import Camera
 from arcam.i18n import LANGS
 from arcam.matting import anime_cut
@@ -200,6 +203,43 @@ def build_parser() -> argparse.ArgumentParser:
                     help="临时改一项（可多次）：--set pitch=15 --set mode=free")
     rp.set_defaults(func=cmd_recipe_apply)
     _add_lang(p)
+
+    p = sub.add_parser("watch", help="监视文件夹：素材或轨道变了就自动重出图",
+                       description="盯着 PHOTO（或 --track 轨道文件），改动落地后自动重跑出图——"
+                                   "调参时不用反复敲命令。Ctrl-C 退出；--once 只跑一遍（等于带日志的 render）。")
+    p.add_argument("photo", metavar="PHOTO", help="要监视的照片（改了它就重渲）")
+    p.add_argument("char", metavar="CHAR", help="立绘（改了它也重渲）")
+    _add_out(p)
+    p.add_argument("--interval", type=float, default=1.0, metavar="秒",
+                   help="轮询间隔（默认 1.0；文件系统事件在各平台可靠性不一，轮询最稳）")
+    p.add_argument("--once", action="store_true", help="只跑一遍就退出（不进入监视循环）")
+    p.add_argument("--overlay", default=None, choices=("grid", "horizon", "figure", "hud"),
+                   metavar="层", help="出图后叠一层 HUD 取景装饰（默认不叠）")
+    _add_placement(p)
+    _add_lang(p)
+    p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser("multi", help="多立绘合成：一张照片里站多个人（各带各的站位）",
+                       description="按顺序把多张立绘叠进同一照片。每张立绘用 --spec 给一套"
+                                   "站位覆盖（x/d/scale/shot/mode/size_pct/edge_bar/rot_basis），"
+                                   "不给就用主参数。层与层之间 source-over 顺序合成，"
+                                   "后画的盖先画的（和手工逐一合成等价）。")
+    p.add_argument("photo", metavar="PHOTO", help="背景照片")
+    p.add_argument("chars", metavar="CHAR", nargs="+", help="立绘（至少一张；多张按顺序叠）")
+    _add_out(p)
+    p.add_argument("--spec", action="append", default=[], metavar="K=V;K=V",
+                   help="第 N 张立绘的站位覆盖（按 --spec 出现顺序对应第 2、3… 张；"
+                        "第一张用主参数）。例：--spec 'x=0.6;d=3.2;scale=0.8'")
+    p.add_argument("--scene", metavar="PATH", help="同时写 scene.json（记第一张的落位）")
+    _add_placement(p)
+    _add_lang(p)
+    p.set_defaults(func=cmd_multi)
+
+    p = sub.add_parser("stats", help="项目自报：规模/测试/功能矩阵一句话",
+                       description="数一数源码行数、测试条数、子命令与模块，打印项目体检表。"
+                                   "给 README 和发布说明用，免手工维护。")
+    p.add_argument("--json", action="store_true", help="输出 JSON（脚本好用）")
+    p.set_defaults(func=cmd_stats)
 
     p = sub.add_parser("contact-sheet", help="参数对比网格：同一构图扫一组参数出一张总览图",
                        description="把同一照片/立绘在一组参数取值下各渲一张，拼成带标注的"
@@ -667,6 +707,269 @@ def _parse_vary(items: list[str]) -> list[tuple[str, list[str]]]:
         axes.append((key, values))
     return axes
 
+
+
+# ─────────────────────────── watch / multi / stats ───────────────────────────
+
+def _render_one(args, photo_p: Path, char01, out: Path, overlay_note: list) -> int:
+    """render 的核心一遍（watch/multi 共用）：返回退出码。"""
+    src01 = image_to_rgb01(photo_p)
+    height, width = src01.shape[:2]
+    cam, subj = _pose(args, width, height)
+    kw = _compose_kw(args)
+    shot = compose_shot(src01, char01, subj, cam, **kw)
+    base_arr = np.asarray(shot.shot)
+    img_u8 = base_arr if base_arr.dtype == np.uint8 else \
+        np.clip(base_arr.astype(np.float64) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    if getattr(args, "overlay", None):
+        from arcam.hud import draw_figure, draw_grid, draw_horizon, draw_hud_text
+        canvas = img_u8.copy()
+        if args.overlay == "grid":
+            canvas = draw_grid(canvas, cam, subj.lateral_m)
+        elif args.overlay == "horizon":
+            canvas = draw_horizon(canvas, cam, "地平线")
+        elif args.overlay == "figure":
+            canvas = draw_figure(canvas, cam, subj)
+        else:
+            canvas, hints = draw_hud_text(canvas, cam, subj, has_char=True,
+                                          canvas_size=(width, height))
+            if hints:
+                overlay_note.append("；".join(hints))
+        img_u8 = canvas
+    save_png(img_u8, out)
+    return 0
+
+
+def _sig_of(paths: list[Path]) -> tuple:
+    """(路径, mtime_ns, size) 签名——变了就重渲。"""
+    sig = []
+    for p in paths:
+        try:
+            st = p.stat()
+            sig.append((str(p), st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig.append((str(p), None, None))
+    return tuple(sig)
+
+
+def cmd_watch(args) -> int:
+    """监视素材变化自动重出图（轮询式；跨平台最稳）。"""
+    from arcam.i18n import t
+    photo_p = _need(args.photo, "背景照片")
+    char_p = _need(args.char, "立绘")
+    out = Path(args.out)
+    watched = [photo_p, char_p]
+    note: list = []
+
+    def run_once(reason: str) -> None:
+        t0 = time.perf_counter()
+        try:
+            char01 = image_to_rgba01(char_p)
+            note.clear()
+            _render_one(args, photo_p, char01, out, note)
+            ms = (time.perf_counter() - t0) * 1000.0
+            tail = ("｜" + note[0]) if note else ""
+            print(f"[{_stamp()}] {reason} → {out.name}（{ms:.0f} ms{tail}）", flush=True)
+        except Exception as exc:
+            print(f"[{_stamp()}] {reason} → 失败：{exc}", flush=True)
+
+    run_once("首次")
+    if args.once:
+        return 0
+    print(f"监视中（{photo_p.name} / {char_p.name}，每 {args.interval:g}s 轮询）—— Ctrl-C 退出",
+          flush=True)
+    last = _sig_of(watched)
+    try:
+        while True:
+            time.sleep(max(0.2, args.interval))
+            now = _sig_of(watched)
+            if now != last:
+                changed = [Path(a[0]).name for a, b in zip(now, last) if a != b]
+                run_once("变了：" + "、".join(changed))
+                last = _sig_of(watched)
+    except KeyboardInterrupt:
+        print("\n已停止监视。")
+    return 0
+
+
+def _stamp() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+#: multi 的 spec 键 → 参数名（与摆放参数同名；scale 是 char_scale 的简写）
+_MULTI_SPEC_KEYS = {
+    "x": "x", "d": "d", "h": "h", "hp": "hp", "feq": "feq",
+    "pitch": "pitch", "roll": "roll", "shot": "shot",
+    "scale": "char_scale", "char_scale": "char_scale", "frame": "frame",
+    "mode": "mode", "size_pct": "size_pct", "edge_bar": "edge_bar",
+    "rot_basis": "rot_basis", "tone": "tone",
+}
+
+
+def _parse_spec(text: str) -> dict:
+    """'x=0.6;d=3.2;scale=0.8' → {x:0.6, d:3.2, char_scale:0.8}（人话报错）。"""
+    out: dict = {}
+    for item in text.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise CliError(f"spec 段 {item!r} 不是 K=V 形式")
+        k, v = item.split("=", 1)
+        k = k.strip()
+        if k not in _MULTI_SPEC_KEYS:
+            raise CliError(f"spec 键 {k!r} 不认识（可用：{'/'.join(sorted(_MULTI_SPEC_KEYS))}）")
+        key = _MULTI_SPEC_KEYS[k]
+        if key in ("shot", "frame", "mode", "rot_basis"):
+            out[key] = v.strip()
+        elif key == "tone":
+            out[key] = v.strip().lower() in ("1", "true", "yes", "on")
+        elif key == "edge_bar":
+            out[key] = int(v)
+        else:
+            out[key] = float(v)
+    return out
+
+
+class _SpecArgs:
+    """把 spec dict 套到主 args 上得到的替身（只覆盖 spec 里有的键）。"""
+
+    def __init__(self, base, overrides: dict):
+        self._base = base
+        self._over = overrides
+
+    def __getattr__(self, name):
+        if name in self._over:
+            return self._over[name]
+        return getattr(self._base, name)
+
+
+def cmd_multi(args) -> int:
+    """多立绘合成：逐张出立绘层，按顺序 source-over 叠到照片上。
+
+    为什么不直接改 compose 画多个人：compose_shot 的契约是「一张立绘一套
+    落位」（六步管线、char_layer 语义都建立在单一主体上）。多立绘 = 多次调用
+    + 层合成，数学上与「一气画多个人」等价（source-over 对 alpha 可结合），
+    且不动冻结的单主体管线。
+    """
+    from arcam.i18n import t
+    if len(args.chars) < 1:
+        raise CliError("multi 至少要一张立绘")
+    if len(args.spec) > max(0, len(args.chars) - 1):
+        raise CliError(f"--spec 给了 {len(args.spec)} 套但只有 {len(args.chars) - 1} 张"
+                       "附加立绘需要覆盖（第一张用主参数）")
+    photo_p = _need(args.photo, "背景照片")
+    src01 = image_to_rgb01(photo_p)
+    height, width = src01.shape[:2]
+
+    base = np.clip(np.asarray(src01, dtype=np.float64), 0.0, 1.0)
+    if base.dtype != np.uint8 and base.max() <= 1.0 and src01.dtype != np.uint8:
+        pass                                          # src01 已是 01 口径
+    layers = []
+    for i, char_path in enumerate(args.chars):
+        char_p = _need(char_path, f"立绘 {i + 1}")
+        char01 = image_to_rgba01(char_p)
+        # 第一张用主参数；第 i 张用第 i-1 个 spec 覆盖
+        eff_args = args if i == 0 or not args.spec else _SpecArgs(args, _parse_spec(args.spec[i - 1]))
+        cam, subj = _pose(eff_args, width, height)
+        kw = _compose_kw(eff_args)
+        # 立绘层路径：src=None → 只出立绘+阴影的透明层（同裁切框）
+        layer, rect = compose_char_layer(char01, subj, cam, **kw)
+        layers.append((layer, rect, char_p.name))
+        print(f"  层 {i + 1}/{len(args.chars)}：{char_p.name}"
+              + (f"（spec：{args.spec[i - 1]}）" if i > 0 and args.spec else ""))
+
+    # 顺序 source-over：后画的盖先画的（与逐一合成等价）
+    out_img = base
+    for layer, _rect, _name in layers:
+        out_img = _over(out_img, layer)
+    img_u8 = np.clip(out_img * 255.0 + 0.5, 0, 255).astype(np.uint8) \
+        if out_img.dtype != np.uint8 else np.asarray(out_img)
+    out = Path(args.out)
+    if out.parent and not out.parent.exists():
+        out.parent.mkdir(parents=True, exist_ok=True)
+    save_png(img_u8, out)
+    print(f"已合成 {len(layers)} 层 → {out}（{width}×{height}）")
+    if args.scene:
+        # scene.json 记第一张的落位（多主体的配方格式原版没有，如实记主体一）
+        char01 = image_to_rgba01(_need(args.chars[0], "立绘 1"))
+        cam, subj = _pose(args, width, height)
+        shot = compose_shot(src01, char01, subj, cam, **_compose_kw(args))
+        save_scene(_scene_dict(args, char01, subj, cam, shot.rect,
+                               _placement(char01, subj, cam, args)),
+                   Path(args.scene))
+        print(f"配方 {args.scene}（记第一张立绘的落位；多主体无原版格式）")
+    return 0
+
+
+def cmd_stats(args) -> int:
+    """项目自报：规模/测试/子命令/模块一张表。"""
+    import arcam
+    # 源码树定位：src/arcam/cli.py → 仓库根；安装态没有 src/ 树，退回已安装
+    # 的 arcam 包目录（import arcam 的位置）——计数仍然有意义。
+    root = Path(__file__).resolve().parents[2]
+    src = root / "src" / "arcam"
+    if not src.is_dir():
+        src = Path(arcam.__file__).resolve().parent
+    py_files = sorted(src.rglob("*.py"))
+    loc = sum(len(p.read_text(encoding="utf-8").splitlines()) for p in py_files)
+    tests_dir = root / "tests"
+    test_files = sorted(tests_dir.glob("test_*.py")) if tests_dir.is_dir() else []
+    test_loc = sum(len(p.read_text(encoding="utf-8").splitlines()) for p in test_files)
+    js_files = (sorted((src / "webui").glob("*.js")) if (src / "webui").is_dir() else []) \
+        + (sorted((root / "docs").glob("*.js")) if (root / "docs").is_dir() else [])
+    js_loc = sum(len(p.read_text(encoding="utf-8").splitlines()) for p in js_files)
+    subs = sorted(_subcommand_names())
+    info = {
+        "version": _project_version(root),
+        "python_modules": len(py_files),
+        "python_loc": loc,
+        "test_files": len(test_files),
+        "test_loc": test_loc,
+        "js_files": len(js_files),
+        "js_loc": js_loc,
+        "public_api": len(arcam.__all__),
+        "i18n_entries": len(__import__("arcam.i18n", fromlist=["TXT"]).TXT),
+        "subcommands": subs,
+    }
+    if args.json:
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+        return 0
+    print(f"arcam {info['version']}")
+    print(f"  Python  {info['python_modules']:>3} 个模块 / {info['python_loc']:>5} 行")
+    print(f"  测试    {info['test_files']:>3} 个文件 / {info['test_loc']:>5} 行")
+    print(f"  网页    {info['js_files']:>3} 个 JS   / {info['js_loc']:>5} 行")
+    print(f"  公开 API {info['public_api']} 个导出 · 语言表 {info['i18n_entries']} 条")
+    print(f"  子命令  {len(subs)} 个：{' '.join(subs)}")
+    return 0
+
+
+def _subcommand_names() -> list[str]:
+    """从 build_parser 现抓子命令名（不硬编码，新增命令自动进 stats）。"""
+    parser = build_parser()
+    for action in parser._actions:
+        if hasattr(action, "choices") and isinstance(action.choices, dict):
+            if "cmd" in action.choices.get("metavar", "") or action.dest == "cmd":
+                return sorted(action.choices)
+    return []
+
+
+def _project_version(root: Path) -> str:
+    """版本号：优先 importlib.metadata（安装态唯一可靠来源），
+    回落 pyproject.toml 解析（源码树直接跑时）；都不可得给 '?'。"""
+    try:
+        from importlib.metadata import version as _pkg_version
+        return _pkg_version("arcam")
+    except Exception:
+        pass
+    try:
+        txt = (root / "pyproject.toml").read_text(encoding="utf-8")
+        m = re.search(r'^version\s*=\s*"([^"]+)"', txt, re.M)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return "?"
 
 def cmd_contact_sheet(args) -> int:
     """参数对比网格（FEATURE-SPEC §7）：笛卡尔积逐格渲染 + 带标注拼图。

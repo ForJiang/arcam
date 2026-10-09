@@ -84,7 +84,13 @@ arcam batch photos/ char.png -o out/ --pitch 10
 arcam recipe save 半身站姿 --mode free --size-pct 65 && arcam recipe apply 半身站姿
 # 8) 对比网格：扫一组参数出一张总览，肉眼挑最满意的一档
 arcam contact-sheet photo.jpg char.png -o sheet.png --vary d=3,4,5 --vary pitch=0,15
-# 9) LiDAR 环境数据：先诊断深度帧，再深度驱动出图（显式参数仍优先）
+# 9) 多立绘：一张照片里站多个人，各带各的站位
+arcam multi photo.jpg char1.png char2.png -o duo.png --spec "x=0.8;d=3.0;scale=0.75"
+# 10) 监视模式：素材改了自动重出图（调参不用反复敲命令）
+arcam watch photo.jpg char.png -o shot.png --pitch 12
+# 11) 项目自报：规模/测试/功能矩阵
+arcam stats
+# 12) LiDAR 环境数据：先诊断深度帧，再深度驱动出图（显式参数仍优先）
 arcam lidar inspect scan_0001.png [--json]
 arcam render photo.jpg char.png -o shot.png --depth scan_0001.png
 ```

@@ -30,6 +30,8 @@
   判定，与原版 `autoPrepareChar` 五步逐字对等。
 - **HUD 取景装饰**——地面网格 / 地平线 / 人体骨架 / 构图体检 11 条，网页侧
   实时浮层、CLI 侧 `arcam render --overlay` 可出图。
+- **MMD 3D 立绘**（网页版）——three.js 真透视渲染：脚踩地面、影子落地、
+  俯仰跟着走；四入口导入（zip/glb/文件夹/pmx）、姿势与主光/景深可调。
 
 依赖只有 numpy + pillow（抠图/LiDAR/视频为可选 extra）。
 

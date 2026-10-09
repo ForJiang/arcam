@@ -42,9 +42,24 @@ Python 核心拿无设备依赖的部分，两个网页拿浏览器原生能力�
 - **修图线**：纯色底/自动裁边/还原三按钮 + 装图后自动修图链（docs 侧为
   `matte-tools.js` 同算法 JS 移植）+ 全身/半身弹窗 + 拖动提示 tip。
 
+### 新增（MMD 3D 层，Wave 2）
+
+- **docs（Pages）版新增 3D 立绘**：vendor `mmd/`（three.js + loaders + controls +
+  poses.json，2.8MB）+ `mmd.js`（1107 行，原版 1:1 搬运）。`composeShot` 开
+  `charDraw` 钩子（加法式，不动冻结 API），3D 激活时 WebGL 层画进 full 画布
+  （帧坐标 0,0），裁切/落位/scene.json/导出全部原样走——"预览 = 出图"照旧。
+- 四入口模型导入（.zip / .glb / 文件夹 / 单个 .pmx，贴图池自动配）、多模型列表
+  切换、4 个姿势、主光方位/高度/对焦/虚化四滑块；相机矩阵按 arcam 投影公式拼
+  （mmd.js 文件头：与 project() 偏差 2.27e-13 px）。
+- 引擎懒加载（首次点 3D 才下 three.js）；file:// 下 CORS 拦截给人话提示；
+  无模型/渲染失败不静默失败也不叠 2D 图。
+- 接线门禁 `tests/test_webui_static.py::test_mmd_3d_wired`（vendor 在位、UI
+  齐全、真实 API 调用、charDraw 钩子接通）；Node 打桩验 API 表面（14 方法 +
+  6 getter、poses.json 4 个姿势）；浏览器实测开关/滑块/无模型降级不抛错。
+- 能力矩阵：3D 属网页版专属（与 LiDAR 属本地版对偶）——Python 核心不做 WebGL。
+
 ### 备注
 
-- MMD 3D 层（mmd.js + mmd/ 2.8MB）排期在 Wave 2，未含在本版。
 - 半身判定的微糊内核差异记为 SPEC §5 已知微偏差（刀锋阈值，flag 仅选默认模式）。
 
 ## [1.1.2] — 2026-10-10

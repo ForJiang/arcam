@@ -248,6 +248,10 @@ function composeParams(p) {
     edgeBar: p.edge_bar,
     tone: !!p.tone
   };
+  if (state.use3D && window.ARCAM_MMD && window.ARCAM_MMD.ready) {
+    kw.charDraw = draw3DInto;      // FEATURE-SPEC §5：3D 层替换 drawInto
+  }
+  return kw;
 }
 
 function scheduleRender() {
@@ -646,6 +650,7 @@ function init() {
   initLang();
   bindEditLine();
   bindLive();
+  bind3D();
   $('hud-canvas').hidden = false;
   drawHudOverlay();
 
@@ -768,6 +773,158 @@ function applyCharKind(half) {
   syncModeVisibility();
   $('kind-modal').hidden = true;
   renderNow();
+}
+
+
+/* ================= 12.5 MMD 3D 层（FEATURE-SPEC §5） =================
+ * 它**不改 2D 那条路的任何东西**：mmd.js（经典 script，挂 window.ARCAM_MMD）把模型
+ * 按 arcam 的投影公式渲到一块离屏画布上，这里通过 composeParams 的 charDraw 挂钩
+ * 把它画进 composeShot/composeCharLayer 的 full 画布（帧坐标 0,0），之后的裁切 /
+ * 落位 / scene.json / 导出全部原样走 —— "预览 = 出图"照旧成立。
+ * 引擎未就绪（文件没发布 / file:// 被 CORS 拦 / 没导入模型）时全部路径给人话提示，
+ * 不静默失败；charDraw 内部渲染失败则只记落位（层不回退 2D —— 3D 开着却画 2D 会
+ * 双重叠图，原版 draw3DLayer 返 false 时由 draw() 决定回退，本管线在钩子外层）。
+ */
+
+//: 3D 开关与姿势下标（原版 use3D / pose3D，index.html:1511；-1 = 静止）
+state.use3D = false;
+state.pose3D = -1;
+
+//: composeShot 的 charDraw 钩子实现：把 WebGL 层画进 full 画布。
+//  原版 draw3DLayer 的对译（index.html:1692-1710）——几何/裁切/落位与 2D 路径
+//  同一套投影（mmd.js 的相机矩阵按 arcam 投影公式拼，见其文件头注释）。
+function draw3DInto(full, rect) {
+  const M3D = window.ARCAM_MMD;
+  const g = full.getContext('2d');
+  const W = full.width, H = full.height;
+  const p = state.params;
+  const cam = { W: W, H: H, h: p.h, feq: p.feq, pitch: p.pitch, roll: p.roll };
+  const f = window.arcamHud ? window.arcamHud.focalPx(W, H, p.feq) : 0;
+  const ms = M3D.render({
+    W: W, H: H, f: f,
+    camH: p.h, pitch: p.pitch, roll: p.roll,
+    x: p.x, d: p.d, hp: p.hp, scale: p.char_scale,
+    pose: state.pose3D, env: null, envFrame: state.photoCanvasFull
+  });
+  if (!ms) return placementForScene(cam);      // 渲失败：只记落位，不叠层
+  const lay = M3D.canvas();
+  if (lay) g.drawImage(lay, 0, 0, W, H);
+  return placementForScene(cam);
+}
+
+//: scene.json 仍记 2D 落位（模型站在同一个地面点；配方与 2D 路径同构）
+function placementForScene(cam) {
+  const core = window.arcamCore;
+  const p = state.params;
+  const subj = { hp: p.hp, d: p.d, x: p.x };
+  return core.currentPlacement(
+    state.charCanvas ? state.charCanvas.width : 120,
+    state.charCanvas ? state.charCanvas.height : 200, subj, cam,
+    { mode: p.mode, sizePct: p.size_pct, charScale: p.char_scale,
+      rotBasis: p.rot_basis, shot: p.shot, edgeBar: p.edge_bar });
+}
+
+function d3dNote(msg, isError) {
+  const el = $('d3dNote');
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = !msg;
+  el.classList.toggle('error', !!isError);
+}
+
+//: 模型列表 + 姿势行（一个包里多个 pmx 时列出来；姿势来自 mmd/poses.json）
+function refresh3dRows() {
+  const M3D = window.ARCAM_MMD;
+  const on = !!(state.use3D && M3D && M3D.ready);
+  $('d3dLight').hidden = !on;
+  if (!on) { $('model3dRow').hidden = true; $('pose3dRow').hidden = true; return; }
+  const names = M3D.modelNames();
+  const mrow = $('model3dRow');
+  mrow.textContent = '';
+  names.forEach((name, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = name;
+    b.className = (i === M3D.modelIndex()) ? 'on' : '';
+    b.addEventListener('click', async () => {
+      await M3D.switchModel(i);
+      refresh3dRows();
+      renderNow();
+    });
+    mrow.appendChild(b);
+  });
+  $('model3dLabel').hidden = names.length < 2;
+  mrow.hidden = names.length < 2;
+  const prow = $('pose3dRow');
+  prow.textContent = '';
+  const mk = (label, idx) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.className = (state.pose3D === idx) ? 'on' : '';
+    b.addEventListener('click', () => { state.pose3D = idx; refresh3dRows(); renderNow(); });
+    return b;
+  };
+  prow.appendChild(mk('静止', -1));
+  M3D.poseNames().forEach((name, i) => prow.appendChild(mk(name, i)));
+  const hasPose = M3D.poseNames().length > 0;
+  $('pose3dLabel').hidden = !hasPose;
+  prow.hidden = !hasPose;
+}
+
+//: 导入模型（zip/glb/文件夹/pmx）。load 成功返 true；统计信息在 M3D.stats。
+async function do3DImport(src, pmxIdx) {
+  const M3D = window.ARCAM_MMD;
+  if (!M3D) { d3dNote(t('note.3dNoEngine'), true); return; }
+  d3dNote(t('note.3dLoading'));
+  try {
+    const ok = await M3D.load(src, (stage, pct) =>
+      d3dNote(t('note.3dLoading') + ' ' + stage + (pct ? ' ' + pct + '%' : '')), pmxIdx);
+    if (!ok) { d3dNote(t('note.3dFail', M3D.error || '未知错误'), true); return; }
+    state.use3D = true;
+    $('t3d').classList.add('on');
+    const st = M3D.stats;
+    d3dNote(t('note.3dOk', M3D.srcName, st.tris, st.bones, st.poses));
+    refresh3dRows();
+    renderNow();
+  } catch (e) {
+    d3dNote(t('note.3dFail', (e && e.message) || e), true);
+  }
+}
+
+function bind3D() {
+  $('t3d').addEventListener('click', () => {
+    state.use3D = !state.use3D;
+    $('t3d').classList.toggle('on', state.use3D);
+    refresh3dRows();
+    renderNow();
+  });
+  $('f3d').addEventListener('click', () => $('f3dFile').click());
+  $('f3dFile').addEventListener('change', (e) => {
+    if (e.target.files && e.target.files[0]) do3DImport(e.target.files[0]);
+  });
+  $('f3dDirBtn').addEventListener('click', () => $('f3dDir').click());
+  $('f3dDir').addEventListener('change', (e) => {
+    const files = e.target.files;
+    if (!files || !files.length) return;
+    // 文件夹导入：整包喂给 mmd.js（它自己挑 pmx 与贴图；安卓退化成多选）
+    do3DImport(Array.from(files), 0);
+  });
+  // 3D 专属控件（原版 az/el/focus/dof 四滑块）。mmd.js 的光照参数是
+  // params getter 返回的 L 对象引用——直接改字段即生效（无 setLight）。
+  const bind3 = (id, key, fmt) => {
+    const el = $(id), out = $('o' + id);
+    el.addEventListener('input', () => {
+      const v = parseFloat(el.value);
+      if (window.ARCAM_MMD && window.ARCAM_MMD.params) window.ARCAM_MMD.params[key] = v;
+      if (out) out.textContent = fmt(v);
+      renderNow();
+    });
+  };
+  bind3('az3d', 'keyAz', (v) => v.toFixed(0) + '°');
+  bind3('el3d', 'keyEl', (v) => v.toFixed(0) + '°');
+  bind3('focus3d', 'focus', (v) => v.toFixed(1) + 'm');
+  bind3('dof3d', 'dof', (v) => v.toFixed(2));
 }
 
 /* ================= 12. 实时相机 + HUD（FEATURE-SPEC §4/§2） ================= */

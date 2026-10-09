@@ -168,6 +168,26 @@ def _js_dom_refs(js):
     for suffix in set(re.findall(r"'p-'\s*\+\s*key\s*\+\s*'([^']+)'", js)):
         for key in NUMERIC_KEYS:
             refs.add("p-" + key + suffix)
+    # 位置感知的 binder 提取（这些函数的 id 参数位置各不相同，动态 $() 看不到）：
+    #   bind3(id, key, …)            首参是 id；其输出 span 是 'o' + id
+    #   bindDrop(id, inputId, kind)   前两参是 id
+    #   bindSelect(key, selectId)     次参是 id（首参是 param key）
+    #   bindSlider(key, rngId, valId, fmt)  后两参是 id
+    def _args_of(fn):
+        out = []
+        for m in re.finditer(r"\b" + fn + r"\(([^)]*)\)", js):
+            out.append(re.findall(r"['\"]([^'\"]+)['\"]", m.group(1)))
+        return out
+    for a in _args_of("bind3"):
+        if a:
+            refs.add(a[0]); refs.add("o" + a[0])
+    for a in _args_of("bindDrop"):
+        refs.update(a[:2])
+    for a in _args_of("bindSelect"):
+        if len(a) > 1:
+            refs.add(a[1])
+    for a in _args_of("bindSlider"):
+        refs.update(a[1:3])
     # 辅助函数的字面量 id 参数
     for a, b in re.findall(r"bindDrop\('([^']+)',\s*'([^']+)'", js):
         refs.update((a, b))
@@ -429,12 +449,22 @@ def test_pages_files_exist_and_referenced():
     assert 'type="module"' in html
     assert not re.search(r'(?:src|href)\s*=\s*["\']https?://', html), "index.html 出现外链资源"
     assert not re.search(r'(?:src|href)\s*=\s*["\']/', html), "index.html 出现绝对路径资源"
-    # index.html 引 5 个 script：i18n/matte-tools/hud/live 四个普通 script
-    # （window 挂钩，按依赖顺序加载）+ app.js 一个 module；两个管线模块
-    # （arcam-core/arcam-render）仍由 app.js 动态 import，不写死在 html 里。
-    assert html.count("<script") == 5
-    for direct in ("i18n.js", "matte-tools.js", "hud.js", "live.js"):
-        assert f'src="./{direct}"' in html, f"index.html 缺 {direct} 引用"
+    # index.html 引 7 个 script：i18n/matte-tools/hud/live/mmd.js 五个普通 script
+    # （window 挂钩，按依赖顺序加载）+ app.js 一个 module + importmap 一个。
+    # C1 第一阶段新增的两个：mmd.js 是 3D 立绘运行时（index.html 里的经典 script，
+    # 内部按需动态 import three）；importmap 给它（以及 GLTFLoader/three-mmd 里的
+    # 裸模块说明符 'three'）映射到本地 ./mmd/three.module.js —— 零外链的前提。
+    # 两个管线模块（arcam-core/arcam-render）仍由 app.js 动态 import，不写死在 html 里。
+    assert html.count("<script") == 7
+    for direct in ("i18n.js", "matte-tools.js", "hud.js", "live.js", "mmd.js"):
+        assert f'"./{direct}"' in html, f"index.html 缺 {direct} 引用"
+    # importmap 必须在任何动态 import 之前落地，且只映射同目录本地路径
+    assert html.count('type="importmap"') == 1
+    assert html.index('type="importmap"') < html.index('src="./')
+    assert './mmd/three.module.js' in html and '"three/addons/":"./mmd/"' in html
+    # mmd.js 用 document.currentScript 拼资源路径 —— 必须是经典 script，不能 module
+    assert re.search(r'<script src="\./mmd\.js" defer></script>', html), \
+        "mmd.js 必须是经典 script（module 下 document.currentScript 是 null）"
     assert html.count('rel="stylesheet"') == 1
     js = files["app.js"]
     for mod in PAGES_MODULES:
@@ -596,4 +626,33 @@ def test_i18n_tables_match_between_python_and_js():
         f"仅 Python {sorted(set(PY_TXT) - set(js_txt))[:5]}"
     for key, (zh, en) in PY_TXT.items():
         assert list(js_txt[key]) == [zh, en], f"{key} 两侧文案不同"
-    assert len(PY_TXT) == 177, f"表条数变了：{len(PY_TXT)}（原版 160 + webui 17）"
+    assert len(PY_TXT) == 177, f"表条数变了：{len(PY_TXT)}（原版 160 + webui 17；3D 五键原版就有）"
+
+
+def test_mmd_3d_wired():
+    """MMD 3D 层接线（FEATURE-SPEC §5）：vendor 在位、UI 齐全、钩子接通。
+
+    真模型 E2E 需要用户自带 .zip/.glb/.pmx（原版模型也不随仓库分发），
+    这里钉住**接线**：mmd.js 与 mmd/ 资源被 index.html 引用、app.js 用真实
+    API（modelNames/modelIndex/poseNames/params）接线、composeShot 有 charDraw 钩子。
+    """
+    html = (DOCS / "index.html").read_text(encoding="utf-8")
+    js = (DOCS / "app.js").read_text(encoding="utf-8")
+    render = (DOCS / "arcam-render.js").read_text(encoding="utf-8")
+    # ① vendor 与 script 引用
+    assert (DOCS / "mmd.js").is_file(), "docs/mmd.js 缺失"
+    assert (DOCS / "mmd" / "three.module.js").is_file(), "docs/mmd/three.module.js 缺失"
+    assert (DOCS / "mmd" / "poses.json").is_file(), "docs/mmd/poses.json 缺失"
+    assert 'src="./mmd.js"' in html, "index.html 没引 mmd.js"
+    # ② 3D UI（原版移植的那套 id）
+    for cid in ("t3d", "f3d", "f3dFile", "f3dDir", "model3dRow", "pose3dRow",
+                "az3d", "el3d", "focus3d", "dof3d", "d3dLight", "d3dNote"):
+        assert f'id="{cid}"' in html, f"3D UI 缺 {cid}"
+    # ③ app.js 用 mmd.js 的真实 API 接线
+    for call in ("ARCAM_MMD", "modelNames()", "modelIndex()", "poseNames()",
+                 "switchModel(", "M3D.render(", "M3D.canvas()"):
+        assert call in js, f"app.js 缺 3D 调用 {call}"
+    # ④ composeShot 的 charDraw 钩子（3D 替换 drawInto 的唯一入口）
+    assert "charDraw" in render and "p.charDraw" in render, \
+        "arcam-render.js 的 composeShot 没有 charDraw 钩子"
+    assert "charDraw" in js and "draw3DInto" in js, "app.js 没接 charDraw"

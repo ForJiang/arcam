@@ -279,6 +279,27 @@ button:hover { background: var(--btn-bg-hover); }
 .fold > .fold-tip { font-size: 12px; color: var(--muted); margin: 8px 0 10px; }
 .fold .btn-row { margin: 0; }
 
+/* ---------- 3D 立绘折叠区（C1；上游 index.html:258-306 / 1508-1710） ---------- */
+/* 选中态：只换字色 + 边框色（原版 .btns .on 的克制版，不填充） */
+.fold button.on { color: var(--accent); border-color: var(--accent); }
+/* 切换模型时的进行态：等 M3D.switchModel/dropModel 那一下 */
+.fold button[data-busy] { opacity: .55; cursor: progress; }
+/* 行标题（模型 / 姿势）：12px muted，跟 .hint 同规格但不当提示 */
+.fold .sub { font-size: 12px; color: var(--hint); margin: 10px 0 4px; }
+/* 参数滑条行：标签 + 滑块 + 读数一行（原版 .row，minmax 让滑块可压缩） */
+.d3d-row {
+  display: grid;
+  grid-template-columns: minmax(64px, auto) 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.d3d-row label { font-size: 13px; color: var(--label-fg); }
+.d3d-row input[type="range"] { width: 100%; height: var(--ctrl-h); accent-color: var(--accent); }
+.d3d-row .val { font-size: 12px; color: var(--muted); min-width: 44px; text-align: right; }
+/* 3D 面板的报错（note.3dFail / note.3dDrawFail）：红字，跟状态条同一 token */
+.hint.error { color: var(--danger); }
+
 /* ---------- 全身/半身弹窗（index.html:443-460） ---------- */
 .kind-modal {
   position: fixed; inset: 0; z-index: 10;

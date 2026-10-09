@@ -5,8 +5,8 @@
 本身不翻。表内 HTML 标签（<b>/<br>/<span>）是网页侧 innerHTML 用的，
 CLI 侧只取纯文本键。
 
-条目顺序 = 原版 TXT 的书写顺序，之后是 webui 新增键（追加不重排——
-对译审查按行号对照）。
+条目顺序 = 原版 TXT 的书写顺序，之后是 webui 新增键（追加不重排——对译审查
+按行号对照）。3D（MMD）五键原版就有，用原译文。
 """
 
 from __future__ import annotations

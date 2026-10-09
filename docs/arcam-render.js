@@ -367,6 +367,10 @@ function normalizeParams(params) {
     ambient: p.ambient === undefined ? null : p.ambient,
     charName: (p.charName === undefined || p.charName === null) ? DEFAULT_CHAR_NAME : String(p.charName),
     char: (p.char === undefined || p.char === null) ? null : p.char,
+    // 3D 立绘挂钩点（app.js 的 draw3DInto）：函数原样透传，缺省 null。
+    // ⚠ 必须在这儿放行 —— 少了这一条，调用方传进来的 charDraw 会被 normalizeParams
+    //   丢掉，composeShot/composeCharLayer 里的分支永远不生效（静默失效）。
+    charDraw: typeof p.charDraw === 'function' ? p.charDraw : null,
   };
 }
 
@@ -435,8 +439,12 @@ export function composeShot(photoCanvas, charImg, subj, cam, params) {
     g.drawImage(photoCanvas, 0, 0, W, H);
   }
   // ③ 采光：v1 不做（params.light / params.tone 接受但忽略，light 恒 null）
-  // ④ 画立绘（先阴影后图）
-  const c = drawInto(full, charImg, subj, cam, p, rect);
+  // ④ 画立绘（先阴影后图）。params.charDraw 是 3D 层的挂钩点（FEATURE-SPEC §5）：
+  //    给了就用它画（mmd.js 的 WebGL 层），返回的落位对象仍进 scene.json；
+  //    没给走原 drawInto。钩子签名 (full, rect) -> placement。
+  const c = (typeof p.charDraw === 'function')
+    ? p.charDraw(full, rect)
+    : drawInto(full, charImg, subj, cam, p, rect);
   // ⑤ 小数偏移裁切（越界目标像素保持透明黑）
   const shot = cropOffset(full, rect);
   // ⑥ 配方 + 光（恒 null）
@@ -459,7 +467,10 @@ export function composeCharLayer(charImg, subj, cam, params) {
   const { W, H } = camDims(cam);
   const rect = frameRect(p.frame, W, H);
   const full = makeCanvas(W, H);          // 透明底：原版空 canvas 天然带 alpha
-  drawInto(full, charImg, subj, cam, p, rect);
+  // ④ 画立绘（先阴影后图）。params.charDraw 是 3D 层的挂钩点（同 composeShot）：
+  //    3D 开着时这一层就是 MMD 的透明层（模型自身的 alpha），同一个裁切框。
+  if (typeof p.charDraw === 'function') p.charDraw(full, rect);
+  else drawInto(full, charImg, subj, cam, p, rect);
   const layer = cropOffset(full, rect);
   return { layer: layer, rect: rect };
 }

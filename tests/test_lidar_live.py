@@ -37,12 +37,18 @@ def _free_port() -> int:
 
 def _collect_async(port: int, out_dir: str | None = None,
                    max_frames: int | None = None) -> list[tuple[dict, np.ndarray]]:
-    """后台 daemon 线程跑 serve()，收到的帧 append 进列表并返回该列表。
-    serve() 在调用时即 bind+listen，无需 sleep 等就绪。"""
+    """后台 daemon 线程迭代 serve()，收到的帧 append 进列表并返回该列表。
+
+    serve() 必须在**调用线程**里调用：它的 bind+listen 发生在调用时
+    （yield 在内层 _frames()，外层是普通函数——lidar_live.py:219 的契约），
+    在后台线程里才调用就得和「立即连接」赛跑，偶发 ConnectionRefused。
+    这里调用线程建好 generator（监听已就绪），后台线程只负责迭代。
+    """
     received: list[tuple[dict, np.ndarray]] = []
+    frames = serve(port, HOST, out_dir, max_frames)     # 调用时即 bind+listen
 
     def _loop() -> None:
-        for frame in serve(port, HOST, out_dir, max_frames):
+        for frame in frames:
             received.append(frame)
 
     threading.Thread(target=_loop, name='serve-loop', daemon=True).start()

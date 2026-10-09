@@ -2,6 +2,28 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.2] — 2026-10-10
+
+v1.1.1 之后的稳定性收尾：全量套件批量压测（每轮 12+ 遍）定位并修掉最后两个
+偶发失败，均为连接层竞态。
+
+### 修复
+
+- **`lidar serve` 测试辅助函数违反 serve() 的调用契约**（test_lidar_live.py）：
+  `serve()` 的 bind+listen 发生在**调用时**（yield 在内层 `_frames()`，外层是
+  普通函数，lidar_live.py:219 的文档契约），但辅助函数把调用放在后台线程里、
+  主线程立即连接 → 偶发 `ConnectionRefused`。改为调用线程建 generator（监听
+  就绪后再连），后台线程只迭代。
+- **`lidar_live` listen backlog 从 1 提到 8**：协议是单客户端顺序帧，但客户端
+  重连/探测连接常与上一个连接的关闭竞态，backlog=1 时新连接直接被拒。与
+  v1.1.1 的 webapp backlog 修复同类。
+
+### 备注
+
+- 两处修后：目标测试定向 30 次 0 失败；全量套件连续 12 遍全绿（修复前合计
+  约 3% 概率挂）。
+- 版本 1.1.1 → 1.1.2；wheel/sdist 重建。
+
 ## [1.1.1] — 2026-10-10
 
 补验版本：把 v1.1.0 未覆盖的可选依赖路径（HEIC / EXR 深度、mp4 视频）在本机
@@ -109,5 +131,6 @@ cli/video/matting · depth/plane/lidar/webapp · webui/Pages JS），修复 16 �
   `point(u,v,1)·depth`），与径向（cosθ）解释的仲裁结论一致，有回归测试钉住。
 - scene.json 与原版 1:1 同构（字段序/单位/toFixed 口径），未因本次审计变动。
 
+[1.1.2]: https://github.com/ForJiang/arcam/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/ForJiang/arcam/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/ForJiang/arcam/compare/v1.0.0...v1.1.0

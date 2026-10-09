@@ -224,7 +224,10 @@ def serve(
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((host, port))
-    listener.listen(1)
+    # backlog 8（不是 socketserver 那种默认 5、更不是 1）：协议是单客户端顺序帧，
+    # 但客户端重连/探测连接常常和上一个连接的关闭竞态，backlog=1 时新连接直接被
+    # 拒（ConnectionRefused）。8 个待接连接对单客户端协议绰绰有余。
+    listener.listen(8)
     out_path = Path(out_dir) if out_dir is not None else None
     if out_path is not None:
         out_path.mkdir(parents=True, exist_ok=True)

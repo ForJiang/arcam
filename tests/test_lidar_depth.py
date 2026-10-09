@@ -403,6 +403,154 @@ def test_exr_round_trip_when_installed(tmp_path: Path) -> None:
 
 
 def test_heic_depth_images_path_when_installed(tmp_path: Path) -> None:
-    """装有 pillow-heif 时：information 路径 dispatch 可达（真机 HEIC 由用户提供）。"""
+    """装有 pillow-heif 时：真 HEIC 容器 + 注入 pillow-heif 真实返回结构的
+    ``depth_images``，逐表示类型验证 Python 侧转换逻辑。
+
+    pillow-heif 1.8 只暴露读侧 API（HeifDepthImage 是 c_image 的包装），
+    合成不了带 Apple 辅图的真机文件；这里用**真 HEIC 容器**（RGB 主图真由
+    libheif 编码）+ 与 pillow-heif 逐字段同构的假 depth_images 注入，
+    覆盖 depth.py 里全部转换分支（rep 0/1/2/3 + 两条错误路径）。
+    pillow-heif 自身的辅图提取是第三方代码，不在本测试范围。
+    """
     pytest.importorskip('pillow_heif')
-    pytest.skip('pillow-heif 已装：需真实人像 HEIC 才能跑，见 README「怎么从 iPhone 拿到深度」')
+    import pillow_heif
+    pillow_heif.register_heif_opener()      # 否则 PIL 不认 HEIF 保存格式
+    from arcam.depth import _load_heic_depth
+
+    # ── 真 HEIC 容器：主图真过 libheif 编解码 ──
+    rgb = np.zeros((48, 64, 3), np.uint8)
+    rgb[..., 0] = 180
+    rgb[10:30, 20:40] = (90, 140, 200)
+    heic_path = tmp_path / 'portrait.heic'
+    Image.fromarray(rgb, 'RGB').save(heic_path, format='HEIF')
+    assert heic_path.is_file() and heic_path.stat().st_size > 0
+
+    class _FakeDepth:
+        """ pillow-heif HeifDepthImage 的字段级同构：.info['metadata'] + .to_pillow()。"""
+
+        def __init__(self, arr: np.ndarray, metadata: dict):
+            self.info = {'metadata': metadata}
+            self._arr = arr
+
+        def to_pillow(self) -> Image.Image:
+            im = Image.fromarray(self._arr)
+            im.info = dict(self.info)      # 真机 to_pillow 会把 info 复制过去
+            return im
+
+    class _FakeHeif:
+        """Image.open 的返回同构：.info['depth_images'] + 上下文管理协议。"""
+
+        def __init__(self, depths):
+            self.info = {'depth_images': depths}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def patch_open(depths, monkeypatch):
+        real_open = Image.open
+
+        def fake_open(path, *a, **kw):
+            if str(path).endswith(('.heic', '.heif')):
+                return _FakeHeif(depths)
+            return real_open(path, *a, **kw)
+
+        monkeypatch.setattr(Image, 'open', fake_open)
+
+    h, w = 48, 64
+    # ── rep 2 UNIFORM_Z：深度即米，直接用 ──
+    z2 = np.full((h, w), 4.0, dtype=np.float32)
+    z2[0, 0] = 0.0                          # 0 → NaN（§1 无效口径）
+    monkeypatch = pytest.MonkeyPatch()
+    patch_open([_FakeDepth(z2, {'representation_type': 2})], monkeypatch)
+    try:
+        frame = _load_heic_depth(heic_path)
+    finally:
+        monkeypatch.undo()
+    assert frame.depth_m.shape == (h, w)
+    assert float(frame.depth_m[10, 20]) == pytest.approx(4.0)
+    assert math.isnan(float(frame.depth_m[0, 0]))
+    # 内参按辅助图尺寸估计（估计非实测，LIDAR-SPEC §2）：cx/cy 落在图心
+    assert frame.fx > 0.0 and frame.fy > 0.0
+    assert frame.cx == pytest.approx(w / 2.0) and frame.cy == pytest.approx(h / 2.0)
+    # 外参 roll/pitch/height 取 None，交平面拟合解出（LIDAR-SPEC §2）
+    assert frame.roll_deg is None and frame.pitch_deg is None
+    assert frame.height_m is None
+
+    # ── rep 0 UNIFORM_INVERSE_Z：1/m → m ──
+    inv = np.full((h, w), 0.25, dtype=np.float32)     # 1/0.25 = 4m
+    inv[0, 0] = 0.0                                   # 0 → NaN（除零保护区）
+    monkeypatch = pytest.MonkeyPatch()
+    patch_open([_FakeDepth(inv, {'representation_type': 0})], monkeypatch)
+    try:
+        frame = _load_heic_depth(heic_path)
+    finally:
+        monkeypatch.undo()
+    assert float(frame.depth_m[10, 20]) == pytest.approx(4.0)
+    assert math.isnan(float(frame.depth_m[0, 0]))
+
+    # ── rep 1 UNIFORM_DISPARITY：归一化视差 × focalPixelPitch → 米 ──
+    # 手算：focal_px = _estimate_pinhole(w, h)[0]；disparity_px = raw·focal；
+    #       depth = focal·pitch / disparity_px。raw=0.5, pitch=0.001 时
+    #       depth = focal·0.001/(0.5·focal) = 0.002m —— focal 约掉，只验量纲路径。
+    disp = np.full((h, w), 0.5, dtype=np.float32)
+    disp[0, 0] = 0.0                                  # disparity 0 → NaN
+    monkeypatch = pytest.MonkeyPatch()
+    patch_open([_FakeDepth(disp, {'representation_type': 1,
+                                  'focalPixelPitch': 0.001})], monkeypatch)
+    try:
+        frame = _load_heic_depth(heic_path)
+    finally:
+        monkeypatch.undo()
+    assert float(frame.depth_m[10, 20]) == pytest.approx(0.002)
+    assert math.isnan(float(frame.depth_m[0, 0]))
+
+    # ── rep 1 缺 focalPixelPitch → 人话 RuntimeError（不许猜量纲） ──
+    monkeypatch = pytest.MonkeyPatch()
+    patch_open([_FakeDepth(disp, {'representation_type': 1})], monkeypatch)
+    try:
+        with pytest.raises(RuntimeError, match='focalPixelPitch'):
+            _load_heic_depth(heic_path)
+    finally:
+        monkeypatch.undo()
+
+    # ── rep 3 NON_UNIFORM_DISPARITY → 人话 RuntimeError ──
+    monkeypatch = pytest.MonkeyPatch()
+    patch_open([_FakeDepth(disp, {'representation_type': 3})], monkeypatch)
+    try:
+        with pytest.raises(RuntimeError, match='非均匀视差'):
+            _load_heic_depth(heic_path)
+    finally:
+        monkeypatch.undo()
+
+    # ── 无人像辅图 → LookupError 包成 RuntimeError（绝不静默回落到 RGB 主图） ──
+    monkeypatch = pytest.MonkeyPatch()
+    patch_open([], monkeypatch)
+    try:
+        with pytest.raises(RuntimeError, match='没有人像深度辅图'):
+            _load_heic_depth(heic_path)
+    finally:
+        monkeypatch.undo()
+
+    # ── 辅图形状非二维 → 人话 RuntimeError（不外泄裸栈、不静默回落 RGB 主图）。
+    # 注：3D 数组在 to_pillow() 就被 PIL 挡下（TypeError），由外层 try 包成
+    # 「提取辅助深度图失败」——ndim 检查是 to_pillow 成功后仍非二维时的防御分支。
+    monkeypatch = pytest.MonkeyPatch()
+    patch_open([_FakeDepth(np.zeros((h, w, 3), np.float32),
+                           {'representation_type': 2})], monkeypatch)
+    try:
+        with pytest.raises(RuntimeError, match='(提取辅助深度图失败|期望二维)'):
+            _load_heic_depth(heic_path)
+    finally:
+        monkeypatch.undo()
+
+    # ── representation_type 缺省按 2（UNIFORM_Z）兜底 ──
+    monkeypatch = pytest.MonkeyPatch()
+    patch_open([_FakeDepth(z2, {})], monkeypatch)
+    try:
+        frame = _load_heic_depth(heic_path)
+    finally:
+        monkeypatch.undo()
+    assert float(frame.depth_m[10, 20]) == pytest.approx(4.0)

@@ -292,10 +292,17 @@ class Store:
 # ---------------------------------------------------------------- 服务对象
 
 class WebServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer + 内存态 + 渲染锁（WEB-SPEC §1 线程模型）。"""
+    """ThreadingHTTPServer + 内存态 + 渲染锁（WEB-SPEC §1 线程模型）。
+
+    ``request_queue_size`` 是 listen backlog：socketserver 默认只有 5，浏览器
+    一次会并发拉 html/css/js/favicon + API 请求，8 路以上突发时内核直接 reset
+    超出的连接（实测 ConnectionResetError，测试 8 线程并发下必现级抖动）。
+    64 是 stdlib 文档示例同量级取值，对本机单用户服务绰绰有余。
+    """
 
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 64
 
     def __init__(self, address, handler_cls, *, open_browser: bool = True):
         super().__init__(address, handler_cls)

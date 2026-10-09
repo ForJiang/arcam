@@ -2,6 +2,44 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.1] — 2026-10-10
+
+补验版本：把 v1.1.0 未覆盖的可选依赖路径（HEIC / EXR 深度、mp4 视频）在本机
+真跑一遍，过程中抓到并修掉 2 个真 bug，消掉 1 个测试抖动。
+
+### 修复
+
+- **HEIC 人像深度量程预检把 0 值无效像素误判为「疑似标定差异」**（depth.py）：
+  预检在 `_make_frame` 的无效值归一**之前**跑，真机人像 HEIC 的无效像素大量
+  编码为 0，直接把 min 打成 0 撞上误导性报错——整份深度图被拒。现在预检前
+  先按 §1 口径归一（0/负/非有限 → NaN），与 PNG16/EXR 路径一致。
+- **web 服务 listen backlog 只有 5**（webapp.py）：`socketserver` 默认值，
+  浏览器一次并发拉 html/css/js/favicon + API 超出即被内核 reset
+  （实测 `ConnectionResetError [Errno 54]`）。提到 64——这也让 8 线程并发
+  渲染测试从「全套件负载下约 1/3 概率挂」变成 10/10 稳定。
+
+### 测试与工具
+
+- `tests/test_lidar_depth.py` 的 HEIC skip 转正：真 HEIC 容器（RGB 主图过
+  libheif 编码）+ 按 pillow-heif 真实返回结构注入 `depth_images`，覆盖
+  rep 0/1/2/3 四种表示类型与全部错误路径（pillow-heif 1.8 只暴露读侧 API，
+  合成不了带 Apple 辅图的真机文件，辅图提取本身是第三方代码不在覆盖范围）。
+- 新增 `tools/lidar-e2e-smoke.py`：可验证的 LiDAR 闭环冒烟——按 `place()`
+  逆投影合成已知真值（高 1.5m/俯角 20°/滚转 -8°）的地面深度，过 HEIC 容器 →
+  平面拟合 → 外参解算**精确回真值**（1.500m/20.00°/-8.00°，rms 0.49mm）→
+  深度驱动合成。合成帧焦距与 `_estimate_pinhole` 对齐（同焦假设的已记录边界）。
+- `conftest.py` 加 atexit gc 回收：ORT 会话若被循环引用拖到解释器关机才释放，
+  teardown 与 threading 关机竞态会偶发 SIGABRT（退出码 134，测试全绿但看
+  退出码的门禁误报）。
+- `test_webapp.py` 加 backlog 回归断言，防回退到 socketserver 默认值。
+- 全套 440 passed / 1 skipped（1 skip 为 onnxruntime 已装时 CLI 抠图 E2E
+  由 P4 覆盖的既定跳过）；可选依赖（onnxruntime / pillow-heif / OpenEXR /
+  imageio）本机全装真跑：HEIC/EXR 深度 23 项、mp4 渲染 11 帧 + h264 成片。
+
+### 打包
+
+- 版本 1.1.0 → 1.1.1；wheel/sdist 重建。
+
 ## [1.1.0] — 2026-10-10
 
 全项目代码审计版本：五分区并行审查（geometry/placement/numeric · compose/scene ·
@@ -71,4 +109,5 @@ cli/video/matting · depth/plane/lidar/webapp · webui/Pages JS），修复 16 �
   `point(u,v,1)·depth`），与径向（cosθ）解释的仲裁结论一致，有回归测试钉住。
 - scene.json 与原版 1:1 同构（字段序/单位/toFixed 口径），未因本次审计变动。
 
+[1.1.1]: https://github.com/ForJiang/arcam/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/ForJiang/arcam/compare/v1.0.0...v1.1.0

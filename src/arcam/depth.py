@@ -437,6 +437,11 @@ def _load_heic_depth(path: Path) -> LiDARFrame:
             f'{path}：人像深度是非均匀视差（NON_UNIFORM_DISPARITY），缺少逐像素'
             '换算表，无法安全转成米。请改用扫描 App 导出的 16-bit PNG/TIF 或 .depth'
         )
+    # §1 无效口径先归一（0/负/非有限 → NaN）再打量程：真机人像 HEIC 的无效像素
+    # 大量编码为 0，不先归一会把 min 打成 0，撞上下面「疑似标定差异」的误导报错
+    # （_make_frame 的收口在预检之后，救不回来）。归一后各 rep 分支与 PNG16/EXR
+    # 路径的无效值口径一致。
+    depth = np.where(np.isfinite(depth) & (depth > 0.0), depth, np.nan)
     finite = depth[np.isfinite(depth)]
     if finite.size and (float(finite.min()) <= 0.0 or float(finite.max()) > 120.0):
         raise RuntimeError(

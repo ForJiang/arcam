@@ -770,6 +770,19 @@ class TestLidar:
 # ---------------------------------------------------------------- 7. 并发
 
 class TestConcurrency:
+    def test_listen_backlog_covers_browser_burst(self):
+        """request_queue_size 必须 > 浏览器突发连接数（socketserver 默认只有 5）。
+
+        复现过的抖动：全套件负载下 8 线程并发 render 偶发 ConnectionResetError
+        [Errno 54] —— listen backlog=5 装不下突发，内核直接 reset 超出的连接，
+        与服务端线程模型无关（ThreadingHTTPServer 一直是对的）。浏览器一次会
+        并发拉 html/css/js/favicon + API，真实场景同样吃这个 backlog。
+        """
+        from arcam.webapp import WebServer
+        assert WebServer.request_queue_size >= 16, (
+            f"backlog={WebServer.request_queue_size} 低于浏览器突发量级，"
+            "并发连接会被内核 reset")
+
     def test_twenty_concurrent_renders_no_deadlock(self, server, uploaded):
         port = _port(server)
 

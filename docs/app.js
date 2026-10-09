@@ -238,7 +238,7 @@ function subjOf(p) { return { hp: p.hp, d: p.d, x: p.x }; }
 // 实际读的那一套（SITE-SPEC §1 的 opts 就是 camelCase：charScale/rotBasis/sizePct/
 // edgeBar；frame 另收 frameKey 别名）。渲染侧只读 camelCase，不放 snake_case 副本。
 function composeParams(p) {
-  return {
+  const kw = {
     frame: p.frame,
     mode: p.mode,
     shot: p.shot,
@@ -248,8 +248,8 @@ function composeParams(p) {
     edgeBar: p.edge_bar,
     tone: !!p.tone
   };
-  if (state.use3D && window.ARCAM_MMD && window.ARCAM_MMD.ready) {
-    kw.charDraw = draw3DInto;      // FEATURE-SPEC §5：3D 层替换 drawInto
+  if (mmdReady()) {
+    kw.charDraw = draw3DInto;      // 3D 层挂钩点：替换 arcam-render.js 里的 drawInto
   }
   return kw;
 }
@@ -284,7 +284,7 @@ async function renderNow() {
     if (seq !== state.renderSeq) return; // 过期渲染直接丢弃
     drawToPreview(r.shot);
     drawHudOverlay();
-    showScene(r.scene);
+    showScene(attachMmdKey(r.scene, state.photoCanvasPreview.width, state.photoCanvasPreview.height));
     setStatus('渲染完成', performance.now() - t0);
   } catch (e) {
     setStatus('渲染出错：' + (e && e.message ? e.message : e), null, true);
@@ -424,6 +424,8 @@ async function doExportBundle() {
     if (!layer) throw new Error('这一遍没有产出立绘层（立绘缺失或落位失败）');
     const scene = r && r.scene;
     if (!scene) throw new Error('scene.json 生成失败');
+    // 3D 开着：scene.json 的 mmd 段记这一枪是 3D 渲的（原版 index.html:3776-3787）
+    attachMmdKey(scene, state.photoCanvasFull.width, state.photoCanvasFull.height);
     const shotBlob = await canvasToBlob(r.shot, 'image/jpeg', 0.95); // JPEG q0.95（同 CLI encode_jpeg 95）
     const layerBlob = await canvasToBlob(layer, 'image/png');
     const sceneBytes = new TextEncoder().encode(JSON.stringify(scene, null, 2));
@@ -691,7 +693,9 @@ function initLang() {
 function applyLang() {
   const lang = window.ARCAM_LANG === 'en' ? 'en' : 'zh';
   document.documentElement.lang = lang === 'en' ? 'en' : 'zh-CN';
-  document.title = t('app.title');
+  // ⚠ 不覆写 document.title：原版的 title 就是 app.title（"手机端"），但本 port
+  //    有自己的标题（index.html 里写死"arcam（GitHub Pages 版）"）——语言切换
+  //    只换正文，不动牌子。
   document.querySelectorAll('[data-t]').forEach((el) => {
     const v = t(el.dataset.t);
     if (v !== el.dataset.t) el.textContent = v;
@@ -795,64 +799,183 @@ state.pose3D = -1;
 //  同一套投影（mmd.js 的相机矩阵按 arcam 投影公式拼，见其文件头注释）。
 function draw3DInto(full, rect) {
   const M3D = window.ARCAM_MMD;
-  const g = full.getContext('2d');
-  const W = full.width, H = full.height;
   const p = state.params;
-  const cam = { W: W, H: H, h: p.h, feq: p.feq, pitch: p.pitch, roll: p.roll };
-  const f = window.arcamHud ? window.arcamHud.focalPx(W, H, p.feq) : 0;
-  const ms = M3D.render({
-    W: W, H: H, f: f,
-    camH: p.h, pitch: p.pitch, roll: p.roll,
-    x: p.x, d: p.d, hp: p.hp, scale: p.char_scale,
-    pose: state.pose3D, env: null, envFrame: state.photoCanvasFull
-  });
-  if (!ms) return placementForScene(cam);      // 渲失败：只记落位，不叠层
-  const lay = M3D.canvas();
-  if (lay) g.drawImage(lay, 0, 0, W, H);
-  return placementForScene(cam);
+  const W = full.width, H = full.height;
+  const cam = camOf(p, W, H);
+  let lay = null;
+  try {
+    const ms = M3D.render({
+      W: W, H: H, f: core.focalPx(W, H, p.feq),
+      camH: p.h, pitch: p.pitch, roll: p.roll,
+      x: p.x, d: p.d, hp: p.hp, scale: p.char_scale,
+      pose: state.pose3D, env: null, envFrame: mmdEnvFrame(),
+    });
+    if (ms) lay = M3D.canvas();
+  } catch (e) {
+    console.warn('[arcam] 3D 层渲染抛异常：', e);
+  }
+  if (!lay) {
+    // 渲失败：不叠层（drawInto 已被 charDraw 顶掉），只记落位 + 把报错摆出来
+    d3dNote(t('note.3dDrawFail', 'render 返回 0'), true);
+    return placementForScene(cam, rect);
+  }
+  full.getContext('2d').drawImage(lay, 0, 0, W, H);
+  return placementForScene(cam, rect);
 }
 
 //: scene.json 仍记 2D 落位（模型站在同一个地面点；配方与 2D 路径同构）
-function placementForScene(cam) {
-  const core = window.arcamCore;
+function placementForScene(cam, rect) {
+  // ⚠ core 是本文件顶部 import 的 arcam-core.js；window.arcamCore 从来没挂过，别用
   const p = state.params;
   const subj = { hp: p.hp, d: p.d, x: p.x };
-  return core.currentPlacement(
-    state.charCanvas ? state.charCanvas.width : 120,
-    state.charCanvas ? state.charCanvas.height : 200, subj, cam,
-    { mode: p.mode, sizePct: p.size_pct, charScale: p.char_scale,
-      rotBasis: p.rot_basis, shot: p.shot, edgeBar: p.edge_bar });
+  const ch = state.charCanvas || char3dPlaceholder();
+  return core.currentPlacement(ch.width, ch.height, subj, cam, {
+    mode: p.mode, sizePct: p.size_pct, charScale: p.char_scale,
+    rotBasis: p.rot_basis, shot: p.shot, edgeBar: p.edge_bar, rect: rect,
+  });
 }
 
 function d3dNote(msg, isError) {
   const el = $('d3dNote');
   if (!el) return;
-  el.textContent = msg;
+  el.textContent = msg || '';
   el.hidden = !msg;
   el.classList.toggle('error', !!isError);
+}
+
+/** mmd.js 是否真的能出图（引擎就绪 + 有模型）。charDraw 只在此时挂 —— 没就绪时
+ *  走原 drawInto（2D 立绘照旧画），这就是"3D 开着但模型没进来"的外层回退。 */
+function mmdReady() {
+  const M3D = window.ARCAM_MMD;
+  return !!(state.use3D && M3D && M3D.ready && M3D.srcName);
+}
+
+async function d3dInitEngine() {
+  const M3D = window.ARCAM_MMD;
+  if (!M3D) { d3dNote(t('note.3dNoEngine'), true); return false; }
+  if (M3D.ready) return true;
+  d3dNote(t('note.3dLoading'));
+  let ok = false;
+  try { ok = await M3D.init(); }
+  catch (e) { d3dNote(t('note.3dFail', (e && e.message) || e), true); return false; }
+  if (!ok) { d3dNote(t('note.3dFail', M3D.error || '?'), true); return false; }
+  return true;
+}
+
+/** 3D 就位那句话（换模型/换包都走这里，别在两处各写一遍；原版 d3dNoteOk） */
+function d3dNoteOk() {
+  if (!mmdReady()) return;
+  const M3D = window.ARCAM_MMD;
+  const st = M3D.stats;
+  d3dNote(t('note.3dOk', M3D.srcName, st.tris, st.bones, st.poses) +
+    (st.texMiss ? ' ' + t('note.3dTexMiss', st.texOk || 0, (st.texOk || 0) + st.texMiss)
+                : (st.kind === 'pmx' && st.texOk ? ' ' + t('note.3dTexPool', st.texOk) : '')));
+}
+
+/** 给 3D 当环境贴图（IBL）的照片缩略图（64×36）。原版用相机当前帧
+ *  （index.html:1679-1685）；Pages 没有实时帧 —— **照片就是这片环境**，拿它同源。
+ *  缓存着，照片换了才重画（PMREM 不便宜，别每帧跑）。 */
+let envFrameCv = null, envFrameSrc = null;
+function mmdEnvFrame() {
+  const src = state.photoCanvasFull;
+  if (!src) return null;
+  if (!envFrameCv) {
+    envFrameCv = document.createElement('canvas');
+    envFrameCv.width = 64; envFrameCv.height = 36;
+  }
+  if (envFrameSrc !== src) {
+    try { envFrameCv.getContext('2d').drawImage(src, 0, 0, 64, 36); }
+    catch (e) { return null; }
+    envFrameSrc = src;
+  }
+  return envFrameCv;
+}
+
+/** 3D 模式要有个**占位立绘**：贴边吸附、构图提示、scene.json 全在用立绘宽高
+ *  （原版 ensurePlaceholderChar，index.html:1615-1620）。真正画的是 MMD 层，
+ *  这张全透明占位图只是让那些几何量有个合理的宽高比（≈0.58，接近全身立绘）。 */
+let char3dPh = null;
+function char3dPlaceholder() {
+  if (!char3dPh) {
+    char3dPh = document.createElement('canvas');
+    char3dPh.width = 300; char3dPh.height = 520;
+  }
+  return char3dPh;
+}
+function ensurePlaceholderChar() {
+  if (state.charCanvas) return;
+  state.charCanvas = char3dPlaceholder();
+  state.charOrig = char3dPlaceholder();
+}
+
+/** 3D 必须站地上：自由模式那套（贴边吸附 / 高度占比）对真透视模型没意义 */
+function forceGroundForMmd() {
+  if (state.params.mode !== 'free') return;
+  state.params.mode = 'ground';
+  $('p-mode').value = 'ground';
+  syncModeVisibility();
+}
+
+/** scene.json 的 mmd 段（原版 index.html:3776-3787）。3D 开着才记，否则恒 null
+ *  （arcam-render.js 的 buildScene 本来就填 null）。**新 key**，老字段一个没动。 */
+function attachMmdKey(scene, W, H) {
+  if (!scene) return scene;
+  const M3D = window.ARCAM_MMD;
+  if (!mmdReady()) { scene.mmd = null; return scene; }
+  const p = state.params;
+  scene.mmd = {
+    model: M3D.srcName,
+    pose: (M3D.poseNames()[state.pose3D]) || null,
+    modelHeightM: +(M3D.modelHeight()).toFixed(4),
+    heightM: +(p.hp * p.char_scale).toFixed(4),
+    groundPoint: { lateralM: +p.x.toFixed(3), distanceM: +p.d.toFixed(3) },
+    camera: {
+      heightM: +p.h.toFixed(4), pitchDeg: +p.pitch.toFixed(3), rollDeg: +p.roll.toFixed(3),
+      focalPx: +core.focalPx(W, H, p.feq).toFixed(2), canvas: [W, H],
+    },
+    stats: { tris: M3D.stats.tris, bones: M3D.stats.bones, morphs: M3D.stats.morphs },
+  };
+  return scene;
 }
 
 //: 模型列表 + 姿势行（一个包里多个 pmx 时列出来；姿势来自 mmd/poses.json）
 function refresh3dRows() {
   const M3D = window.ARCAM_MMD;
-  const on = !!(state.use3D && M3D && M3D.ready);
+  const on = mmdReady();
   $('d3dLight').hidden = !on;
   if (!on) { $('model3dRow').hidden = true; $('pose3dRow').hidden = true; return; }
   const names = M3D.modelNames();
   const mrow = $('model3dRow');
-  mrow.textContent = '';
+  mrow.replaceChildren();
   names.forEach((name, i) => {
     const b = document.createElement('button');
     b.type = 'button';
-    b.textContent = name;
+    b.textContent = name.split(/[\\/]/).pop().replace(/\.pmx$/i, '');   // 目录/后缀是噪音
     b.className = (i === M3D.modelIndex()) ? 'on' : '';
     b.addEventListener('click', async () => {
-      await M3D.switchModel(i);
-      refresh3dRows();
-      renderNow();
+      if (i === M3D.modelIndex()) return;
+      b.dataset.busy = '1';
+      // 换模型 = 用同一份输入重建，贴图自然还是这个包里的（不用再选一次）
+      const ok = await M3D.switchModel(i);
+      delete b.dataset.busy;
+      if (!ok) { d3dNote(t('note.3dFail', M3D.error || '?'), true); return; }
+      refresh3dRows(); d3dNoteOk(); renderNow();
     });
     mrow.appendChild(b);
   });
+  // 「去掉这个」：包里常混着角色 + 武器 + 部件，把不要的删掉，列表就只剩要用的
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.style.marginLeft = '6px';
+  del.textContent = t('btn.modelDrop');
+  del.addEventListener('click', async () => {
+    del.dataset.busy = '1';
+    const ok = await M3D.dropModel(M3D.modelIndex());
+    delete del.dataset.busy;
+    if (!ok) { d3dNote(t('note.3dAllDropped')); return; }
+    refresh3dRows(); d3dNoteOk(); renderNow();
+  });
+  mrow.appendChild(del);
   $('model3dLabel').hidden = names.length < 2;
   mrow.hidden = names.length < 2;
   const prow = $('pose3dRow');
@@ -870,22 +993,35 @@ function refresh3dRows() {
   const hasPose = M3D.poseNames().length > 0;
   $('pose3dLabel').hidden = !hasPose;
   prow.hidden = !hasPose;
+  // 模型进来了才谈得上调主光方向 / 景深 —— 跟着显示，并回填当前值
+  const prm = M3D.params;
+  if (prm) {
+    $('az3d').value = prm.keyAz;  $('oaz3d').textContent = prm.keyAz + '°';
+    $('el3d').value = prm.keyEl;  $('oel3d').textContent = prm.keyEl + '°';
+    $('dof3d').value = prm.dof;   $('odof3d').textContent = (+prm.dof).toFixed(2);
+    // 对焦距离默认跟人物同距（=不虚）。用户把距离滑块拖走，他就该虚。
+    $('focus3d').value = state.params.d;
+    $('ofocus3d').textContent = state.params.d.toFixed(1) + 'm';
+  }
 }
 
 //: 导入模型（zip/glb/文件夹/pmx）。load 成功返 true；统计信息在 M3D.stats。
 async function do3DImport(src, pmxIdx) {
+  if (!src) return;
   const M3D = window.ARCAM_MMD;
   if (!M3D) { d3dNote(t('note.3dNoEngine'), true); return; }
   d3dNote(t('note.3dLoading'));
   try {
-    const ok = await M3D.load(src, (stage, pct) =>
-      d3dNote(t('note.3dLoading') + ' ' + stage + (pct ? ' ' + pct + '%' : '')), pmxIdx);
+    // onProgress 第一个参量是 0~1 的分数（mmd.js readBytes/buildFromPackage 的约定）
+    const ok = await M3D.load(src, (frac) =>
+      d3dNote(t('note.3dLoading') + ' ' + Math.round(frac * 100) + '%'), pmxIdx);
     if (!ok) { d3dNote(t('note.3dFail', M3D.error || '未知错误'), true); return; }
     state.use3D = true;
     $('t3d').classList.add('on');
-    const st = M3D.stats;
-    d3dNote(t('note.3dOk', M3D.srcName, st.tris, st.bones, st.poses));
+    forceGroundForMmd();          // 3D 必须站地上：自由模式那套对真透视模型没意义
+    ensurePlaceholderChar();
     refresh3dRows();
+    d3dNoteOk();
     renderNow();
   } catch (e) {
     d3dNote(t('note.3dFail', (e && e.message) || e), true);
@@ -893,22 +1029,32 @@ async function do3DImport(src, pmxIdx) {
 }
 
 function bind3D() {
-  $('t3d').addEventListener('click', () => {
+  $('t3d').addEventListener('click', async () => {
     state.use3D = !state.use3D;
     $('t3d').classList.toggle('on', state.use3D);
+    if (state.use3D) {
+      forceGroundForMmd();
+      ensurePlaceholderChar();
+      const ok = await d3dInitEngine();
+      if (ok && window.ARCAM_MMD && !window.ARCAM_MMD.srcName) d3dNote(t('note.3dNeedModel'));
+    } else {
+      d3dNote('');
+    }
     refresh3dRows();
     renderNow();
   });
   $('f3d').addEventListener('click', () => $('f3dFile').click());
   $('f3dFile').addEventListener('change', (e) => {
     if (e.target.files && e.target.files[0]) do3DImport(e.target.files[0]);
+    e.target.value = '';               // 同一个文件再选一次也要能触发
   });
   $('f3dDirBtn').addEventListener('click', () => $('f3dDir').click());
   $('f3dDir').addEventListener('change', (e) => {
     const files = e.target.files;
     if (!files || !files.length) return;
-    // 文件夹导入：整包喂给 mmd.js（它自己挑 pmx 与贴图；安卓退化成多选）
-    do3DImport(Array.from(files), 0);
+    // 文件夹导入：FileList 原样喂给 mmd.js（它自己挑 pmx 与贴图；安卓退化成多选）
+    do3DImport(files);
+    e.target.value = '';
   });
   // 3D 专属控件（原版 az/el/focus/dof 四滑块）。mmd.js 的光照参数是
   // params getter 返回的 L 对象引用——直接改字段即生效（无 setLight）。

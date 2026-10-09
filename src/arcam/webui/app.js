@@ -131,6 +131,8 @@ async function uploadFile(kind, file) {
       }
       if (state.photo) renderNow();
       else setStatus('立绘已上传，请上传照片', r.ms);
+      // 导入后问一句全身/半身（原版 loadChar：只定默认走哪条路，不改任何状态）
+      showKind();
     } else if (kind === 'depth') {
       state.depthFile = file;
       setName('depth-name', file.name + dims);
@@ -252,6 +254,7 @@ async function renderNow() {
     showScene(r.scene);
     if (r.env) mergeEnv(r.env, null); // render 的 env 只有三字段，合并进完整 env
     setStatus('渲染完成', typeof r.ms === 'number' ? r.ms : performance.now() - t0);
+    drawHudOverlay();                   // HUD 浮层跟着预览尺寸/参数重画
   } catch (e) {
     showApiError(e);
   }
@@ -406,9 +409,233 @@ function syncModeVisibility() {
   $('row-edge-bar').hidden = state.params.mode !== 'free';
 }
 
+/* ================= 7.5 语言（FEATURE-SPEC §3） ================= */
+
+//: localStorage 键与原版一致（index.html:900）；?lang= 只影响当次加载。
+var LANG_KEY = 'arcam.lang';
+
+function currentLang() {
+  return window.ARCAM_LANG === 'en' ? 'en' : 'zh';
+}
+
+function applyLang() {
+  var lang = currentLang();
+  window.ARCAM_LANG = lang;
+  document.documentElement.lang = lang === 'en' ? 'en' : 'zh-CN';
+  // [data-t] → textContent；HUD/常驻条下一帧自然跟上（hud.js 每帧拼）
+  document.querySelectorAll('[data-t]').forEach(function (el) {
+    var v = window.arcamT ? window.arcamT(el.dataset.t) : null;
+    if (v !== null) el.textContent = v;
+  });
+  var btn = $('btn-lang');
+  if (btn) {
+    btn.textContent = lang === 'en' ? '中' : 'EN';   // 显示的是「切过去会变成什么」
+    btn.title = window.arcamT ? window.arcamT('lang.switch') : '';
+  }
+  if (window.arcamLive && window.arcamLive.active) {
+    $('btn-live').textContent = window.arcamT('btn.liveStop');
+  } else {
+    $('btn-live').textContent = window.arcamT('btn.live');
+  }
+}
+
+function initLang() {
+  // 优先级：URL 参数 > localStorage > 默认中文（index.html:903-914）
+  var q = new URLSearchParams(location.search).get('lang');
+  if (q === 'zh' || q === 'en') {
+    window.ARCAM_LANG = q;
+  } else {
+    try {
+      var s = localStorage.getItem(LANG_KEY);
+      if (s === 'zh' || s === 'en') window.ARCAM_LANG = s;
+    } catch (e) {}
+  }
+  applyLang();
+  $('btn-lang').addEventListener('click', function () {
+    window.ARCAM_LANG = currentLang() === 'en' ? 'zh' : 'en';
+    try { localStorage.setItem(LANG_KEY, window.ARCAM_LANG); } catch (e) {}
+    applyLang();
+  });
+}
+
+/* ================= 7.6 修图线（纯色底/裁边/还原 + kind 弹窗 + tip） ================= */
+
+function showTip(key) {
+  var el = $('tip');
+  if (!el) return;
+  el.textContent = window.arcamT ? window.arcamT(key) : key;
+  el.hidden = false;
+  clearTimeout(showTip._t);
+  showTip._t = setTimeout(function () { el.hidden = true; }, 3600);   // 原版 TIP_MS
+}
+
+async function doCutSolid() {
+  if (!state.charName) { showTip('note.chNone'); return; }
+  setStatus('修图中…');
+  try {
+    var r = await apiJson('/api/prep', { steps: ['solid', 'trim', 'soften', 'blur'] });
+    if (r.ok) {
+      state.charName = state.charName;          // 名字不变（还是那张立绘）
+      showEditNote(r);
+      showTip('note.chLoaded');
+      scheduleRender();
+    }
+  } catch (e) { showApiError(e); }
+}
+
+async function doTrim() {
+  if (!state.charName) { showTip('note.chNone'); return; }
+  setStatus('裁边中…');
+  try {
+    var r = await apiJson('/api/trim', {});
+    if (r.ok) {
+      showEditNote({ trimmed: true, rect: r.rect, actions: ['note.autoTrim'] });
+      showTip('note.trimmed');
+      scheduleRender();
+    }
+  } catch (e) { showApiError(e); }
+}
+
+async function doReset() {
+  if (!state.charName) { showTip('note.chNone'); return; }
+  try {
+    var r = await apiJson('/api/reset', {});
+    if (r.ok) {
+      showEditNote({ actions: [] });
+      showTip('note.chReset');
+      scheduleRender();
+    }
+  } catch (e) { showApiError(e); }
+}
+
+function showEditNote(r) {
+  var el = $('edit-note');
+  if (!el) return;
+  var parts = [];
+  if (r.cutRatio !== null && r.cutRatio !== undefined) {
+    parts.push(window.arcamT('note.autoCut', (r.cutRatio * 100).toFixed(0)));
+  }
+  (r.actions || []).forEach(function (a) {
+    if (a !== 'note.autoCut') parts.push(window.arcamT(a));
+  });
+  el.textContent = parts.join('　');
+}
+
+//: 全身/半身弹窗：只定**默认走哪条路**（原版"只是问，不改任何状态"）
+function showKind() {
+  var el = $('kind-modal');
+  if (el) el.hidden = false;
+}
+function hideKind() {
+  var el = $('kind-modal');
+  if (el) el.hidden = true;
+}
+
+function applyCharKind(half) {
+  if (half) {
+    state.params.mode = 'free';
+    state.params.size_pct = 60;
+    state.params.edge_bar = 2;                 // 切口贴下边（原版 kind.doneHalf）
+    $('p-mode').value = 'free';
+    $('p-size-pct-rng').value = 60;
+    $('p-size-pct-val').textContent = '60%';
+    $('p-edge-bar').value = '2';
+  } else {
+    state.params.mode = 'ground';
+    state.params.shot = '全身';
+    $('p-mode').value = 'ground';
+    $('p-shot').value = '全身';
+  }
+  syncModeVisibility();
+  hideKind();
+  scheduleRender();
+}
+
+function bindEditLine() {
+  $('btn-cut-solid').addEventListener('click', doCutSolid);
+  $('btn-trim').addEventListener('click', doTrim);
+  $('btn-reset').addEventListener('click', doReset);
+  $('kind-full').addEventListener('click', function () { applyCharKind(false); });
+  $('kind-half').addEventListener('click', function () { applyCharKind(true); });
+  $('kind-close').addEventListener('click', hideKind);
+}
+
+/* ================= 7.7 实时相机（FEATURE-SPEC §4） ================= */
+
+function bindLive() {
+  $('btn-live').addEventListener('click', function () {
+    if (window.arcamLive.active) window.arcamLive.stop();
+    else window.arcamLive.start();
+  });
+  $('btn-shot').addEventListener('click', function () {
+    var cv = window.arcamLive.shoot();
+    if (!cv) { showTip('note.shotFail'); return; }
+    cv.toBlob(function (blob) {
+      if (!blob) { showTip('note.shotFail'); return; }
+      handleFile('photo', new File([blob], 'camera.png', { type: 'image/png' }));
+      showTip('note.chLoaded');
+    }, 'image/png');
+  });
+  // 传感器 → 摆放参数（pitch/roll 实时跟上，300ms 防抖渲染不受影响：
+  // HUD 每帧画，render 仍按 scheduleRender 的节奏）
+  window.arcamLive.onOrient = function (pitch, roll) {
+    state.params.pitch = Math.round(pitch * 2) / 2;
+    state.params.roll = Math.round(roll * 2) / 2;
+    $('p-pitch-num').value = state.params.pitch;
+    $('p-pitch-rng').value = state.params.pitch;
+    $('p-roll-num').value = state.params.roll;
+    $('p-roll-rng').value = state.params.roll;
+    markTouched('pitch'); markTouched('roll');
+    scheduleRender();
+  };
+}
+
+/* ================= 7.8 HUD 浮层（FEATURE-SPEC §2） ================= */
+
+//: HUD 开关状态（原版 S.grid/body/horizon 三根；默认只开网格，别一上来满屏线）
+var HUD_ON = { grid: true, body: false, horizon: false };
+
+function drawHudOverlay() {
+  var hud = $('hud-canvas');
+  var cv = $('preview-canvas');
+  if (!hud || !cv) return;
+  if (!window.arcamHud) return;
+  var W = cv.width, H = cv.height;
+  if (W < 8 || H < 8) return;
+  hud.width = W; hud.height = H;
+  var ctx = hud.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+  var p = state.params;
+  var cam = { W: W, H: H, h: p.h, feq: p.feq, pitch: p.pitch, roll: p.roll };
+  var subj = { hp: p.hp, d: p.d, x: p.x };
+  // 取景框（frame_rect 的 JS 对译：与 Python frames.py 同公式）
+  var R = frameRectJs(p.frame, W, H);
+  if (R) window.arcamHud.drawFrame(ctx, R, { x: 0, y: 0, w: W, h: H }, W, H);
+  if (HUD_ON.grid) window.arcamHud.drawGrid(ctx, cam);
+  if (HUD_ON.horizon) window.arcamHud.drawHorizon(ctx, cam, window.arcamT('horizon'));
+  if (HUD_ON.body) window.arcamHud.drawFigure(ctx, cam, subj);
+  window.arcamHud.drawHud(ctx, cam, subj, !!state.charName, null, p.shot, p.mode);
+}
+
+//: frameRect 的 JS 对译（frames.py 同公式；aspect 表与 Python FRAMES 逐字一致）
+var FRAMES_JS = { '自由': 0.0, '1:1': 1.0, '4:5': 0.8, '16:9': 16 / 9, '9:16': 9 / 16, '满幅': -1.0 };
+
+function frameRectJs(key, W, H) {
+  var a = FRAMES_JS[key];
+  if (a === undefined || a === -1.0) return { x: 0, y: 0, w: W, h: H };   // 满幅
+  if (a === 0.0) {                                                       // 自由 = viewRect
+    return { x: 0, y: 0, w: W, h: H };
+  }
+  var rw, rh;
+  if (W / H > a) { rw = H * a; rh = H; } else { rw = W; rh = W / a; }
+  var x = (W - rw) / 2, y = (H - rh) / 2;
+  return { x: x, y: y, w: rw, h: rh };
+}
+
 /* ================= 8. 初始化 ================= */
 
 function init() {
+  initLang();
   bindDrop('drop-photo', 'file-photo', 'photo');
   bindDrop('drop-char', 'file-char', 'char');
   bindDrop('drop-depth', 'file-depth', 'depth');
@@ -431,9 +658,16 @@ function init() {
   $('btn-bundle').addEventListener('click', function () { doExport('bundle'); });
   $('btn-copy-scene').addEventListener('click', doCopyScene);
 
+  bindEditLine();
+  bindLive();
+
   syncModeVisibility();
   setStatus('就绪');
   $('status-msg').className = '';
+  // HUD 浮层常驻可见（画布上没有预览图时也能看到网格/读数）
+  var hud = $('hud-canvas');
+  if (hud) hud.hidden = false;
+  drawHudOverlay();
 }
 
 init();

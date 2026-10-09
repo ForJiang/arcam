@@ -162,8 +162,8 @@ def _ids_of(html):
 
 def _js_dom_refs(js):
     """app.js 引用的全部 DOM id（含动态拼接与辅助函数的字面量参数）。"""
-    refs = set(re.findall(r"getElementById\('([^']+)'\)", js))
-    refs |= set(re.findall(r"\$\('([^']+)'\)", js))
+    refs = set(re.findall(r"getElementById\(['\"]([^'\"]+)['\"]\)", js))
+    refs |= set(re.findall(r"\$\(['\"]([^'\"]+)['\"]\)", js))
     # 动态拼接：bindNumeric 里 'p-' + key + '-num'/'-rng'
     for suffix in set(re.findall(r"'p-'\s*\+\s*key\s*\+\s*'([^']+)'", js)):
         for key in NUMERIC_KEYS:
@@ -253,9 +253,11 @@ def test_html_parses_tags_balanced_ids_complete():
     assert not p.stack, f"HTML 有未闭合标签：{p.stack}"
     for id_ in REQUIRED_IDS:
         assert id_ in p.ids, f"index.html 缺少必需 DOM id: {id_}"
-    # 单页骨架：恰好一个 canvas / script / stylesheet link
-    assert html.count("<canvas") == 1
-    assert html.count("<script") == 1
+    # 单页骨架：预览 canvas + HUD 浮层 canvas（FEATURE-SPEC §4 的 HUD 常驻
+    # 浮层，出图不带 HUD）；i18n/hud/live/app 四模块 + 一个样式表
+    assert html.count("<canvas") == 2
+    # webui：i18n/hud/live/app 四模块（app.js 是普通 script）
+    assert html.count("<script") == 4
     assert html.count('rel="stylesheet"') == 1
 
 
@@ -270,10 +272,15 @@ def test_js_dom_references_resolve():
 
 
 def test_no_dead_dom_ids():
-    """死代码守卫：HTML 里的 id 必须被 JS 或 CSS 引用到（未引用的一律删）。"""
+    """死代码守卫：HTML 里的 id 必须被 JS 或 CSS 引用到（未引用的一律删）。
+
+    ⚠ 扫描**目录下全部 .js**（不止 app.js）：webui 拆成 i18n/hud/live/app 四个
+    模块后，相机与 HUD 的 id 引用落在 live.js/hud.js 里；docs 侧同理。
+    """
     for label, folder in (("webui", WEBUI), ("docs", DOCS)):
         html = (folder / "index.html").read_text(encoding="utf-8")
-        js = (folder / "app.js").read_text(encoding="utf-8")
+        js = "\n".join(p.read_text(encoding="utf-8")
+                       for p in sorted(folder.glob("*.js")))
         css = (folder / "style.css").read_text(encoding="utf-8")
         dead = sorted(_ids_of(html) - _js_dom_refs(js) - _css_id_refs(css))
         assert not dead, f"{label}/index.html 有未引用的死 DOM id: {dead}"
@@ -422,8 +429,12 @@ def test_pages_files_exist_and_referenced():
     assert 'type="module"' in html
     assert not re.search(r'(?:src|href)\s*=\s*["\']https?://', html), "index.html 出现外链资源"
     assert not re.search(r'(?:src|href)\s*=\s*["\']/', html), "index.html 出现绝对路径资源"
-    # index.html 只引 app.js；两个管线模块 + matte.js 由 app.js 动态 import
-    assert html.count("<script") == 1
+    # index.html 引 5 个 script：i18n/matte-tools/hud/live 四个普通 script
+    # （window 挂钩，按依赖顺序加载）+ app.js 一个 module；两个管线模块
+    # （arcam-core/arcam-render）仍由 app.js 动态 import，不写死在 html 里。
+    assert html.count("<script") == 5
+    for direct in ("i18n.js", "matte-tools.js", "hud.js", "live.js"):
+        assert f'src="./{direct}"' in html, f"index.html 缺 {direct} 引用"
     assert html.count('rel="stylesheet"') == 1
     js = files["app.js"]
     for mod in PAGES_MODULES:
@@ -532,8 +543,11 @@ def test_param_controls_match_between_versions():
             f"控件 {cid} 在两版页面里不一致"
     for sel in ("p-shot", "p-frame", "p-mode", "p-rot", "p-edge-bar"):
         assert _select_block(wh, sel) == _select_block(dh, sel), f"下拉 {sel} 两版不一致"
-    # 抠图钮：本地版常显；Pages 版初始 hidden，window.arcamMatte 就绪才显示（SITE-SPEC §3）
-    assert 'id="btn-matte">' in wh, "本地版抠图钮应常显"
+    # 抠图钮：本地版常显；Pages 版初始 hidden，window.arcamMatte 就绪才显示（SITE-SPEC §3）。
+    # 判据是"标签上没有 hidden 属性"（data-t 等新属性不影响可见性）。
+    matte_tag = _tag_with_id(wh, "btn-matte")
+    assert "hidden" not in matte_tag, "本地版抠图钮应常显"
+    assert "hidden" in _tag_with_id(dh, "btn-matte"), "Pages 版抠图钮应初始隐藏"
     assert re.search(r'id="btn-matte"[^>]*\bhidden\b', dh), "Pages 版抠图钮应默认隐藏"
     # 两版 S_DEFAULTS / RANGES 逐字相同
     assert _s_defaults(_files()["app.js"]) == _s_defaults(_pages_files()["app.js"]), \
@@ -560,3 +574,26 @@ def test_golden_fixture_present():
     assert any(v.get("rot_basis") == "frame" for v in free), \
         "free 向量缺 rot_basis=frame 回归钉"
     assert any(v.get("edge_bar") for v in free), "free 向量缺 edge_bar 吸附回归钉"
+
+
+def test_i18n_tables_match_between_python_and_js():
+    """两侧语言表逐条一致（i18n.js 由 i18n.py 同源生成；漂移=某一侧漏翻）。
+
+    Python 侧 src/arcam/i18n.py 的 TXT 与 webui/i18n.js 的 ARCAM_TXT 必须
+    键集合相同、每条两列都逐字相同。生成器是一次性脚本，手改任一侧就会漂移。
+    """
+    import json
+    import re
+    from arcam.i18n import TXT as PY_TXT
+
+    js_src = (WEBUI / "i18n.js").read_text(encoding="utf-8")
+    m = re.search(r"window\.ARCAM_TXT = \{(.*?)\n\};", js_src, re.S)
+    assert m, "webui/i18n.js 里找不到 ARCAM_TXT"
+    # JS 对象字面量带尾逗号（JSON 不容）——剥掉再解析
+    js_txt = json.loads("{" + re.sub(r",\s*$", "", m.group(1).strip()) + "}")
+    assert set(js_txt) == set(PY_TXT), \
+        f"两侧键集合不同：仅 JS {sorted(set(js_txt) - set(PY_TXT))[:5]}，" \
+        f"仅 Python {sorted(set(PY_TXT) - set(js_txt))[:5]}"
+    for key, (zh, en) in PY_TXT.items():
+        assert list(js_txt[key]) == [zh, en], f"{key} 两侧文案不同"
+    assert len(PY_TXT) == 177, f"表条数变了：{len(PY_TXT)}（原版 160 + webui 17）"

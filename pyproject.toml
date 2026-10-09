@@ -1,6 +1,6 @@
 [project]
 name = "arcam"
-version = "1.1.2"
+version = "1.2.0"
 description = "Python 移植：让她走出屏幕 —— 透视投影立绘合成管线（投影/摆位/合成/抠图/视频）"
 requires-python = ">=3.14"
 dependencies = [
@@ -10,7 +10,7 @@ dependencies = [
 
 [project.optional-dependencies]
 matting = ["onnxruntime>=1.20"]
-lidar = ["pillow-heif>=1.7", "OpenEXR>=3.3", "Imath>=0.2"]
+lidar = ["pillow-heif>=1.7", "OpenEXR>=3.3"]  # Imath 模块由 OpenEXR wheel 提供，勿单 pin（PyPI 无 Imath>=0.2）
 video = ["imageio>=2.35", "imageio-ffmpeg>=0.5"]
 dev = ["pytest>=8.0"]
 
@@ -25,9 +25,9 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 # arcam web 从包内 arcam/webui/ 提供页面（WEBUI_DIR 在 webapp.py 里按
-# __file__ 解析），这三个文件不进 wheel，装出来的 arcam web 就只有占位页。
+# __file__ 解析），这些文件不进 wheel，装出来的 arcam web 就只有占位页。
 [tool.setuptools.package-data]
-"arcam.webui" = ["index.html", "app.js", "style.css"]
+"arcam.webui" = ["*.html", "*.js", "*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

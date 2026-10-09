@@ -34,6 +34,7 @@ import numpy as np
 
 from arcam.compose import _merge_env, compose_char_layer, compose_shot
 from arcam.geometry import Camera
+from arcam.i18n import LANGS
 from arcam.matting import anime_cut
 from arcam.placement import FRAMES, SHOTS, Subject, current_placement
 from arcam.scene import build_scene, save_scene
@@ -108,6 +109,12 @@ def _add_placement(p: argparse.ArgumentParser) -> None:
                    help="色调匹配（原版 TONE_ON，只有照片路径生效，index.html:3690）")
 
 
+def _add_lang(p: argparse.ArgumentParser) -> None:
+    """语言开关（FEATURE-SPEC §3）：只影响人话输出，不改任何数值行为。"""
+    p.add_argument("--lang", default="zh", choices=list(LANGS), metavar="语言",
+                   help="人话输出语言：zh 中文 / en English（默认 zh；数值行为不变）")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="arcam",
@@ -120,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
   arcam char-layer char.png -o layer.png --mode free --size-pct 70
   arcam bundle photo.jpg char.png -o pack.zip --pitch 12
   arcam matte photo.jpg -o cut.png --model isnet-anime-q8.onnx
+  arcam prep char.png -o clean.png            # 装图自动修图链（抠底/裁边/柔边/微糊）
     arcam video track.json char.png -o frames/ --bg bg/ --tone
     arcam check track.json
     arcam lidar inspect scan_0001.png [--json]
@@ -127,6 +135,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 退出码：0 正常，1 运行期失败（缺文件/素材不合法/轨道有问题），2 用法错误。""")
     sub = parser.add_subparsers(dest="cmd", required=True, metavar="命令")
+
+    p = sub.add_parser("prep", help="立绘自动修图：纯色底抠图 + 裁边 + 柔边 + 镜头微糊",
+                       description="装图后自动做的修图链（index.html:2400-2440 的 1:1 对译，"
+                                   "docs/FEATURE-SPEC §1）：① 纯色底抠底（占比 5%~85% 门控）"
+                                   "② 自动裁边 ③ 柔边 ④ 镜头微糊 ⑤ 半身判定。"
+                                   "任一步失败静默跳过；动过手且内容 <8px 整体回退原图。"
+                                   "半身结论会提示（那种图不能贴地，应走 --mode free）。")
+    p.add_argument("char", metavar="CHAR", help="立绘（带 alpha 的 PNG 最佳；纯色底 JPG 也能抠）")
+    _add_out(p)
+    p.add_argument("--no-solid", action="store_true", help="跳过①纯色底抠底")
+    p.add_argument("--no-trim", action="store_true", help="跳过②自动裁边")
+    p.add_argument("--no-soften", action="store_true", help="跳过③柔边整理")
+    p.add_argument("--no-blur", action="store_true", help="跳过④镜头微糊")
+    _add_lang(p)
+    p.set_defaults(func=cmd_prep)
 
     p = sub.add_parser("render", help="单张出图（可选顺带写 scene.json 配方）",
                        description="把立绘合成进照片，单张出图。"
@@ -460,6 +483,80 @@ def cmd_matte(args) -> int:
     save_png(result.rgba, out)
     print(f"已抠图 {out}（前景占比 {result.fg:.1%}，推理 {result.ms:.0f} ms）")
     return 0
+
+
+def cmd_prep(args) -> int:
+    """立绘自动修图链（FEATURE-SPEC §1；index.html:2400-2440 的 1:1 对译）。
+
+    四步各有关断（--no-solid/--no-trim/--no-soften/--no-blur），关掉的步从
+    auto_prepare_char 的动作链里摘掉——实现方式是逐步调用同模块的公开函数，
+    顺序与原版一致；任一步抛错静默跳过（修图不能把"出图"搞挂）。
+    """
+    from arcam.i18n import t
+    from arcam.matte_tools import auto_trim, lens_blur, soften_edge
+    char_p = _need(args.char, "立绘")
+    char01 = image_to_rgba01(char_p)
+    lang = args.lang
+
+    arr = char01
+    actions: list[str] = []
+    if not args.no_solid:
+        try:
+            out, ratio = _flood(arr)
+            if out is not None:
+                arr = out
+                actions.append(t("note.autoCut", f"{ratio * 100:.0f}", lang=lang))
+        except Exception:
+            pass
+    if not args.no_trim:
+        try:
+            res = auto_trim(arr)
+            if res is not None:
+                arr = res[0]
+                actions.append(t("note.autoTrim", lang=lang))
+        except Exception:
+            pass
+    if not args.no_soften:
+        try:
+            soft, changed = soften_edge(arr, erode=1, feather=2)
+            if changed:
+                arr = soft
+                actions.append(t("note.autoSoft", lang=lang))
+        except Exception:
+            pass
+    if not args.no_blur:
+        try:
+            arr = lens_blur(arr, 0.62)
+            actions.append(t("note.autoBlur", lang=lang))
+        except Exception:
+            pass
+
+    from arcam.matte_tools import is_half_body
+    half = is_half_body(arr)
+    out = Path(args.out)
+    save_png(arr, out)
+    print(f"已修图 {out}（{arr.shape[1]}×{arr.shape[0]} RGBA）")
+    for line in actions:
+        print(f"  · {line}")
+    if half:
+        print(f"  · {t('note.halfAuto', lang=lang)}")
+        print("    （半身图建议配 --mode free 出图；贴地会把下沿钉在地面上）")
+    else:
+        print("  · " + t("note.chHint", lang=lang).split("；")[0])
+    return 0
+
+
+def _flood(arr):
+    """cut_solid_bg 的数组版（matte_tools._flood_solid 的稳定转发）。
+
+    单独包一层是为了 cmd_prep 的步进式调用不必 import 私有名；占比门控
+    （5%~85%）与 auto_prepare_char 完全一致。
+    """
+    from arcam.matte_tools import CUT_RATIO_MAX, CUT_RATIO_MIN, _flood_solid
+    out, ratio = _flood_solid(arr, 32.0, 1.2)
+    if out is None or not (CUT_RATIO_MIN <= ratio <= CUT_RATIO_MAX):
+        return None, 0.0
+    return out, ratio
 
 
 def cmd_video(args) -> int:

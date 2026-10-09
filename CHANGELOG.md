@@ -2,6 +2,51 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.0] — 2026-10-11
+
+功能对等版：把原版网站的交互能力补进项目（契约 `docs/FEATURE-SPEC.md`）。
+Python 核心拿无设备依赖的部分，两个网页拿浏览器原生能力。
+
+### 新增（Python 核心）
+
+- `arcam/matte_tools.py`：立绘修图工具链（cutout.js 非 AI 线的 1:1 对译）——
+  `cut_solid_bg`（纯色底泛洪，tol 字节口径、边框起手、seen/isBg 双数组）、
+  `content_bounds`/`auto_trim`（bbox 裁边，<4px 门限）、`soften_edge`
+  （erode+feather）、`lens_blur`（预乘 alpha 降采样往返，k=0.62）、
+  `auto_prepare_char`（装图自动五步：抠底 5%~85% 门控 → 裁边 → 柔边 →
+  微糊 → 半身判定，任一步失败静默跳过、动过手且内容 <8px 整体回退）、
+  `is_half_body`（倒数第二行 alpha>200 且 >30%）。15 项单测 + 真图 E2E
+  （`tools/matte-tools-e2e.py`）。
+- `arcam/hud.py`：HUD 取景装饰层 PIL 对译——`frame_overlay`（框外压暗+三分线，
+  铺满早退）、`grid_paths`/`draw_grid`（23 条线、major 标记、米数标签）、
+  `draw_horizon`（参数式地平线+虚线）、`draw_figure`（人体骨架，关节比例逐字）、
+  `composition_hints`（11 条构图体检，出画早退；删掉的 4 条不复活）、
+  `draw_hud_text`（三行读数+hints）。22 项单测。
+- `arcam/i18n.py`：中英语言表（原版 TXT 160 条逐条搬运 + webui 17 条新增，
+  共 177 条）+ `t()` 占位符渲染；缺 key 回落裸 key。
+- CLI：新增 `arcam prep` 子命令（修图链四步可关断，`--lang` 双语输出）。
+- webapp：新增 `POST /api/prep|trim|reset`（修图结果替换会话立绘；reset 回
+  上传原图）。
+
+### 新增（两个网页）
+
+- **实时相机**（`live.js`）：getUserMedia + iOS 运动权限手势序 + deviceorientation
+  → pitch/roll（平滑 + screen.orientation 补偿）+ 快门（视频帧进合成）+
+  caps.zoom 变焦（iOS 无则整格消失）+ resumeCam 三时机 + 软转屏（body rotate
+  ±90、世界层反转、rotSafeRange 拖动接管）。
+- **HUD 浮层**（`hud.js`）：六件套画在预览 canvas 上的透明浮层，随参数/传感器
+  每帧重画；出图不带 HUD。docs 侧从 arcam-core.js import 同一份几何。
+- **中英切换**：`data-t` 三属性 + localStorage + `?lang=` 当次生效；两侧表由
+  `tests/test_webui_static.py::test_i18n_tables_match_between_python_and_js`
+  逐条钉死。
+- **修图线**：纯色底/自动裁边/还原三按钮 + 装图后自动修图链（docs 侧为
+  `matte-tools.js` 同算法 JS 移植）+ 全身/半身弹窗 + 拖动提示 tip。
+
+### 备注
+
+- MMD 3D 层（mmd.js + mmd/ 2.8MB）排期在 Wave 2，未含在本版。
+- 半身判定的微糊内核差异记为 SPEC §5 已知微偏差（刀锋阈值，flag 仅选默认模式）。
+
 ## [1.1.2] — 2026-10-10
 
 v1.1.1 之后的稳定性收尾：全量套件批量压测（每轮 12+ 遍）定位并修掉最后两个
@@ -131,6 +176,7 @@ cli/video/matting · depth/plane/lidar/webapp · webui/Pages JS），修复 16 �
   `point(u,v,1)·depth`），与径向（cosθ）解释的仲裁结论一致，有回归测试钉住。
 - scene.json 与原版 1:1 同构（字段序/单位/toFixed 口径），未因本次审计变动。
 
+[1.2.0]: https://github.com/ForJiang/arcam/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/ForJiang/arcam/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/ForJiang/arcam/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/ForJiang/arcam/compare/v1.0.0...v1.1.0

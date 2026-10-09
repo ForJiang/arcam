@@ -211,11 +211,24 @@ class Store:
         self.photo_name: str = ""
         self.char01: np.ndarray | None = None
         self.char_name: str = ""
+        self.char_orig01: np.ndarray | None = None
+        """上传时的立绘原图（/api/reset 的还原基线；prep/matte 结果不刷新它）。"""
         self.depth: LiDARFrame | None = None
         self.depth_name: str = ""
         self.matte01: np.ndarray | None = None
         self._env_cache: tuple[LiDARFrame, CameraEnv] | None = None
         """(帧, 环境量) 缓存：同一帧的平面只拟合一次（见 :meth:`depth_env`）。"""
+
+    def set_char(self, arr: np.ndarray, name: str, *,
+                 original: bool = False) -> None:
+        """设当前立绘。``original=True``（上传路径）同时刷新还原基线——
+        原版 setCharset 只在装图时写 chOrig（index.html:2354），修图结果不改基线。
+        """
+        with self.lock:
+            self.char01 = arr
+            self.char_name = name
+            if original:
+                self.char_orig01 = arr
 
     def snapshot(self) -> dict:
         """一次加锁取全量快照（渲染/导出/抠图在临界区外算，只依赖快照）。"""
@@ -225,6 +238,7 @@ class Store:
                 "photo_name": self.photo_name,
                 "char01": self.char01,
                 "char_name": self.char_name,
+                "char_orig01": self.char_orig01,
                 "depth": self.depth,
                 "matte01": self.matte01,
             }
@@ -267,11 +281,6 @@ class Store:
         with self.lock:
             self.photo01 = arr
             self.photo_name = name
-
-    def set_char(self, arr: np.ndarray, name: str) -> None:
-        with self.lock:
-            self.char01 = arr
-            self.char_name = name
 
     def set_depth(self, frame: LiDARFrame | None, name: str,
                   env: CameraEnv | None = None) -> None:
@@ -1004,10 +1013,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._api_lidar_inspect()
             elif path == "/api/matte-result-as-char":
                 self._api_matte_as_char()
+            elif path == "/api/prep":
+                self._api_prep()
+            elif path == "/api/trim":
+                self._api_trim()
+            elif path == "/api/reset":
+                self._api_reset()
             else:
                 raise ApiError(404, f"未知接口 {path}",
-                               "可用：POST /api/upload|render|export|matte|lidar/inspect|"
-                               "matte-result-as-char")
+                               "可用：POST /api/upload|render|export|matte|prep|trim|reset|"
+                               "lidar/inspect|matte-result-as-char")
         except ApiError as exc:
             self._send_error(exc)
         except Exception as exc:                    # 兜底：不吐 traceback 给浏览器
@@ -1036,7 +1051,7 @@ class Handler(BaseHTTPRequestHandler):
         if "char" in fields:
             data, filename = fields["char"]
             arr, has_alpha = _decode_image(data, "立绘", "RGBA")
-            store.set_char(_to_f01(arr), _safe_name(filename, "char.png"))
+            store.set_char(_to_f01(arr), _safe_name(filename, "char.png"), original=True)
             kinds.append("char")
             # fg 语义（与前端 app.js 对齐）：源图没 alpha 通道 → false（提示先抠图）；
             # 有 alpha → 不透明像素占比（原版 cutout 的 fg 口径同族）
@@ -1106,6 +1121,126 @@ class Handler(BaseHTTPRequestHandler):
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Arcam-Export": f"{target}; {elapsed:.0f}ms",
         })
+
+    def _api_prep(self) -> None:
+        """立绘自动修图链（FEATURE-SPEC §1；index.html:2400-2440 的 1:1 对译）。
+
+        steps 缺省四步全跑；结果**替换会话内的立绘**（原版修图线改
+        chBase/chCanvas 的同语义），后续 render 直接用它。
+        """
+        from arcam.matte_tools import auto_prepare_char, is_half_body
+        data = self._read_json()
+        steps = data.get("steps") or ["solid", "trim", "soften", "blur"]
+        bad = [s for s in steps if s not in ("solid", "trim", "soften", "blur")]
+        if bad:
+            raise ApiError(400, f"steps 里有不认识的步骤 {bad}",
+                           "steps 可选：solid（纯色底）/ trim（裁边）/ soften（柔边）/ blur（微糊）")
+        snap = self._store().snapshot()
+        char01 = snap["char01"]
+        if char01 is None:
+            raise ApiError(400, "还没有上传立绘，没东西可修",
+                           "先上传立绘（POST /api/upload 的 char 字段）再修图")
+        started = time.perf_counter()
+        with self.server.render_lock:                # type: ignore[attr-defined]
+            prep = auto_prepare_char(char01, enabled=True)
+            # 步进式摘除：把没点的步骤从结果里剔掉（重算比"撤销"更稳）
+            if len(steps) < 4:
+                prep = self._prep_subset(char01, steps)
+            half = is_half_body(prep.rgba01)
+        self._store().set_char(prep.rgba01, snap["char_name"])
+        self._send_json(200, {
+            "ok": True,
+            "image": _data_uri(encode_png(prep.rgba01)),
+            "cutRatio": None if prep.cut_ratio is None else round(float(prep.cut_ratio), 4),
+            "trimmed": prep.trimmed,
+            "halfBody": half,
+            "actions": list(prep.actions),
+            "ms": round((time.perf_counter() - started) * 1000.0, 3),
+        })
+
+    @staticmethod
+    def _prep_subset(char01: np.ndarray, steps: list[str]):
+        """按 steps 子集跑修图链（顺序与原版一致，没点的步跳过）。"""
+        from arcam.matte_tools import (
+            PreparedChar, auto_trim, lens_blur, soften_edge,
+        )
+        from arcam.matte_tools import _flood_solid, CUT_RATIO_MAX, CUT_RATIO_MIN
+        arr = char01
+        cut_ratio = None
+        trimmed = False
+        actions: list[str] = []
+        if "solid" in steps:
+            try:
+                out, ratio = _flood_solid(arr, 32.0, 1.2)
+                if out is not None and CUT_RATIO_MIN <= ratio <= CUT_RATIO_MAX:
+                    arr = out
+                    cut_ratio = ratio
+                    actions.append("note.autoCut")
+            except Exception:
+                pass
+        if "trim" in steps:
+            try:
+                res = auto_trim(arr)
+                if res is not None:
+                    arr = res[0]
+                    trimmed = True
+                    actions.append("note.autoTrim")
+            except Exception:
+                pass
+        if "soften" in steps:
+            try:
+                soft, changed = soften_edge(arr, erode=1, feather=2)
+                if changed:
+                    arr = soft
+                    actions.append("note.autoSoft")
+            except Exception:
+                pass
+        if "blur" in steps:
+            try:
+                arr = lens_blur(arr, 0.62)
+                actions.append("note.autoBlur")
+            except Exception:
+                pass
+        from arcam.matte_tools import is_half_body
+        return PreparedChar(arr, cut_ratio, trimmed, is_half_body(arr),
+                            tuple(actions))
+
+    def _api_trim(self) -> None:
+        """只裁边（修图按钮组的单步入口；从当前立绘重算，不叠加）。"""
+        from arcam.matte_tools import auto_trim
+        self._read_json()
+        snap = self._store().snapshot()
+        char01 = snap["char01"]
+        if char01 is None:
+            raise ApiError(400, "还没有上传立绘，没东西可裁",
+                           "先上传立绘再点「自动裁边」")
+        with self.server.render_lock:                # type: ignore[attr-defined]
+            res = auto_trim(char01)
+        if res is None:
+            raise ApiError(400, "裁不动：四周没有透明边距，或内容太小",
+                           "只有在立绘四周有透明留白时裁边才有意义")
+        arr, rect = res
+        self._store().set_char(arr, snap["char_name"])
+        self._send_json(200, {
+            "ok": True,
+            "image": _data_uri(encode_png(arr)),
+            "rect": [int(v) for v in rect],
+            "trimmed": True,
+        })
+
+    def _api_reset(self) -> None:
+        """还原到上传时的立绘（原版 chReset → chOrig，index.html:2783-2786）。"""
+        self._read_json()
+        snap = self._store().snapshot()
+        orig = snap["char_orig01"]
+        if orig is None:
+            raise ApiError(400, "还没有上传过立绘，没东西可还原",
+                           "先上传一张立绘")
+        self._store().set_char(orig, snap["char_name"])
+        self._send_json(200, {"ok": True,
+                              "image": _data_uri(encode_png(orig)),
+                              "width": int(orig.shape[1]),
+                              "height": int(orig.shape[0])})
 
     def _api_matte(self) -> None:
         data = self._read_json()

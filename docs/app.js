@@ -40,7 +40,7 @@ const state = {
   params: Object.assign({}, S_DEFAULTS),
   photoImg: null, photoW: 0, photoH: 0,
   photoCanvasFull: null, photoCanvasPreview: null,
-  charImg: null, charName: '', charCanvas: null, charHasAlpha: false,
+  charImg: null, charName: '', charCanvas: null, charOrig: null, charHasAlpha: false,
   renderSeq: 0,   // 序号哨兵：过期异步渲染直接丢弃，防旧图盖新图
   renderTimer: 0
 };
@@ -179,6 +179,7 @@ async function setChar(file) {
   state.charImg = loaded.img;
   state.charName = file.name;
   state.charCanvas = drawToCanvas(loaded.img, loaded.w, loaded.h);
+  state.charOrig = drawToCanvas(loaded.img, loaded.w, loaded.h);   // 还原基线（/api/reset 同语义）
   state.charHasAlpha = hasAlpha(state.charCanvas);
   setName('char-name', file.name + ' · ' + loaded.w + '×' + loaded.h);
   $('preview-empty').hidden = true;
@@ -193,6 +194,8 @@ async function setChar(file) {
   }
   if (state.photoCanvasFull) renderNow();
   else setStatus('立绘已上传，请上传照片');
+  // 导入后问一句全身/半身（只定默认走哪条路，不改任何状态）
+  $('kind-modal').hidden = false;
 }
 
 /* ================= 5. 上传（drag&drop + 点击选择） ================= */
@@ -276,6 +279,7 @@ async function renderNow() {
       composeParams(p));
     if (seq !== state.renderSeq) return; // 过期渲染直接丢弃
     drawToPreview(r.shot);
+    drawHudOverlay();
     showScene(r.scene);
     setStatus('渲染完成', performance.now() - t0);
   } catch (e) {
@@ -639,6 +643,12 @@ function init() {
   window.addEventListener('load', ensureMatte);
   window.addEventListener('arcam:matte-ready', refreshMatteBtn);
 
+  initLang();
+  bindEditLine();
+  bindLive();
+  $('hud-canvas').hidden = false;
+  drawHudOverlay();
+
   if (!pipelineReady) {
     const msg = '运算模块未就绪：' + _missing.join('、') +
       ' 未发布或加载失败，本页功能暂不可用';
@@ -646,6 +656,175 @@ function init() {
     $('preview-empty').textContent = msg;
     $('preview-empty').hidden = false;
   }
+}
+
+/* ================= 10. 语言（FEATURE-SPEC §3） ================= */
+
+// t() 薄封装：i18n.js 挂在 window.arcamT 上（与 webui 侧同一张表）
+function t(key) {
+  return window.arcamT ? window.arcamT.apply(null, arguments) : key;
+}
+
+function initLang() {
+  const q = new URLSearchParams(location.search).get('lang');
+  if (q === 'zh' || q === 'en') window.ARCAM_LANG = q;
+  else {
+    try {
+      const s = localStorage.getItem('arcam.lang');
+      if (s === 'zh' || s === 'en') window.ARCAM_LANG = s;
+    } catch (e) {}
+  }
+  applyLang();
+  $('btn-lang').addEventListener('click', () => {
+    window.ARCAM_LANG = window.ARCAM_LANG === 'en' ? 'zh' : 'en';
+    try { localStorage.setItem('arcam.lang', window.ARCAM_LANG); } catch (e) {}
+    applyLang();
+    renderNow();
+  });
+}
+
+function applyLang() {
+  const lang = window.ARCAM_LANG === 'en' ? 'en' : 'zh';
+  document.documentElement.lang = lang === 'en' ? 'en' : 'zh-CN';
+  document.title = t('app.title');
+  document.querySelectorAll('[data-t]').forEach((el) => {
+    const v = t(el.dataset.t);
+    if (v !== el.dataset.t) el.textContent = v;
+  });
+  $('btn-lang').textContent = lang === 'en' ? '中' : 'EN';
+  $('btn-lang').title = t('lang.switch');
+  if (window.arcamLive && window.arcamLive.active) $('btn-live').textContent = t('btn.liveStop');
+  else $('btn-live').textContent = t('btn.live');
+}
+
+/* ================= 11. 修图线（纯色底/裁边/还原 + kind 弹窗） ================= */
+
+function showTip(key) {
+  const el = $('tip');
+  el.textContent = t(key);
+  el.hidden = false;
+  clearTimeout(showTip._t);
+  showTip._t = setTimeout(() => { el.hidden = true; }, 3600);
+}
+
+function bindEditLine() {
+  $('btn-cut-solid').addEventListener('click', doPrep);
+  $('btn-trim').addEventListener('click', doTrim);
+  $('btn-reset').addEventListener('click', doReset);
+  $('kind-full').addEventListener('click', () => applyCharKind(false));
+  $('kind-half').addEventListener('click', () => applyCharKind(true));
+  $('kind-close').addEventListener('click', () => { $('kind-modal').hidden = true; });
+}
+
+function doPrep() {
+  if (!state.charCanvas) { showTip('note.chNone'); return; }
+  const MT = window.arcamMatteTools;
+  if (!MT) { setStatus('修图模块未加载', null, true); return; }
+  const before = MT.copyOf(state.charCanvas);
+  const r = MT.autoPrepareChar(state.charCanvas);
+  if (r.canvas !== before && (r.cut !== null || r.trimmed)) {
+    state.charCanvas = r.canvas;
+    state.charName = state.charName;   // 名字不变
+  }
+  const parts = [];
+  if (r.cut !== null) parts.push(t('note.autoCut', (r.cut * 100).toFixed(0)));
+  (r.actions || []).forEach((a) => { if (a !== 'note.autoCut') parts.push(t(a)); });
+  $('edit-note').textContent = parts.join('　');
+  showTip('note.chLoaded');
+  renderNow();
+}
+
+function doTrim() {
+  if (!state.charCanvas) { showTip('note.chNone'); return; }
+  const MT = window.arcamMatteTools;
+  const r = MT.autoTrim(state.charCanvas);
+  if (!r) { $('edit-note').textContent = t('note.noMargin'); return; }
+  state.charCanvas = r.canvas;
+  $('edit-note').textContent = t('note.trimmed', r.rect.w, r.rect.h);
+  renderNow();
+}
+
+function doReset() {
+  const MT = window.arcamMatteTools;
+  if (!MT || !state.charOrig) { showTip('note.chNone'); return; }
+  state.charCanvas = MT.copyOf(state.charOrig);
+  $('edit-note').textContent = t('note.chReset');
+  renderNow();
+}
+
+function applyCharKind(half) {
+  const p = state.params;
+  if (half) {
+    p.mode = 'free'; p.size_pct = 60; p.edge_bar = 2;
+    $('p-mode').value = 'free';
+    $('p-size-pct-rng').value = 60;
+    $('p-size-pct-val').textContent = '60%';
+    $('p-edge-bar').value = '2';
+  } else {
+    p.mode = 'ground'; p.shot = '全身';
+    $('p-mode').value = 'ground';
+    $('p-shot').value = '全身';
+  }
+  syncModeVisibility();
+  $('kind-modal').hidden = true;
+  renderNow();
+}
+
+/* ================= 12. 实时相机 + HUD（FEATURE-SPEC §4/§2） ================= */
+
+function bindLive() {
+  $('btn-live').addEventListener('click', () => {
+    if (window.arcamLive.active) window.arcamLive.stop();
+    else window.arcamLive.start();
+  });
+  $('btn-shot').addEventListener('click', () => {
+    const cv = window.arcamLive.shoot();
+    if (!cv) { showTip('note.shotFail'); return; }
+    cv.toBlob((blob) => {
+      if (!blob) { showTip('note.shotFail'); return; }
+      setPhoto(new File([blob], 'camera.png', { type: 'image/png' }));
+      showTip('note.chLoaded');
+    }, 'image/png');
+  });
+  window.arcamLive.onOrient = (pitch, roll) => {
+    const p = state.params;
+    p.pitch = Math.round(pitch * 2) / 2;
+    p.roll = Math.round(roll * 2) / 2;
+    $('p-pitch-num').value = p.pitch;
+    $('p-pitch-rng').value = p.pitch;
+    $('p-roll-num').value = p.roll;
+    $('p-roll-rng').value = p.roll;
+    scheduleRender();
+    drawHudOverlay();
+  };
+  // 相机开启后每帧重画 HUD（视频尺寸在 fit 里才知道）
+  const origFit = window.arcamLive.fit;
+  window.arcamLive.fit = function () {
+    origFit();
+    drawHudOverlay();
+  };
+}
+
+//: HUD 开关（原版 S.grid/body/horizon；默认只开网格）
+const HUD_ON = { grid: true, body: false, horizon: false };
+
+function drawHudOverlay() {
+  const hud = $('hud-canvas'), cv = $('preview-canvas');
+  if (!hud || !cv || !window.arcamHud) return;
+  const W = cv.width, H = cv.height;
+  if (W < 8 || H < 8) return;
+  hud.width = W; hud.height = H;
+  const ctx = hud.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+  const p = state.params;
+  const cam = { W: W, H: H, h: p.h, feq: p.feq, pitch: p.pitch, roll: p.roll };
+  const subj = { hp: p.hp, d: p.d, x: p.x };
+  const R = window.arcamCore ? window.arcamCore.frameRect(p.frame, W, H) : null;
+  if (R) window.arcamHud.drawFrame(ctx, R, { x: 0, y: 0, w: W, h: H }, W, H);
+  if (HUD_ON.grid) window.arcamHud.drawGrid(ctx, cam);
+  if (HUD_ON.horizon) window.arcamHud.drawHorizon(ctx, cam, t('horizon'));
+  if (HUD_ON.body) window.arcamHud.drawFigure(ctx, cam, subj);
+  window.arcamHud.drawHud(ctx, cam, subj, !!state.charCanvas, null, p.shot, p.mode);
 }
 
 init();

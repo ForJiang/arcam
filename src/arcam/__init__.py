@@ -28,6 +28,26 @@ from arcam.compose import ComposedShot, compose_char_layer, compose_shot
 from arcam.scene import build_scene, load_scene, save_scene
 from arcam.tone import tone_matched_layer
 from arcam.matting import MattingResult, anime_cut
+from arcam.matte_tools import (
+    PreparedChar,
+    auto_prepare_char,
+    auto_trim,
+    content_bounds,
+    cut_solid_bg,
+    is_half_body,
+    lens_blur,
+    soften_edge,
+)
+from arcam.hud import (
+    composition_hints,
+    draw_figure,
+    draw_grid,
+    draw_horizon,
+    draw_hud_text,
+    frame_overlay,
+    grid_paths,
+)
+from arcam.i18n import DEFAULT_LANG, LANGS, TXT, t
 from arcam.video import PoseKey, PoseTrack, load_track, render_track, save_track
 from arcam.depth import (
     LiDARFrame,
@@ -58,6 +78,11 @@ __all__ = [
     "build_scene", "save_scene", "load_scene",
     "tone_matched_layer",
     "MattingResult", "anime_cut",
+    "PreparedChar", "auto_prepare_char", "auto_trim", "content_bounds",
+    "cut_solid_bg", "is_half_body", "lens_blur", "soften_edge",
+    "composition_hints", "draw_figure", "draw_grid", "draw_horizon",
+    "draw_hud_text", "frame_overlay", "grid_paths",
+    "DEFAULT_LANG", "LANGS", "TXT", "t",
     "PoseKey", "PoseTrack", "load_track", "save_track", "render_track",
     "LiDARFrame", "load_depth", "align_to_canvas", "save_depth",
     "GroundPlane", "CameraEnv", "DepthStats", "backproject",

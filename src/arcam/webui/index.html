@@ -6,6 +6,9 @@
 <title>AR 取景器 — arcam web</title>
 <!-- 静态资源由 webapp 的 GET /static/* 提供（WEB-SPEC §1）；零 CDN、零构建。 -->
 <link rel="stylesheet" href="/static/style.css">
+<script src="/static/i18n.js" defer></script>
+<script src="/static/hud.js" defer></script>
+<script src="/static/live.js" defer></script>
 <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -14,31 +17,32 @@
   <header id="topbar">
     <h1>AR 取景器</h1>
     <p id="app-sub">让她走出屏幕 · 本地单机工具（照片 + 立绘 + 可选 LiDAR 深度）</p>
+    <button type="button" id="btn-lang" class="lang-btn" title="切换语言">EN</button>
   </header>
 
   <main id="layout">
 
     <!-- 左栏：输入 -->
     <section class="col">
-      <h2>输入</h2>
+      <h2 data-t="sec.input">输入</h2>
 
       <div class="drop-zone" id="drop-photo">
-        <strong>照片（必选）</strong>
-        <span class="dz-hint">拖拽图片到此处，或点击选择</span>
+        <strong data-t="dz.photo">照片（必选）</strong>
+        <span class="dz-hint" data-t="dz.photoHint">拖拽图片到此处，或点击选择</span>
         <span class="dz-name empty" id="photo-name">未选择</span>
       </div>
       <input type="file" id="file-photo" accept="image/*" hidden>
 
       <div class="drop-zone" id="drop-char">
-        <strong>立绘</strong>
-        <span class="dz-hint">带 alpha 的 PNG 最佳；普通图请先点「抠图」</span>
+        <strong data-t="dz.char">立绘</strong>
+        <span class="dz-hint" data-t="dz.charHint">带 alpha 的 PNG 最佳；普通图请先点「抠图」</span>
         <span class="dz-name empty" id="char-name">未选择</span>
       </div>
       <input type="file" id="file-char" accept="image/*" hidden>
 
       <div class="drop-zone" id="drop-depth">
-        <strong>深度帧（可选）</strong>
-        <span class="dz-hint">LiDAR 深度：png/tif(16bit) / npy / depth / exr / heic</span>
+        <strong data-t="dz.depth">深度帧（可选）</strong>
+        <span class="dz-hint" data-t="dz.depthHint">LiDAR 深度：png/tif(16bit) / npy / depth / exr / heic</span>
         <span class="dz-name empty" id="depth-name">未选择</span>
       </div>
       <input type="file" id="file-depth" accept="image/*,.npy,.depth,.exr,.heic" hidden>
@@ -46,28 +50,65 @@
       <p class="hint" id="input-hint"></p>
 
       <div class="btn-row">
-        <button type="button" id="btn-matte">抠图</button>
+        <button type="button" id="btn-live" data-t="btn.live">开启相机</button>
+        <button type="button" id="btn-matte" data-t="btn.cutAi">抠图</button>
         <button type="button" id="btn-lidar">LiDAR 诊断</button>
-        <button type="button" id="btn-rerender">重新渲染</button>
+        <button type="button" id="btn-rerender" data-t="btn.rerender">重新渲染</button>
       </div>
+
+      <!-- 修图线（原版折叠区：纯色底 / 裁边 / 还原，index.html:242-246） -->
+      <details class="fold">
+        <summary data-t="fold.edit">修饰立绘</summary>
+        <p class="fold-tip" data-t="fold.editTip">抠图 / 裁边 / 还原 —— 把手上这张立绘修干净（不是换一张）</p>
+        <div class="btn-row">
+          <button type="button" id="btn-cut-solid" data-t="btn.cutSolid">纯色底抠图</button>
+          <button type="button" id="btn-trim" data-t="btn.trim">自动裁边</button>
+          <button type="button" id="btn-reset" data-t="btn.reset">还原</button>
+        </div>
+        <p class="hint" id="edit-note"></p>
+      </details>
     </section>
 
-    <!-- 右栏：预览 -->
+    <!-- 右栏：预览（含相机视频层与 HUD 浮层） -->
     <section class="col">
-      <h2>预览</h2>
-      <div class="canvas-wrap">
+      <h2 data-t="sec.preview">预览</h2>
+      <div class="canvas-wrap" id="stage">
+        <video id="cam-video" playsinline muted hidden></video>
         <canvas id="preview-canvas" width="16" height="9"></canvas>
-        <p class="hint" id="preview-empty">上传照片与立绘后自动渲染</p>
+        <canvas id="hud-canvas" width="16" height="9" hidden></canvas>
+        <p class="hint" id="preview-empty" data-t="preview.empty">上传照片与立绘后自动渲染</p>
+        <p class="tip" id="tip" hidden></p>
+      </div>
+      <div class="btn-row" id="live-row" hidden>
+        <button type="button" id="btn-shot" data-t="btn.shot">拍照</button>
+        <span class="zoom-cell" id="zoom-cell" hidden>
+          <label for="zoom-rng" data-t="live.zoom">变焦</label>
+          <input type="range" id="zoom-rng" min="1" max="1" step="0.1" value="1">
+          <span class="val" id="zoom-val">1.0×</span>
+        </span>
       </div>
       <div class="env-box" id="env-box" hidden></div>
       <div class="btn-row">
-        <button type="button" id="btn-png">下载 PNG</button>
-        <button type="button" id="btn-layer">下载立绘层</button>
-        <button type="button" id="btn-bundle">下载素材包 zip</button>
-        <button type="button" id="btn-copy-scene">复制 scene.json</button>
+        <button type="button" id="btn-png" data-t="btn.png">下载 PNG</button>
+        <button type="button" id="btn-layer" data-t="btn.layer">下载立绘层</button>
+        <button type="button" id="btn-bundle" data-t="btn.bundle">下载素材包 zip</button>
+        <button type="button" id="btn-copy-scene" data-t="btn.copyScene">复制 scene.json</button>
       </div>
     </section>
   </main>
+
+  <!-- 全身 / 半身二选一（导入立绘后弹一次，index.html:443-460） -->
+  <div class="kind-modal" id="kind-modal" hidden>
+    <div class="kind-card">
+      <p class="kd-title" data-t="kind.title">这张立绘是全身还是半身？</p>
+      <p class="kd-tip" data-t="kind.tip">全身 = 脚踩地面（贴地）；半身 = 切口压在取景框下边（自由 + 贴下）。选完还能在「摆位」里改</p>
+      <div class="btn-row">
+        <button type="button" id="kind-full" data-t="kind.full">全身</button>
+        <button type="button" id="kind-half" data-t="kind.half">半身</button>
+        <button type="button" id="kind-close" class="ghost" data-t="kind.close">不选，保持现状</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 底部：摆放参数（默认值 = 原版 S 默认，WEB-SPEC §2） -->
   <section id="panel-params">

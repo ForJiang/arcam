@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""API 分步推送（git 协议不通时的备用路径，见 memory: github-api-push-workaround）。
+
+git 协议失败但 api.github.com 正常时：blob → tree(base_tree) → commit(parent=远端
+tip) → PATCH refs。用法：GH_TOKEN=... python3 tools/api-push.py <owner/repo> <branch>
+"""
+import base64
+import json
+import subprocess
+import sys
+import urllib.request
+
+REPO = sys.argv[1] if len(sys.argv) > 1 else "ForJiang/arcam"
+BRANCH = sys.argv[2] if len(sys.argv) > 2 else "main"
+TOKEN = subprocess.run(
+    ["git", "credential", "fill"], input="host=github.com\nprotocol=https\n",
+    capture_output=True, text=True).stdout
+TOKEN = next(l.split("=", 1)[1].strip() for l in TOKEN.splitlines() if l.startswith("password="))
+API = f"https://api.github.com/repos/{REPO}"
+
+
+def api(method, path, body=None):
+    req = urllib.request.Request(API + path, method=method)
+    req.add_header("Authorization", f"Bearer {TOKEN}")
+    req.add_header("Accept", "application/vnd.github+json")
+    data = json.dumps(body).encode() if body is not None else None
+    if data:
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, data=data) as r:
+        raw = r.read()
+        return json.loads(raw) if raw else {}
+
+
+remote = api("GET", f"/git/refs/heads/{BRANCH}")["object"]["sha"]
+local = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+parent = subprocess.run(["git", "rev-parse", "HEAD~1"], capture_output=True, text=True).stdout.strip()
+print(f"远端 {BRANCH}: {remote[:8]}  本地 HEAD: {local[:8]}  parent: {parent[:8]}", flush=True)
+assert remote == parent, f"远端不是本地父提交（{remote[:8]} != {parent[:8]}）——历史分叉，先对齐再推"
+
+changed = subprocess.run(["git", "diff", "--name-only", f"{remote}..{local}"],
+                         capture_output=True, text=True).stdout.split()
+print(f"变更 {len(changed)} 个文件", flush=True)
+
+tree_entries = []
+for path in changed:
+    blob = subprocess.run(["git", "show", f"HEAD:{path}"], capture_output=True, check=True).stdout
+    b = api("POST", "/git/blobs", {
+        "content": base64.b64encode(blob).decode(), "encoding": "base64"})
+    tree_entries.append({"path": path, "mode": "100644", "type": "blob", "sha": b["sha"]})
+    print(f"  blob {path}", flush=True)
+
+tree = api("POST", "/git/trees", {"base_tree": remote, "tree": tree_entries})
+commit = api("POST", "/git/commits", {
+    "message": subprocess.run(["git", "log", "-1", "--format=%B"], capture_output=True,
+                              text=True).stdout.strip(),
+    "tree": tree["sha"], "parents": [remote]})
+api("PATCH", f"/git/refs/heads/{BRANCH}", {"sha": commit["sha"], "force": False})
+print(f"已推送 {BRANCH} -> {commit['sha'][:8]}", flush=True)

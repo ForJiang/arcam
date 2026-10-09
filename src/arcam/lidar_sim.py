@@ -5,18 +5,24 @@
 LIDAR-SPEC §1 的**深度相机坐标**（y 向下、z 前向）：
 
 - 地面平面（世界 +Y 向上，相机高 h）在深度相机坐标满足 ``n·p = −h``，
-  法向 ``n = (sin r, −cos r·cos p, −cos r·sin p)``（r、p 为弧度）——
-  等价于世界坐标里的平面方程经 ``arcam.plane._to_arcam_camera_coords`` 所指的
-  y 翻转。推导：相机位姿 R = Rz(roll)·Rx(pitch)（arcam y 上 z 前向约定，
-  pitch>0 为俯视），世界点 q = (x, 0, z) 投影到相机坐标再翻 y。
+  法向 ``n = (cos p·sin r, −cos p·cos r, −sin p)``（r、p 为弧度）——
+  与 ``arcam.plane.camera_env_from_plane`` docstring / plane.py 模块头钉死的
+  「深度系地面朝天法向」恒等式**逐字一致**（T2 测试
+  ``test_t2_offset_semantics_under_flip`` 对同一分解断言），即 project/place
+  旋转链（先绕相机 x 俯仰、后绕光轴滚转）下世界 +Y 在深度系的像。
+  ⚠ 曾经的写法 ``n = (sin r, −cos r·cos p, −cos r·sin p)`` 对应「先滚转、
+  后俯仰」的另一种旋转顺序，与 arcam 的 project/place 不一致：p/roll 小的时候
+  误差不到 1°，p=30°/r=−20° 时闭环恢复的 roll 会差 2.8°（超出 T2 门禁）。
 - 像素 (u, v) 的射线方向 ``d = ((u−cx)/fx, (v−cy)/fy, 1)``，命中地面的
   射线参数（即 depth 值，= 后投影点的 z 分量）为 ``t = −h/(n·d)``——
   与 ``arcam.plane.backproject(depth)`` 的 ``p = d·depth`` 完全互逆，
-  因此 fit → camera_env_from_plane 可闭环恢复 (h, pitch, roll)。
+  因此 fit → camera_env_from_plane 可**精确**闭环恢复 (h, pitch, roll)
+  （容差内只剩 σ=1cm 噪声，与 test_lidar_plane 的 _synth_scene 同源）。
 - 无效区：``n·d ≥ 0``（地平线及以上，射线不与地面相交）→ NaN；另加一块
   矩形 NaN 区模拟遮挡吸光体；全部叠加 σ=1cm 高斯噪声。
-- 内参按针孔满幅 FOV≈60°（``fx = W/(2·tan30°)``、``fy = H/(2·tan30°)``、
-  ``cx = W/2``、``cy = H/2``），与 LIDAR-SPEC §2 对 npy 内参缺省的估计约定一致。
+- 内参按针孔满幅 FOV≈60°（``fx = W/(2·tan30°)``、``fy = fx``（方形像素假设，
+  同 depth._estimate_pinhole 口径）、``cx = W/2``、``cy = H/2``），与
+  LIDAR-SPEC §2 对 npy 内参缺省的估计约定一致。
 
 ``simulate_scene_server`` 起一个 daemon 线程扮演「设备」：连接已在监听的
 ``arcam.lidar_live.serve``，按协议（``send_frame``）推 ``frames`` 帧后关闭。
@@ -68,11 +74,15 @@ def synth_ground_frame(
     roll = math.radians(roll_deg)
     fx, fy, cx, cy = pinhole_defaults(width, height)
 
-    # 地面平面法向（深度相机坐标，y 向下、z 前向），n·p = −h
+    # 地面平面法向（深度相机坐标，y 向下、z 前向），n·p = −h。
+    # 与 plane.py 模块头「核心恒等式」/ camera_env_from_plane docstring 逐字一致
+    # （T2 test_t2_offset_semantics_under_flip 对同一分解断言）—— project/place
+    # 旋转链（先俯仰、后滚转）下世界 +Y 在深度系的像；写错成「先滚转后俯仰」的
+    # (sin r, −cos r·cos p, −cos r·sin p) 会让闭环恢复的 roll 差到 2.8°（p=30°）。
     normal = np.array([
-        math.sin(roll),
-        -math.cos(roll) * math.cos(pitch),
-        -math.cos(roll) * math.sin(pitch),
+        math.cos(pitch) * math.sin(roll),
+        -math.cos(pitch) * math.cos(roll),
+        -math.sin(pitch),
     ])
 
     us = np.arange(width, dtype=np.float64)

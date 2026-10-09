@@ -130,6 +130,29 @@ def test_t2_fixed_roll_branch() -> None:
     assert abs(fixed.height_m - h) < 0.02
 
 
+def test_t2_lidar_sim_closed_loop_extreme_pose() -> None:
+    """lidar_sim 合成帧的闭环恢复精度（T2 容差），含大角度位姿。
+
+    钉子：``synth_ground_frame`` 的地面法向曾写成「先滚转后俯仰」的
+    ``(sin r, −cos r·cos p, −cos r·sin p)``，与 project/place 的旋转链
+    （先俯仰后滚转）不一致 —— 小角度误差 <1° 测不出，p=30°/r=−20° 时
+    闭环恢复的 roll 差 2.8°、pitch 差 2.0°，超出 T2 门禁（roll<2°/pitch<1°）。
+    """
+    from arcam.lidar_sim import synth_ground_frame
+
+    for h, pitch, roll in ((1.55, 30.0, -20.0), (1.6, 12.0, 8.0), (1.55, -15.0, -10.0)):
+        meta, depth = synth_ground_frame(h=h, pitch_deg=pitch, roll_deg=roll,
+                                         width=256, height=192, index=0)
+        frame = LiDARFrame(depth_m=depth, fx=meta['fx'], fy=meta['fy'],
+                           cx=meta['cx'], cy=meta['cy'], source='lidar_sim')
+        env = camera_env_from_plane(fit_ground_plane(frame))
+        assert abs(env.height_m - h) < 0.02, f'h 误差 {abs(env.height_m - h):.4f} m'
+        assert abs(env.pitch_deg - pitch) < 1.0, \
+            f'pitch 误差 {abs(env.pitch_deg - pitch):.4f}°（h={h} p={pitch} r={roll}）'
+        assert abs(env.roll_deg - roll) < 2.0, \
+            f'roll 误差 {abs(env.roll_deg - roll):.4f}°（h={h} p={pitch} r={roll}）'
+
+
 def test_t2_anchor_identities() -> None:
     """法向锚点（§3 要求）：pitch=0,roll=0 → n_arcam=(0,1,0)；pitch=90 → 沿 z 轴。"""
     flat = camera_env_from_plane(GroundPlane((0.0, -1.0, 0.0), 1.6, 100, 0.0))

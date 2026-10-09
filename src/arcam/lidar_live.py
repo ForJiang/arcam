@@ -14,9 +14,9 @@ wire format（每帧，无帧边界 magic，靠两个长度前缀定界）::
   其中 ``roll_deg/pitch_deg/height_m`` 可缺省或为 ``null``（= 未知，对应
   LIDAR-SPEC §2 LiDARFrame 的 ``None``）。
 - 落盘格式（out_dir）：``arcam.depth.save_depth`` 的 ``*.depth``（LIDAR-SPEC §2.3，
-  magic ``ARCD``）。若 L1 的 ``arcam.depth`` 尚未落地，本模块以内置的、严格按
-  §2.3 字节布局的写盘函数兜底（``_write_depth_spec``），保证流式落盘可被后续
-  ``load_depth`` 读回。
+  magic ``ARCD``）。若 ``arcam.depth`` 不可导入（裁剪安装等），本模块以内置的、
+  严格按 §2.3 字节布局的写盘函数兜底（``_write_depth_spec``），保证流式落盘可被
+  后续 ``load_depth`` 读回。
 
 连接模型：单客户端、顺序帧。一个客户端 EOF / 坏帧后服务端关闭该连接并继续
 accept 下一个客户端（坏帧不挂服务线程）；``max_frames`` 达量后整体退出。
@@ -25,8 +25,8 @@ accept 下一个客户端（坏帧不挂服务线程）；``max_frames`` 达量�
 from __future__ import annotations
 
 import contextlib
-import inspect
 import json
+import math
 import socket
 import struct
 from collections.abc import Iterator
@@ -45,9 +45,8 @@ _MAX_META_BYTES = 1 << 16              # meta JSON 上限（宽松，防恶意�
 _DEPTH_DTYPE = np.dtype('<f4')         # 小端 float32，与 .depth 文件体一致
 
 #: meta 必须给出（非 null）的键：尺寸 + 针孔内参。
+#: （roll_deg/pitch_deg/height_m 可缺省或为 null = 未知，见模块 docstring）
 REQUIRED_META_KEYS: tuple[str, ...] = ('W', 'H', 'fx', 'fy', 'cx', 'cy')
-#: meta 至少出现（可为 null）的键：ARKit 横滚/俯仰/已知相机高。
-NULLABLE_META_KEYS: tuple[str, ...] = ('roll_deg', 'pitch_deg', 'height_m')
 
 #: LIDAR-SPEC §2.3 ``.depth`` 文件 magic。
 DEPTH_MAGIC = b'ARCD'
@@ -75,7 +74,10 @@ def _require_number(meta: dict, key: str) -> float:
     value = meta.get(key)
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise ValueError(f'meta[{key!r}] must be a number, got {value!r}')
-    return float(value)
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f'meta[{key!r}] must be finite, got {value!r}')
+    return number
 
 
 def recv_frame(sock: socket.socket) -> tuple[dict, np.ndarray]:
@@ -100,7 +102,9 @@ def recv_frame(sock: socket.socket) -> tuple[dict, np.ndarray]:
         if key not in meta:
             raise ValueError(f'meta missing required key {key!r}')
     width, height = meta['W'], meta['H']
-    if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+    if (not isinstance(width, int) or isinstance(width, bool)
+            or not isinstance(height, int) or isinstance(height, bool)
+            or width <= 0 or height <= 0):
         raise ValueError(f'bad W/H in meta: {width!r} x {height!r}')
     for key in ('fx', 'fy', 'cx', 'cy'):
         _require_number(meta, key)
@@ -143,12 +147,12 @@ def send_frame(sock: socket.socket, meta: dict, depth: np.ndarray) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 落盘：优先 L1 的 arcam.depth.save_depth；未落地则按 spec §2.3 字节布局兜底
+# 落盘：优先 arcam.depth.save_depth；不可用时按 spec §2.3 字节布局兜底
 # ---------------------------------------------------------------------------
 
-try:  # L1 并行产出 depth.py（LiDARFrame/load_depth/save_depth）
+try:  # arcam.depth（.depth 格式的权威实现）；缺失时退回下方按 spec §2.3 的写盘
     from arcam import depth as _arcam_depth  # type: ignore[attr-defined]
-except Exception:  # pragma: no cover - L1 未就绪时的常态
+except Exception:  # pragma: no cover - 仅当 arcam.depth 不可导入（裁剪安装）时
     _arcam_depth = None
 
 
@@ -175,8 +179,8 @@ def _write_depth_spec(path: str | Path, meta: dict, depth: np.ndarray) -> None:
 
 
 def save_depth_file(path: str | Path, meta: dict, depth: np.ndarray) -> None:
-    """把一帧写成 ``.depth``。``arcam.depth.save_depth`` 可用时优先走它
-    （LIDAR-SPEC §6「实时流与模拟器落盘格式」），否则用内置 §2.3 写盘。"""
+    """把一帧写成 ``.depth``。``arcam.depth.save_depth``（LIDAR-SPEC §2 的权威
+    实现，签名冻结为 ``(frame, path)``）可用时优先走它，否则用内置 §2.3 写盘。"""
     if _arcam_depth is not None and hasattr(_arcam_depth, 'save_depth'):
         frame_cls = getattr(_arcam_depth, 'LiDARFrame', None)
         if frame_cls is not None:
@@ -190,18 +194,9 @@ def save_depth_file(path: str | Path, meta: dict, depth: np.ndarray) -> None:
                 height_m=(None if meta.get('height_m') is None else float(meta['height_m'])),
                 source='lidar_live',
             )
-            _dispatch_save_depth(_arcam_depth.save_depth, path, frame)
+            _arcam_depth.save_depth(frame, str(path))
             return
     _write_depth_spec(path, meta, depth)
-
-
-def _dispatch_save_depth(fn, path: str | Path, frame) -> None:
-    """L1 的 ``save_depth`` 参数顺序未在 LIDAR-SPEC §2 冻结，按签名首参名适配。"""
-    params = list(inspect.signature(fn).parameters)
-    if params and params[0] in ('path', 'file', 'filename', 'dst'):
-        fn(str(path), frame)
-    else:
-        fn(frame, str(path))
 
 
 # ---------------------------------------------------------------------------

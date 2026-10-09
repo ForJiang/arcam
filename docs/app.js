@@ -11,7 +11,7 @@
 
 // SITE-SPEC §0/§3：index.html 只引用本文件，两个管线模块在这里动态 import——
 // 这样任一模块未发布/加载失败时 import 只是 reject，页面其余部分照常绑定，
-// 只在状态条与预览区给出降级提示（J1/J2 并行产出中）。
+// 只在状态条与预览区给出降级提示。
 const _missing = [];
 const core = await import('./arcam-core.js').catch(() => { _missing.push('arcam-core.js'); return null; });
 const renderMod = await import('./arcam-render.js').catch(() => { _missing.push('arcam-render.js'); return null; });
@@ -38,7 +38,7 @@ const PREVIEW_LONG_EDGE = 1280;  // 预览降采样长边上限（export 永远�
 
 const state = {
   params: Object.assign({}, S_DEFAULTS),
-  photoImg: null, photoW: 0, photoH: 0, photoName: '',
+  photoImg: null, photoW: 0, photoH: 0,
   photoCanvasFull: null, photoCanvasPreview: null,
   charImg: null, charName: '', charCanvas: null, charHasAlpha: false,
   renderSeq: 0,   // 序号哨兵：过期异步渲染直接丢弃，防旧图盖新图
@@ -156,7 +156,6 @@ async function setPhoto(file) {
   state.photoImg = loaded.img;
   state.photoW = loaded.w;
   state.photoH = loaded.h;
-  state.photoName = file.name;
   state.photoCanvasFull = drawToCanvas(loaded.img, loaded.w, loaded.h);
   // 预览降采样（长边 ≤1280）：与本地后端 previewScale() 同语义，export 仍走全尺寸
   const s = Math.min(1, PREVIEW_LONG_EDGE / Math.max(loaded.w, loaded.h));
@@ -232,20 +231,19 @@ function bindDrop(zoneId, inputId, kind) {
 function camOf(p, W, H) { return { W: W, H: H, h: p.h, feq: p.feq, pitch: p.pitch, roll: p.roll }; }
 function subjOf(p) { return { hp: p.hp, d: p.d, x: p.x }; }
 
-// composeShot/composeCharLayer 的 params。
-// 注：SITE-SPEC §2 未枚举该对象的键名，而 J1 core 的 opts 是 camelCase（§1）、
-// Python 侧是 snake_case——两种拼写都给出，渲染侧认哪套都能跑，多余的键无害。
-function composeParams(p, full) {
+// composeShot/composeCharLayer 的 params。键名取 arcam-render.js normalizeParams
+// 实际读的那一套（SITE-SPEC §1 的 opts 就是 camelCase：charScale/rotBasis/sizePct/
+// edgeBar；frame 另收 frameKey 别名）。渲染侧只读 camelCase，不放 snake_case 副本。
+function composeParams(p) {
   return {
-    frame: p.frame, frame_key: p.frame,
+    frame: p.frame,
     mode: p.mode,
     shot: p.shot,
-    sizePct: p.size_pct, size_pct: p.size_pct,
-    charScale: p.char_scale, char_scale: p.char_scale,
-    rotBasis: p.rot_basis, rot_basis: p.rot_basis,
-    edgeBar: p.edge_bar, edge_bar: p.edge_bar,
-    tone: !!p.tone,
-    full: !!full
+    sizePct: p.size_pct,
+    charScale: p.char_scale,
+    rotBasis: p.rot_basis,
+    edgeBar: p.edge_bar,
+    tone: !!p.tone
   };
 }
 
@@ -275,7 +273,7 @@ async function renderNow() {
     const r = await renderMod.composeShot(
       state.photoCanvasPreview, state.charCanvas, subjOf(p),
       camOf(p, state.photoCanvasPreview.width, state.photoCanvasPreview.height),
-      composeParams(p, false));
+      composeParams(p));
     if (seq !== state.renderSeq) return; // 过期渲染直接丢弃
     drawToPreview(r.shot);
     showScene(r.scene);
@@ -355,12 +353,13 @@ async function composeFull() {
   return renderMod.composeShot(
     state.photoCanvasFull, state.charCanvas, subjOf(p),
     camOf(p, state.photoCanvasFull.width, state.photoCanvasFull.height),
-    composeParams(p, true));
+    composeParams(p));
 }
 
 async function doExportPng() {
   try {
     setStatus('导出中…');
+    if (!state.photoCanvasFull) throw new Error('还没有上传照片，出不了图');
     const r = await composeFull();
     const blob = await canvasToBlob(r.shot, 'image/png');
     const name = 'arcam-render-' + stamp() + '.png';
@@ -375,11 +374,14 @@ async function doExportLayer() {
   try {
     setStatus('导出中…');
     const p = state.params;
+    if (!state.charCanvas) throw new Error('还没有上传立绘，出不了立绘层');
+    // 层与照片同尺寸：没有照片时 camOf 会拿 null.width 抛裸 TypeError，和人话校验一致先挡
+    if (!state.photoCanvasFull) throw new Error('还没有上传照片，出不了立绘层');
     // 立绘层：与照片同尺寸的透明层，直接盖在出图上严丝合缝（Python cmd_char_layer 同语义）
     const r = await renderMod.composeCharLayer(
       state.charCanvas, subjOf(p),
       camOf(p, state.photoCanvasFull.width, state.photoCanvasFull.height),
-      composeParams(p, true));
+      composeParams(p));
     const layer = r && (r.layer || r.charLayer || r.char_layer);
     if (!layer) throw new Error('立绘层为空（立绘缺失或落位失败）');
     const blob = await canvasToBlob(layer, 'image/png');
@@ -394,25 +396,25 @@ async function doExportLayer() {
 async function doExportBundle() {
   try {
     setStatus('导出中…');
+    const p = state.params;
+    if (!state.charCanvas) throw new Error('素材包需要立绘');
+    // 没有照片时 composeFull 里的 camOf 会拿 null.width 抛裸 TypeError；先人话挡掉，
+    // 也省掉一遍白跑的合成（doExportPng 同款校验）
+    if (!state.photoCanvasFull) throw new Error('还没有上传照片，出不了素材包');
     const r = await composeFull(); // { shot, rect, scene, light }
     // 素材包的 character.png 必须是「与 shot.jpg 同一个裁切框」的那份立绘层：
     // Python cmd_bundle 明确不另调 compose_char_layer（它内部固定 '满幅'，
-    // 换画幅会与裁切后的 shot.jpg 错位），而是复用 composeShot 带出来的层。
-    let layer = r && (r.charLayer || r.char_layer);
-    if (!layer) {
-      const p = state.params;
-      const bare = await renderMod.composeShot(
-        null, state.charCanvas, subjOf(p),
-        camOf(p, state.photoCanvasFull.width, state.photoCanvasFull.height),
-        Object.assign(composeParams(p, true), { tone: false }));
-      layer = bare && bare.shot; // composeShot(null, char) = 同裁切框的透明立绘层
-    }
+    // 换画幅会与裁切后的 shot.jpg 错位），而是复用 composeShot 内部带出来的层。
+    // JS 侧 composeShot 的返回值里没有层（那是服务端 _Render 的内部产物），
+    // 所以用同一套参数走 composeCharLayer 拿同框层：frameRect 与落位都由同一批
+    // 参数决定，裁出来必然与 shot.jpg 严丝合缝。
+    const layerRes = await renderMod.composeCharLayer(
+      state.charCanvas, subjOf(p),
+      camOf(p, state.photoCanvasFull.width, state.photoCanvasFull.height),
+      composeParams(p));
+    const layer = layerRes && layerRes.layer;
     if (!layer) throw new Error('这一遍没有产出立绘层（立绘缺失或落位失败）');
-    let scene = r && r.scene;
-    if (!scene && typeof renderMod.buildScene === 'function') {
-      const p = state.params;
-      scene = renderMod.buildScene(r.rect, null, subjOf(p), camOf(p, state.photoCanvasFull.width, state.photoCanvasFull.height), composeParams(p, true));
-    }
+    const scene = r && r.scene;
     if (!scene) throw new Error('scene.json 生成失败');
     const shotBlob = await canvasToBlob(r.shot, 'image/jpeg', 0.95); // JPEG q0.95（同 CLI encode_jpeg 95）
     const layerBlob = await canvasToBlob(layer, 'image/png');
@@ -560,6 +562,12 @@ function bindNumeric(key) {
     if (isFinite(v)) commit(v); // 输入中途（"1."/"−"）不提交
   });
   rng.addEventListener('input', () => { commit(parseFloat(rng.value)); });
+  // 失焦时把夹取后的值写回两个控件：手输超量程时输入框还留着 99，
+  // 与真正参与合成的 params（已夹到量程）不一致，会让人以为没夹成功（同本地 webui）
+  num.addEventListener('change', () => {
+    num.value = state.params[key];
+    rng.value = state.params[key];
+  });
 }
 
 function bindSelect(key, id, parse) {
@@ -633,7 +641,7 @@ function init() {
 
   if (!pipelineReady) {
     const msg = '运算模块未就绪：' + _missing.join('、') +
-      ' 未发布或加载失败（J1/J2 并行产出中），本页功能暂不可用';
+      ' 未发布或加载失败，本页功能暂不可用';
     setStatus(msg, null, true);
     $('preview-empty').textContent = msg;
     $('preview-empty').hidden = false;

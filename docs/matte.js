@@ -203,12 +203,15 @@ export function segPostprocess(raw, crop, outH, outW) {
   if (raw.length !== outH * outW) {
     throw new Error(`抠图后处理： 数据 ${raw.length} 个与输出尺寸 ${outW}×${outH} 不符`);
   }
-  const inv = 1 / (SEG_HI - SEG_LO);
+  // 逐位对齐 matting.py:182：(p - SEG_LO) / (SEG_HI - SEG_LO)。不能写成
+  // × 1/(HI-LO)：1/0.18 不精确，乘出来比除法最多差 1 ulp，而 keepLargestBlob
+  // 的二值阈值恰是 0.5 —— 差 1 ulp 会让 tie 像素在 >=0.5 两侧翻面、整块连通域
+  // 变形（实测 18432 像素随机场 95 处不等、下游 63 像素翻转）。
   const out = new Float64Array(outH * outW);          // 补边区 0
   for (let y = 0; y < nh; y++) {
     const src = (y + oy) * outW + ox, dst = src;      // out 与 raw 同布局，dst=src
     for (let x = 0; x < nw; x++) {
-      let a = (raw[src + x] - SEG_LO) * inv;
+      let a = (raw[src + x] - SEG_LO) / (SEG_HI - SEG_LO);
       out[dst + x] = a < 0 ? 0 : a > 1 ? 1 : a;
     }
   }

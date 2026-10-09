@@ -9,7 +9,7 @@
     arcam video TRACK.json CHAR -o OUTDIR [--bg 单图或目录] [--tone] # 逐帧渲染
     arcam check TRACK.json                                          # 轨道自检
     arcam lidar inspect DEPTH [--json]                              # LiDAR 深度诊断（h/pitch/roll）
-    arcam lidar serve --port 7707 [--out DIR]                       # 实时流接收（模块未就绪时提示退出 0）
+    arcam lidar serve --port 7707 [--out DIR]                       # 实时流接收（Ctrl-C 停止）
     arcam web [--host 127.0.0.1] [--port 8765] [--no-open]          # 本地网页界面（标准库 HTTP 服务）
 
 退出码：0 正常；1 运行期失败（缺文件、素材不合法、轨道有问题）；2 用法错误（argparse）。
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import zipfile
 from pathlib import Path
@@ -207,8 +208,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     ps = lidar_sub.add_parser(
         "serve", help="实时流接收（TCP，协议见 docs/LIDAR-SPEC §6）",
-        description="占位命令：arcam.lidar_live（实时流接收，L4）未就绪时打印提示并"
-                    "正常退出（退出码 0），不影响命令行结构。默认端口 7707。")
+        description="实时接收 iPhone 端推来的深度帧（arcam.lidar_live.serve，"
+                    "LIDAR-SPEC §6 协议）：逐帧打印一行摘要，Ctrl-C 停止；"
+                    "--out 给目录时同步落盘 frame_%06d.depth。模块缺失才提示退出 0。")
     ps.add_argument("--port", type=int, default=7707, metavar="端口",
                     help="监听端口（默认 7707）")
     ps.add_argument("--out", metavar="DIR", default=None,
@@ -253,6 +255,10 @@ def _pose(args, width: int, height: int) -> tuple[Camera, Subject]:
     x = _POSE_DEFAULTS['x'] if args.x is None else args.x
     pitch = _POSE_DEFAULTS['pitch'] if args.pitch is None else args.pitch
     roll = _POSE_DEFAULTS['roll'] if args.roll is None else args.roll
+    # feq<=0 会让 focal=0，place 里 up/focal 直接 ZeroDivisionError（A1 X2）；
+    # NaN/Inf 则静默污染整条投影链。在这里一次性挡成人话错误。
+    if not math.isfinite(args.feq) or args.feq <= 0:
+        raise CliError(f"--feq 必须是有限正数（等效焦距 mm，收到 {args.feq!r}）")
     cam = Camera(width, height, h, args.feq, pitch, roll)
     subj = Subject(args.hp, d, x)
     return cam, subj
@@ -273,14 +279,14 @@ def _env_overrides(args) -> dict:
 
 
 def _load_depth_arg(path, what: str):
-    """懒加载 LiDAR 深度帧；模块未落地 / 文件读不懂 → 人话 CliError（退出 1）。"""
+    """懒加载 LiDAR 深度帧；模块缺失 / 文件读不懂 → 人话 CliError（退出 1）。"""
     p = _need(path, what)
     try:
         from arcam.depth import load_depth
     except ImportError as exc:
         raise CliError(
-            f"LiDAR 深度读取模块未就绪：{exc}（arcam.depth 尚未落地，"
-            "契约见 docs/LIDAR-SPEC.md §2）") from None
+            f"读不到 LiDAR 深度模块：{exc}（arcam.depth 应随包一起提供；"
+            "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §2）") from None
     try:
         return load_depth(p)
     except ValueError as e:
@@ -290,14 +296,14 @@ def _load_depth_arg(path, what: str):
 def _lidar_env_of(depth):
     """fit_ground_plane → camera_env_from_plane（LIDAR-SPEC §4①）。
 
-    懒加载 arcam.plane：L1/L2 未落地或点数不够（ValueError）都转人话 CliError。
+    懒加载 arcam.plane：模块缺失或点数不够（ValueError）都转人话 CliError。
     """
     try:
         from arcam.plane import camera_env_from_plane, fit_ground_plane
     except ImportError as exc:
         raise CliError(
-            f"LiDAR 平面拟合模块未就绪：{exc}（arcam.plane 尚未落地，"
-            "契约见 docs/LIDAR-SPEC.md §3）") from None
+            f"读不到 LiDAR 平面拟合模块：{exc}（arcam.plane 应随包一起提供；"
+            "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §3）") from None
     plane = fit_ground_plane(depth)
     return camera_env_from_plane(plane, roll_deg=depth.roll_deg)
 
@@ -313,11 +319,13 @@ def _placement(char01, subj: Subject, cam: Camera, args):
 
     只传当前模式收得下的 kwargs：ground 分支不收 size_pct/edge_bar、
     free 分支不收 char_scale/shot（签名见 SPEC §3.2 的两个分支）。
-    shot/edge_bar 必须与 _compose_kw 一致，否则 scene.json 记的参数和实际渲染不符。
+    shot/edge_bar/rot_basis 必须与 _compose_kw 一致，否则 scene.json 记的参数和
+    实际渲染不符 —— 这三个历史上各漏过一次，改动本函数务必与 _compose_kw 对拍。
     """
     if args.mode == "free":
         return current_placement(char01, subj, cam, mode="free",
-                                 size_pct=args.size_pct, edge_bar=args.edge_bar)
+                                 size_pct=args.size_pct, edge_bar=args.edge_bar,
+                                 rot_basis=args.rot_basis)
     return current_placement(char01, subj, cam, mode="ground",
                              char_scale=args.char_scale, rot_basis=args.rot_basis,
                              shot=args.shot)
@@ -384,9 +392,15 @@ def cmd_char_layer(args) -> int:
     char_p = _need(args.char, "立绘")
     char01 = image_to_rgba01(char_p)
     cam, subj = _pose(args, args.width, args.height)
-    layer, rect = compose_char_layer(char01, subj, cam, mode=args.mode,
-                                     size_pct=args.size_pct,
-                                     char_scale=args.char_scale, tone=args.tone)
+    # shot/edge_bar/rot_basis 与 _compose_kw 同一套：char-layer 收了这些开关就得生效，
+    # 否则「层盖回去严丝合缝」对不上（render 侧一直透传，这里曾整组漏掉）。
+    layer, _rect = compose_char_layer(char01, subj, cam, frame_key=args.frame,
+                                      mode=args.mode,
+                                      size_pct=args.size_pct,
+                                      char_scale=args.char_scale,
+                                      rot_basis=args.rot_basis,
+                                      shot=args.shot, edge_bar=args.edge_bar,
+                                      tone=args.tone)
     out = Path(args.out)
     save_png(layer, out)
     print(f"立绘层 {out}（{layer.shape[1]}×{layer.shape[0]} RGBA"
@@ -404,7 +418,7 @@ def cmd_bundle(args) -> int:
     shot = compose_shot(src01, char01, subj, cam, **_compose_kw(args))
     # 立绘层用 composeShot 自己带出来的那一份：同一裁切框、同一套光
     # （原版 buildCharCanvas = composeShot(null, LAST_SHOT_LIGHT)，index.html:3709。
-    #  不另调 compose_char_layer —— 它内部固定 '满幅'，与 --frame 指定的画幅会错位。）
+    #  合成路径自带 frame_key，与 --frame 一致。）
     layer = shot.char_layer
     if layer is None:
         raise CliError("这一遍没有产出立绘层（立绘缺失或落位失败）")
@@ -504,8 +518,8 @@ def cmd_lidar_inspect(args) -> int:
         from arcam.plane import camera_env_from_plane, fit_ground_plane
     except ImportError as exc:
         raise CliError(
-            f"LiDAR 模块未就绪：{exc}（arcam.depth/arcam.plane 尚未落地，"
-            "契约见 docs/LIDAR-SPEC.md §2/§3）") from None
+            f"读不到 LiDAR 模块：{exc}（arcam.depth/arcam.plane 应随包一起提供；"
+            "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §2/§3）") from None
     depth_p = _need(args.depth, "深度文件")
     try:
         frame = load_depth(depth_p)
@@ -540,11 +554,26 @@ def cmd_lidar_inspect(args) -> int:
     return 0
 
 
-def cmd_lidar_serve(args) -> int:
-    """实时流接收占位（LIDAR-SPEC §6；实现在 arcam.lidar_live，L4 并行编写中）。
+def _live_frame_line(n: int, meta: dict, depth) -> str:
+    """实时流每帧的一行人话摘要；meta 缺字段就跳过（协议只说"至少含"哪些键）。"""
+    height, width = int(depth.shape[0]), int(depth.shape[1])
+    env = " ".join(
+        f"{label}={meta[key]:g}"
+        for label, key in (("h", "height_m"), ("pitch", "pitch_deg"), ("roll", "roll_deg"))
+        if isinstance(meta.get(key), (int, float))
+    )
+    return f"第 {n} 帧 {width}×{height}" + (f" {env}" if env else "")
 
-    模块不存在 → 打印"实时流模块未就绪"并正常退出（0），不崩、不吞错；
-    模块已落地则把端口/输出目录交给它的 ``serve``，运行期错误转 CliError。
+
+def cmd_lidar_serve(args) -> int:
+    """实时流接收（LIDAR-SPEC §6；实现在 arcam.lidar_live）。
+
+    ``lidar_live.serve`` 返回的是**惰性 generator**（调用时只 bind+listen），
+    所以这里必须**迭代**它才真的在收帧 —— 早先只调不迭代，命令 bind 完就退出、
+    一帧都收不到（表现为"秒退且端口没人听"）。
+
+    模块不存在 / 没有可调用的 serve() → 打印"实时流模块未就绪"并正常退出（0），
+    不崩、不吞错；端口被占用等运行期错误转 CliError（退出 1）。
 
     ``lidar_live.serve(port, host, out_dir, max_frames)`` 的参数名以它为准
     （``out_dir`` 不是 ``out``）；本命令只透传 ``--port``/``--out``，host 用它的
@@ -564,10 +593,20 @@ def cmd_lidar_serve(args) -> int:
     kw = {"port": int(args.port)}
     if args.out is not None:
         kw["out_dir"] = str(args.out)
+        print(f"深度帧将写入 {args.out}（frame_%06d.depth）", flush=True)
+    n = 0
     try:
-        serve(**kw)
+        print(f"实时流监听 127.0.0.1:{int(args.port)}，等待设备连接（Ctrl-C 停止）",
+              flush=True)
+        for meta, depth in serve(**kw):          # 必须迭代：generator 只在被消费时才 accept
+            n += 1
+            print(_live_frame_line(n, meta, depth), flush=True)
+    except KeyboardInterrupt:
+        print(f"\n已停止，共接收 {n} 帧。", flush=True)
+        return 0
     except (ValueError, OSError) as e:
         raise CliError(str(e)) from None
+    print(f"连接已关闭，共接收 {n} 帧。", flush=True)
     return 0
 
 

@@ -7,25 +7,11 @@ golden 用例的期望值全部按 artifact A-projection-core.md §3.1/§3.2 的
 from __future__ import annotations
 
 import math
-import sys
-import types
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-try:
-    from arcam.geometry import K_LONG, K_SHORT, Camera, focal_px, place, project
-except ModuleNotFoundError as _exc:
-    if _exc.name in ("arcam.geometry", "arcam.placement"):
-        raise
-    # 并行开发期：arcam/__init__.py 会 import 其他 Agent 尚未创建的模块。注入一个只带
-    # __path__ 的空 arcam 包（跳过 __init__ 的 re-export 副作用），使本文件可单独加载
-    # geometry / placement；兄弟模块就位后本分支不会触发。
-    _pkg = types.ModuleType("arcam")
-    _pkg.__path__ = [str(Path(__file__).resolve().parents[1] / "src" / "arcam")]
-    sys.modules["arcam"] = _pkg
-    from arcam.geometry import K_LONG, K_SHORT, Camera, focal_px, place, project
+from arcam.geometry import K_LONG, K_SHORT, Camera, focal_px, place, project
 
 
 def _cam(w=1920, h=1080, feq=23.0, pitch=0.0, roll=0.0, height=1.6) -> Camera:
@@ -73,6 +59,23 @@ def test_focal_linear_in_feq():
     """F ∝ feq：46mm 恰好是 23mm 的两倍（两侧分支同比例）。"""
     assert focal_px(_cam(1920, 1080, 46.0)) == pytest.approx(
         2.0 * focal_px(_cam(1920, 1080, 23.0)), abs=1e-9)
+
+
+def test_focal_zero_short_edge_matches_js_no_crash():
+    """退化画布（某一维为 0）不许抛 ZeroDivisionError。
+
+    原版 JS 的 ``L/Sd`` 在 Sd=0 时得 Infinity（L>0）→ Infinity >= 4/3 → 走 wide 支；
+    0×0 得 NaN → 非 wide，但两支都得 0.0。Python 直接 ``/0`` 会崩 —— 回归防护。
+    F(1920×0) = 960·23/17.3064 = 22080/17.3064 = 1275.828595201775（wide 支）；
+    F(0×1080) 的 L = max(0,1080) = 1080 → 540·23/17.3064 = 717.6535848009985。"""
+    assert focal_px(_cam(1920, 0, 23.0)) == pytest.approx(1275.828595201775, abs=1e-9)
+    assert focal_px(_cam(0, 1080, 23.0)) == pytest.approx(717.6535848009985, abs=1e-9)
+    assert focal_px(_cam(0, 0, 23.0)) == 0.0
+    # 下游 project/place 在退化画布上同样不能崩（focal 有限即可算）。
+    # place 取 (960, 200)：b = 200/F ≈ 0.157 → d = 1.6/b ≈ 10.2（在 [0.5,20] 内）；
+    # 若取主点 (960, 0) 则 b=0 → |den|<1e-6 → None（射线与地平面平行，正常退化）。
+    assert project(0.0, 0.0, 4.0, _cam(1920, 0, 23.0)) is not None
+    assert place(960.0, 200.0, _cam(1920, 0, 23.0)) is not None
 
 
 def test_sensor_constants():

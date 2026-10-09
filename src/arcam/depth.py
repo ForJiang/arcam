@@ -26,7 +26,6 @@ import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 from PIL import Image
@@ -112,6 +111,8 @@ def load_depth(path: str | Path) -> LiDARFrame:
     陈旧像素由 plane/遮挡层按需过滤，IO 层不悄悄丢数据。
 
     未知扩展名只做 ``ARCD`` magic 嗅探（服务端落盘可能无后缀），其余报错。
+    嗅探只读文件头 4 字节（上传路径对未知后缀文件会走到这里，正文可能到
+    64MB，不为 4 字节签名把整个文件吞进内存）。
     """
     p = Path(path)
     suffix = p.suffix.lower()
@@ -126,7 +127,8 @@ def load_depth(path: str | Path) -> LiDARFrame:
     if suffix == '.exr':
         return _load_exr(p)
     try:
-        head = p.read_bytes()[:len(ARCD_MAGIC)]
+        with p.open('rb') as fh:
+            head = fh.read(len(ARCD_MAGIC))
     except OSError as exc:
         raise ValueError(f'无法读取深度文件：{p}（{exc}）') from exc
     if head == ARCD_MAGIC:

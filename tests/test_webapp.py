@@ -298,6 +298,23 @@ class TestStatic:
         assert status == 404
 
 
+    def test_static_null_byte_and_oversize_path_400_not_500(self, server):
+        """%00 等让路径解析本身失败的 URL → 400 人话 JSON（坏输入不升级成 500）。
+
+        回归：``Path.resolve()`` 对含 NUL 的路径抛 ``ValueError: lstat: embedded
+        null character``，旧实现掉进 500 兜底并把内部报错文本透给浏览器；
+        超长路径同属此类。WEB-SPEC §1：坏输入 → 400，响应体永不出现 traceback。
+        """
+        port = _port(server)
+        for path in ("/static/app.js%00.png", "/static/%00", "/static/a%00b.css",
+                     "/static/" + "a" * 5000 + ".css"):
+            status, _, raw = request(port, "GET", path)
+            assert status in (400, 404), (path, status, raw[:120])
+            payload = json.loads(raw)
+            assert payload["ok"] is False and payload["error"]
+            assert b"Traceback" not in raw and b"lstat" not in raw
+
+
 # ---------------------------------------------------------------- 2. upload
 
 class TestUpload:
@@ -677,10 +694,10 @@ class TestLidar:
                     width=192, height=144) -> bytes:
         """lidar_sim 合成深度 → ARCD（.depth）落盘字节（内参 fp32 精确往返）。
 
-        用 ARCD 而不是 .npy：npy 不带内参，``load_depth`` 按 LIDAR-SPEC §2 估计
-        ``fy=fx``（方形像素假设），而合成器 ``pinhole_defaults`` 用的是
-        ``fy=H/(2tan30°)`` —— 非方形帧走 npy 会把平面解歪（见交付报告「契约外
-        发现」）。ARCD 头里带 fp32 内参，往返无损。
+        走 ARCD 而不是 .npy：ARCD 是实时流/模拟器的落盘格式（LIDAR-SPEC §2.3），
+        头里带 fp32 内参与外参、往返无损；.npy 是裸数组，读回时内参只能按
+        LIDAR-SPEC §2 的针孔满幅 FOV≈60° **估计**（``fy=fx`` 方形像素假设，
+        与 ``pinhole_defaults`` 现口径一致，但估计非实测）。
         """
         meta, depth = synth_ground_frame(h=h, pitch_deg=pitch_deg,
                                         roll_deg=roll_deg, width=width, height=height)
@@ -774,6 +791,57 @@ class TestConcurrency:
             assert json.loads(raw)["ok"] is True
         images = {json.loads(raw)["image"] for _s, _h, raw in results}
         assert len(images) == 1        # 锁串行化输出仍然逐位一致（确定性）
+
+    def test_depth_env_never_pairs_new_frame_with_old_env(self, monkeypatch):
+        """并发换帧时 depth_env 必须返回**自洽的** (帧, env) 一对。
+
+        复现过的静默失真：depth_env 在 store.lock 外拟合（几百 ms），此时另一线程
+        （/api/upload 的 depth 字段或 /api/lidar/inspect，均不持 render_lock）
+        set_depth 换帧 —— 旧实现在二次加锁后返回 (新帧, 旧 env)，新帧配旧环境量，
+        遮挡/落位全错但不报错。修好后恒返回刚拟出的那一对，新帧下一遍再拟。
+        """
+        import arcam.webapp as webapp
+        from arcam.lidar_sim import synth_ground_frame
+
+        def frame_for(h: float) -> LiDARFrame:
+            meta, depth = synth_ground_frame(h=h, pitch_deg=9.0, roll_deg=-5.0,
+                                             width=128, height=96)
+            return LiDARFrame(depth_m=depth, fx=meta["fx"], fy=meta["fy"],
+                              cx=meta["cx"], cy=meta["cy"], source=f"h={h}")
+
+        f1, f2 = frame_for(1.55), frame_for(2.20)
+        store = webapp.Store()
+        store.set_depth(f1, "f1")
+
+        real_env_of = webapp._env_of
+        entered_fit = threading.Event()
+
+        def slow_env_of(frame):
+            entered_fit.set()               # 已过第一次加锁、进入锁外拟合
+            env = real_env_of(frame)
+            time.sleep(0.4)               # 放大「拟合完 → 二次加锁」的竞态窗口
+            return env
+
+        monkeypatch.setattr(webapp, "_env_of", slow_env_of)
+
+        result: dict = {}
+
+        def worker() -> None:
+            result["pair"] = store.depth_env()
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        assert entered_fit.wait(timeout=30), "worker 应进入拟合"
+        store.set_depth(f2, "f2")         # 并发换帧（模拟上传路径）
+        thread.join(timeout=30)
+
+        frame, env = result["pair"]
+        assert frame is f1, "返回的帧必须是刚拟过的那一帧"
+        assert env.height_m == pytest.approx(1.55, abs=0.02), \
+            f"env 必须与所返回帧匹配，得到 h={env.height_m}"
+        # 缓存不脏：下一次调用对新帧重拟
+        frame2, env2 = store.depth_env()
+        assert frame2 is f2 and env2.height_m == pytest.approx(2.20, abs=0.02)
 
     def test_concurrent_upload_and_render_mix(self, server):
         """上传与渲染并发跑：锁顺序固定（render_lock → store.lock）不死锁。

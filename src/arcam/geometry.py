@@ -44,9 +44,17 @@ def focal_px(cam: Camera) -> float:
     L = max(W,H)，Sd = min(W,H)，wide = L/Sd >= 4/3；
     wide → (L/2)*feq/K_LONG，否则 (Sd/2)*feq/K_SHORT（针孔模型
     F_px = 像素半边长 × f_mm / 传感器半边长_mm）。
+
+    退化画布（某一维为 0）：原版 JS 的 ``L/Sd`` 得 Infinity（L>0）或 NaN（0×0），
+    都不抛异常；Python 的 ``/0`` 会抛 ZeroDivisionError。这里按 JS 的比较结果分流：
+    Infinity >= 4/3 → 走 wide 支，0×0 两支都得 0.0。正常画布不走该分支。
     """
     long_edge = max(cam.width, cam.height)
     short_edge = min(cam.width, cam.height)
+    if short_edge == 0:
+        if long_edge == 0:
+            return 0.0
+        return (long_edge / 2.0) * cam.feq_mm / K_LONG
     wide = long_edge / short_edge >= 4.0 / 3.0
     if wide:
         return (long_edge / 2.0) * cam.feq_mm / K_LONG

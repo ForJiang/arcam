@@ -311,3 +311,57 @@ def test_render_tone_flag_runs(tmp_path: Path) -> None:
     assert len(frames) == 5
     for p in frames:
         assert p.is_file()
+
+
+def test_render_accepts_float01_background(tmp_path: Path) -> None:
+    """float64 [0,1] 背景（image_to_rgb01 的产物）也要对：曾静默多除一次 255。
+
+    尺寸一致时旧代码把 0.5 当成 0.5/255 → 整张近黑；尺寸不一致时 PIL 的
+    fromarray 根本不认 3 通道 float64 → TypeError。两种都修好。
+    """
+    track = make_track([PoseKey(t=0.0, distance_m=4.0)])
+    char = make_char()
+
+    same = np.full((96, 64, 3), 0.5, dtype=np.float64)
+    frames = render_track(same, track, char, tmp_path / "out_same")
+    with Image.open(frames[0]) as im:
+        corner = np.asarray(im.convert("RGB"))[2, 2]
+    assert tuple(corner) == (128, 128, 128), corner        # 0.5 → 128，不再近黑
+
+    small = np.full((48, 32, 3), 0.5, dtype=np.float64)     # 尺寸不一致 → 缩放
+    frames = render_track(small, track, char, tmp_path / "out_small")
+    with Image.open(frames[0]) as im:
+        assert im.size == (64, 96)
+        corner = np.asarray(im.convert("RGB"))[2, 2]
+    assert tuple(corner) == (128, 128, 128), corner
+
+
+def test_load_rejects_duplicate_timestamps(tmp_path: Path) -> None:
+    """重复 t 会让前一键永远取不到（bisect_right 直接跳过它）——按笔误报错。"""
+    path = tmp_path / "dup.json"
+    path.write_text(json.dumps({"keys": [
+        {"t": 0.0, "distance_m": 4.0},
+        {"t": 0.0, "distance_m": 5.0},
+    ]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="严格递增"):
+        load_track(path)
+    dup = make_track([PoseKey(t=0.0, distance_m=4.0), PoseKey(t=0.0, distance_m=5.0)])
+    assert any("严格递增" in m for m in track_issues(dup))
+
+
+def test_track_issues_rejects_bad_enums(tmp_path: Path) -> None:
+    """PoseTrack 可直接构造：写错的 mode/frame_key/shot 也要被自检拦下。
+
+    漏过去的话 frame_rect 把未知画幅当 0（不裁，静默出错图）、SHOTS[...] 直接
+    KeyError —— 都属"不静默失败"要拦的那类。
+    """
+    good = dict(TRACK_KW)
+    for field, bad in (("mode", "floor"), ("frame_key", "全幅"), ("shot", "半身")):
+        track = PoseTrack(keys=[PoseKey(t=0.0, distance_m=4.0)],
+                          **{**good, field: bad})
+        problems = track_issues(track)
+        assert any(field in m for m in problems), (field, problems)
+        with pytest.raises(ValueError, match="轨道有问题"):
+            render_track(np.full((96, 64, 3), 128, dtype=np.uint8), track,
+                         make_char(), tmp_path / "never-written")
+        assert not (tmp_path / "never-written").exists()

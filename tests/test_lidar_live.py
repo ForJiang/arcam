@@ -20,9 +20,9 @@ import pytest
 from arcam import lidar_sim
 from arcam.lidar_live import recv_frame, send_frame, serve
 
-try:  # L1 的 arcam.depth（落盘 .depth 的权威格式）
+try:  # arcam.depth（落盘 .depth 的权威格式）
     from arcam import depth as arcam_depth
-except Exception:  # pragma: no cover - L1 未就绪
+except Exception:  # pragma: no cover - arcam.depth 不可用时走字节数/magic 断言
     arcam_depth = None
 
 HOST = '127.0.0.1'
@@ -127,7 +127,7 @@ def test_meta_w_h_overridden_by_send_frame():
 
 def test_serve_out_dir_writes_depth_files(tmp_path: Path):
     """out_dir 非 None 时落盘 frame_%06d.depth；可被 arcam.depth.load_depth
-    读回且 depth/intrinsics 一致（L1 未落地时按 spec §2.3 断言字节数与 magic）。"""
+    读回且 depth/intrinsics 一致（arcam.depth 不可用时按 spec §2.3 断言字节数与 magic）。"""
     port = _free_port()
     sent = [lidar_sim.synth_ground_frame(h=1.55, index=i) for i in range(2)]
     _collect_async(port, out_dir=str(tmp_path), max_frames=len(sent))
@@ -203,6 +203,47 @@ def test_recv_frame_missing_required_key_raises():
         b.sendall(struct.pack('>I', len(meta_bytes)) + meta_bytes)
         with pytest.raises(ValueError, match='fx'):
             recv_frame(a)
+
+
+def test_recv_frame_rejects_bool_w_h():
+    """W/H 传布尔（JSON true）→ ValueError（bool 是 Python int 子类，须显式拒）。"""
+    a, b = socket.socketpair()
+    with contextlib.closing(a), contextlib.closing(b):
+        a.settimeout(5.0)
+        meta = _good_meta(0)
+        meta['W'] = True
+        meta_bytes = json.dumps(meta).encode('utf-8')
+        b.sendall(struct.pack('>I', len(meta_bytes)) + meta_bytes)
+        with pytest.raises(ValueError, match='bad W/H'):
+            recv_frame(a)
+
+
+def test_recv_frame_rejects_nonfinite_intrinsics():
+    """内参 NaN/Inf → ValueError（Python json 默认放行 NaN 字面量，协议层须拒）。"""
+    a, b = socket.socketpair()
+    with contextlib.closing(a), contextlib.closing(b):
+        a.settimeout(5.0)
+        for key, bad in (('fx', float('nan')), ('fy', float('inf'))):
+            meta = dict(_good_meta(0))
+            meta[key] = bad
+            meta_bytes = json.dumps(meta).encode('utf-8')   # allow_nan 默认 True
+            b.sendall(struct.pack('>I', len(meta_bytes)) + meta_bytes)
+            with pytest.raises(ValueError, match=f'meta\\[{key!r}\\]'):
+                recv_frame(a)
+
+
+def test_send_frame_rejects_nonfinite_intrinsics():
+    """写侧同样拒非有限内参（垃圾不外发）。"""
+    meta, depth = lidar_sim.synth_ground_frame(index=0)
+    with pytest.raises(ValueError, match='fx'):
+        send_frame(_NullSocket(), dict(meta, fx=float('nan')), depth)
+
+
+class _NullSocket:
+    """send_frame 在校验阶段就抛，不会真发包；占位满足类型。"""
+
+    def sendall(self, _data: bytes) -> None:               # pragma: no cover
+        raise AssertionError('不应到达发包步骤')
 
 
 def test_recv_frame_eof_mid_payload_raises():

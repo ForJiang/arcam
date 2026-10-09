@@ -29,31 +29,23 @@ def clampn(value: float, lo: float, hi: float) -> float:
     return lo if value < lo else (hi if value > hi else value)
 
 
-def clamp01(value: float) -> float:
-    return 0.0 if value < 0.0 else (1.0 if value > 1.0 else value)
-
-
 def js_to_fixed(value: float, digits: int) -> float:
     """JS ``Number.prototype.toFixed(digits)`` 的数值版本（半远离零）。
 
     scene.json 里大量 ``+x.toFixed(2)`` / ``toFixed(3)``，取整语义不同会让
     配方里差 0.01。返回 float（JSON 序列化由调用方 str() 时决定位数，
-    本函数只保证数值与 JS 一致 —— 需要字符串表示处用 :func:`js_fixed_str`）。
+    本函数只保证数值与 JS 一致）。
+
+    ⚠ 与 ECMA-262 的 ``toFixed`` 有两处**已冻结**的偏离（红线：toFixed 口径
+    不许动，docs/SPEC.md §1.4 与 docs/AUDIT-CHARTER.md §3）：
+    ① 平分时半**远离零**，JS 取较大者（负半分向 +∞，如 ``(-0.125).toFixed(2)``
+       在 JS 得 ``"-0.12"``，这里给 ``-0.13``）；
+    ② 按 ``repr`` 最短串而非精确二进制值取整（2.675 的二进制实为 2.674999…，
+       JS 得 ``"2.67"``，这里给 ``"2.68"``）。
+    非平分区间两者一致，scene.json 的实测值几乎不触平。改动前先读红线。
     """
     quant = Decimal(1).scaleb(-digits)
     return float(Decimal(repr(value)).quantize(quant, rounding=ROUND_HALF_UP))
-
-
-def js_fixed_str(value: float, digits: int) -> str:
-    """``toFixed`` 的字符串版本：固定位数、不带尾随处理。
-    """
-    quant = Decimal(1).scaleb(-digits)
-    return str(Decimal(repr(value)).quantize(quant, rounding=ROUND_HALF_UP))
-
-
-def to_u8(value: float) -> int:
-    """[0,1] 浮点 → 0..255 int（半向 +∞，与画布逐通道量化一致）。"""
-    return int(clamp01(value) * 255.0 + 0.5)
 
 
 @dataclass(frozen=True)
@@ -81,11 +73,3 @@ class Rect:
     @property
     def cy(self) -> float:
         return self.y + self.h / 2
-
-    def clamp_to(self, width: int, height: int) -> "Rect":
-        """对应 clampRegion：整框越界时返回全图；否则四边夹回 [0, W/H]，
-        保持宽高浮点语义。零填充/裁剪策略的细则见 docs/SPEC.md §clampRegion。
-        """
-        x = min(max(self.x, 0.0), float(width))
-        y = min(max(self.y, 0.0), float(height))
-        return Rect(x, y, min(self.w, float(width)), min(self.h, float(height)))

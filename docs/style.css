@@ -207,10 +207,12 @@ button:hover { background: var(--btn-bg-hover); }
   grid-template-columns: 1fr auto;
   align-items: center;
 }
+/* 行内勾选标签文字取 --inline-fg（WEB-STYLE §2 的该 token 用途） */
+.param-row-check label { color: var(--inline-fg); }
 .param-row-check input { accent-color: var(--accent); width: 16px; height: 16px; }
 
 /* ---------- 状态条 ---------- */
-#footer { display: flex; flex-direction: column; gap: 0; }
+#footer { display: flex; flex-direction: column; }
 #status-bar {
   display: flex;
   align-items: center;

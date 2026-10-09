@@ -30,6 +30,11 @@ def _ramp_rgb(h: int, w: int) -> np.ndarray:
     return np.repeat(xs[None, :, None], h, axis=0) * np.ones((h, w, 3))
 
 
+def tile_min_max() -> tuple[float, float]:
+    t = lighting.grain_tile()
+    return float(t.min()), float(t.max())
+
+
 # ── measure_region ─────────────────────────────────────────────────────
 def test_measure_region_pure_color():
     """纯色图：均值 = 该色；8 级量化后全部落进同一桶。"""
@@ -144,19 +149,32 @@ def test_char_lum_opaque_golden():
 
 
 def test_char_lum_skips_alpha_below_8():
-    """alpha < 8 跳过（阈值 8/255 不是 0）：半张 alpha=7 的图不能把亮度拉低。"""
+    """alpha < 8 跳过（阈值 8/255 不是 0）：半张 alpha=7 的图不能把亮度拉低。
+
+    2026-10-09 审计加固：原版本测试右半 RGB 与左半相同（都 200），跳过与否
+    均值都一样 —— 断言形同虚设（已复现：把 alpha 全设 255 模拟「不跳过」，
+    结果仍是 200/255）。现在右半给**不同**的 RGB（0）：不跳过就会掉到
+    ~100/255，断言才真正锁住跳过行为。
+    """
     char = _gray(8, 6, 200)
-    char[:, 3:, 3] = 7          # 右半 alpha=7 → 全部跳过
+    char[:, 3:, 0:3] = 0                  # 右半纯黑：被跳过则不影响均值
+    char[:, 3:, 3] = 7                    # 右半 alpha=7 → 全部跳过
     assert lighting.char_lum(char) == pytest.approx(200 / 255)
     char[:, 3:, 3] = 0
     assert lighting.char_lum(char) == pytest.approx(200 / 255)
 
 
 def test_char_lum_alpha_exactly_8_is_counted():
-    """边界：alpha == 8 不跳过（``if (d[i+3] < 8) continue``）。"""
+    """边界：alpha == 8 不跳过（``if (d[i+3] < 8) continue``）。
+
+    审计加固：右半 RGB=0、alpha=8 —— 只有真的计入才会把均值拉到 100/255
+    （原版 RGB 均匀，计入与否都是 100/255，断言测不出边界）。
+    """
     char = _gray(8, 6, 100)
-    char[:, 3:, 3] = 8
-    assert lighting.char_lum(char) == pytest.approx(100 / 255)
+    char[:, 3:, 0:3] = 0                  # 右半纯黑
+    char[:, 3:, 3] = 8                    # alpha == 8 → 计入
+    # 缩到宽 32 后左/右各 16 列：(100+0)/2 = 50 → 50/255
+    assert lighting.char_lum(char) == pytest.approx(50 / 255)
 
 
 def test_char_lum_all_transparent_returns_half():
@@ -165,8 +183,12 @@ def test_char_lum_all_transparent_returns_half():
 
 
 def test_char_lum_transparent_pixels_do_not_darken():
-    """大半透明立绘不该被当成很暗（原版注释 1262）：一半像素透明 → 亮度仍是白的。"""
+    """大半透明立绘不该被当成很暗（原版注释 1262）：一半像素透明 → 亮度仍是白的。
+
+    审计加固：透明半给 RGB=0（原版与不透明半同色 255，计不计数都是 1.0）。
+    """
     char = _gray(8, 6, 255)
+    char[:, 3:, 0:3] = 0                  # 右半纯黑且全透明
     char[:, 3:, 3] = 0
     assert lighting.char_lum(char) == pytest.approx(1.0)
 
@@ -187,11 +209,6 @@ def test_grain_tile_range_is_unit():
     assert tile_min_max() == (-0.9999967543408275, 0.9999884585849941)
 
 
-def tile_min_max() -> tuple[float, float]:
-    t = lighting.grain_tile()
-    return float(t.min()), float(t.max())
-
-
 def test_grain_tile_is_stable_singleton():
     """同一张砖（原版只建一次，缓存）：两次调用同一对象、值不变。"""
     a = lighting.grain_tile()
@@ -200,6 +217,45 @@ def test_grain_tile_is_stable_singleton():
     snapshot = a.copy()
     lighting.grain_tile()
     np.testing.assert_array_equal(a, snapshot)
+
+
+def test_grain_tile_concurrent_first_call_is_one_object():
+    """并发首调也必须是同一个对象（2026-10-09 审计：lru_cache 下 8 线程可复现
+    各建一张值同身份不同的数组）。双检锁单例 + write=False 只读契约。"""
+    import threading
+
+    saved = lighting._GRAIN_TILE
+    lighting._GRAIN_TILE = None                 # 清缓存，强制所有线程都走首调路径
+    try:
+        n = 8
+        gate = threading.Barrier(n)
+        got: list[np.ndarray] = []
+        lock = threading.Lock()
+
+        def worker():
+            gate.wait()                          # 尽量同时撞进首调
+            t = lighting.grain_tile()
+            with lock:
+                got.append(t)
+
+        ths = [threading.Thread(target=worker) for _ in range(n)]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join()
+        assert len(got) == n
+        assert all(t is got[0] for t in got)
+        assert not got[0].flags.writeable        # 只读契约有强制
+    finally:
+        lighting._GRAIN_TILE = saved
+
+
+def test_grain_tile_is_read_only():
+    """只读契约：误改写当场抛错（不会静默污染其他调用方看到的同一张砖）。"""
+    tile = lighting.grain_tile()
+    assert not tile.flags.writeable
+    with pytest.raises(ValueError):
+        tile[0, 0] = 0.5
 
 
 def test_grain_tile_matches_independent_int32_implementation():

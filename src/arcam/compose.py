@@ -52,8 +52,10 @@ if TYPE_CHECKING:                                  # 仅标注期引用：arcam.
 
 #: 原版 measureRegion 的 N（index.html:3687：出图采样固定 32 级）
 LIGHT_LEVELS: int = 32
-#: 原版 ``S.frame`` 的默认值（index.html:925）—— ``compose_char_layer`` 的签名里
-#: 没有画幅参数，只能取这个默认值；换画幅请走 ``compose_shot``。
+#: 原版 ``S.frame`` 的默认值（index.html:925）—— ``compose_char_layer`` 的
+#: ``frame_key`` 缺省值（原版 buildCharCanvas = composeShot(null, …) 用的就是当前
+#: ``S.frame``，index.html:3709；换画幅由调用方显式传 ``frame_key``，层与对应
+#: ``shot.jpg`` 同裁切框才能严丝合缝）。
 DEFAULT_FRAME: str = '满幅'
 
 _MODES = ("ground", "free")
@@ -158,6 +160,7 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
 
 
 def compose_char_layer(char_rgba01: np.ndarray, subj: Subject, cam: Camera, *,
+                       frame_key: str = DEFAULT_FRAME,
                        light: LightSample | None = None, mode: str = 'ground',
                        size_pct: float = 60.0, char_scale: float = 1.0,
                        rot_basis: str = 'world', tone: bool = False,
@@ -175,6 +178,9 @@ def compose_char_layer(char_rgba01: np.ndarray, subj: Subject, cam: Camera, *,
         char_rgba01: 立绘，float64 (H,W,4)。
         subj: 人物位姿。
         cam: 相机。
+        frame_key: 出图画幅（FRAMES key，原版 ``S.frame``，index.html:925）。
+            原版 buildCharCanvas = composeShot(null, …) 用的就是当前 frameRect；
+            要与某张 ``shot.jpg`` 对齐就必须传**同一份** ``frame_key``。
         light: 与照片**同一套**的光（原版 ``LAST_SHOT_LIGHT``）。
         mode: ``'ground'`` / ``'free'``。
         size_pct: 自由模式立绘占画面高度百分比。
@@ -196,7 +202,7 @@ def compose_char_layer(char_rgba01: np.ndarray, subj: Subject, cam: Camera, *,
         cam, subj, _notes = _merge_env(cam, subj, env_overrides, env,
                                        depth=depth, mode=mode, shot=shot)
     rect, _, layer_rgba = _engine(
-        None, char_rgba01, subj, cam, DEFAULT_FRAME,
+        None, char_rgba01, subj, cam, frame_key,
         light=light, mode=mode, size_pct=size_pct, char_scale=char_scale,
         rot_basis=rot_basis, tone=False, shot=shot, edge_bar=edge_bar,
         depth=depth)
@@ -212,8 +218,9 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
             ) -> tuple[Rect, LightSample | None, np.ndarray]:
     """composeShot 的公共引擎：返回 ``(rect, light_used, rgba_uint8)``。
 
-    ``frame_key`` 由调用方给出（立绘层路径固定 ``DEFAULT_FRAME``）—— 照片与立绘层
-    两条路共用同一套取景/落位/裁切代码，避免"两处迟早改漏一处"。
+    ``frame_key`` 由调用方给出（``compose_char_layer`` 缺省 ``DEFAULT_FRAME``，
+    即原版 ``S.frame`` 默认值）—— 照片与立绘层两条路共用同一套取景/落位/裁切
+    代码，避免"两处迟早改漏一处"。
     出图已经按 ``R`` 裁好：照片路径取 RGB 通道，立绘层路径连 alpha 一起用。
 
     ``depth`` 非 None（LIDAR-SPEC §4）时按 effective ``cam``（本函数入参，已由
@@ -246,7 +253,7 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
         region = _light_region_rect(char_rgba01, subj, cam, mode=mode,
                                     size_pct=size_pct, char_scale=char_scale,
                                     rot_basis=rot_basis, shot=shot,
-                                    edge_bar=edge_bar)
+                                    edge_bar=edge_bar, rect=rect)
         m = measure_region(base, region, LIGHT_LEVELS)
 
     # ④ 画立绘层。原版 draw3DLayer 的做法是"先在帧坐标 (0,0) 上出一张**帧尺寸**
@@ -254,7 +261,7 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
     #    顺序走，所以立绘层的构建与色调匹配都以帧为尺度。
     c = _placement(char_rgba01, subj, cam, mode=mode, size_pct=size_pct,
                    char_scale=char_scale, rot_basis=rot_basis, shot=shot,
-                   edge_bar=edge_bar)
+                   edge_bar=edge_bar, rect=rect)
     # E4 遮挡：公告板前方有更近的深度 → 该区立绘 alpha 置 0（LIDAR-SPEC §4③）。
     # 照片路径与立绘层路径都过这里，所以两条路一样抠。cam 是 effective 渲染相机
     # （显式 --h/--pitch/--roll 时即显式值，符合 §0「显式优先」）。
@@ -416,28 +423,42 @@ def _merge_env(cam: Camera, subj: Subject, overrides: dict | None,
 
 
 def _placement(char_rgba01, subj, cam, *, mode, size_pct, char_scale,
-               rot_basis, shot='全身', edge_bar=0) -> SpritePlacement | None:
-    """currentPlacement 的移植侧封装：按模式分派贴地/自由（index.html:2981）。"""
+               rot_basis, shot='全身', edge_bar=0,
+               rect: Rect | None = None) -> SpritePlacement | None:
+    """currentPlacement 的移植侧封装：按模式分派贴地/自由（index.html:2981）。
+
+    ``rot_basis`` 两个模式都收（原版 charRot 2930：free 分支同样读 ``S.rotBasis``，
+    ``'frame'`` → rot=0 永远画面竖直，否则跟随 ``cam.roll_deg``）。
+    ``rect`` = 本遍的裁切框（``_engine`` 里 ``frame_rect`` 的产物）—— 自由模式
+    贴边吸附的目标（原版 ``snapRect`` = 取景框 ∩ 可见区；离线可见区 = 整块画布，
+    ``frame_rect`` 即其交集退化结果，与 arcam-render.js ``placementFor`` 一致）。
+    贴地分支不收 ``rect``（``groundPlacement`` 没有该形参）。
+    """
     if mode == 'free':
         return current_placement(char_rgba01, subj, cam, mode='free',
-                                 size_pct=size_pct, edge_bar=edge_bar)
+                                 size_pct=size_pct, edge_bar=edge_bar,
+                                 rot_basis=rot_basis, rect=rect)
     return current_placement(char_rgba01, subj, cam, mode='ground',
                              char_scale=char_scale, rot_basis=rot_basis,
                              shot=shot)
 
 
 def _light_region_rect(char_rgba01, subj, cam, *, mode, size_pct, char_scale,
-                       rot_basis, shot='全身', edge_bar=0) -> Rect | None:
+                       rot_basis, shot='全身', edge_bar=0,
+                       rect: Rect | None = None) -> Rect | None:
     """lightRegion + clampRegion（index.html:1254-1260 / 1244-1251）。
 
     返回画布坐标的采样矩形；无立绘（``currentPlacement`` 为 null）时退化成整帧
     （原版 ``clampRegion`` 的 ``!r`` 分支）。原版 ``lightRegion`` 返回画布坐标、
     ``sampleLight`` 按视频尺寸 clamp；离线两者同尺寸（``cv`` 像素 = 视频像素），
     不通用化。
+
+    ``rect`` 同 :func:`_placement`：自由模式吸附后落位会变，采光框必须跟着吸附
+    后的立绘走（原版 lightRegion 读的也是吸附后的 currentPlacement）。
     """
     c = _placement(char_rgba01, subj, cam, mode=mode, size_pct=size_pct,
                   char_scale=char_scale, rot_basis=rot_basis, shot=shot,
-                  edge_bar=edge_bar)
+                  edge_bar=edge_bar, rect=rect)
     if c is None:
         return Rect(0.0, 0.0, float(cam.width), float(cam.height))
     mx = c.w * 0.35

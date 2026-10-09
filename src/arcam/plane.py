@@ -43,7 +43,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from arcam.depth import LiDARFrame, _to_arcam_camera_coords
-from arcam.geometry import K_LONG, K_SHORT, Camera, focal_px, place
+from arcam.geometry import K_LONG, K_SHORT, Camera, place
 from arcam.placement import SpritePlacement
 
 _DEG2RAD = math.pi / 180.0

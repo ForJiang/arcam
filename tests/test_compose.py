@@ -15,11 +15,15 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
 from arcam.compose import (
     ComposedShot,
+    _light_region_rect,
+    _placement,
     compose_char_layer,
     compose_shot,
 )
@@ -160,7 +164,7 @@ def test_light_reuse_equals_fresh_measurement() -> None:
 def test_char_layer_uses_the_same_light_as_the_photo() -> None:
     got = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="1:1")
     layer, rect = compose_char_layer(CHAR, SUBJ, CAM, light=got.light, mode="ground")
-    # 满幅下两者逐像素相同（compose_char_layer 固定'满幅'）
+    # 缺省 frame_key = DEFAULT_FRAME('满幅')：与满幅照片的立绘层逐像素相同
     full = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅")
     assert np.array_equal(layer, compose_char_layer(CHAR, SUBJ, CAM, light=full.light)[0])
     assert layer.shape == (H, W, 4) and rect == Rect(0.0, 0.0, float(W), float(H))
@@ -327,3 +331,125 @@ def test_focal_used_in_placement_is_camera_focal() -> None:
     pa = current_placement(CHAR, SUBJ, wide, mode="ground")
     pb = current_placement(CHAR, SUBJ, CAM, mode="ground")
     assert pa is not None and pb is not None and pa.h > pb.h
+
+
+# ───────────────────────── free 分支参数透传（2026-10-09 审计回归） ─────────────────────────
+# 历史 bug：compose._placement 的 free 分支不传 rot_basis / rect，导致 --rot-basis
+# frame（free）与 --edge-bar（free）在整条渲染链上是空操作。原版依据：charRot
+# （index.html:2930）free 模式同样读 S.rotBasis；snapToEdge 需要 snapRect()。
+# 对拍基准：docs/arcam-render.js placementFor 两个键都传（rotBasis + 本遍 frameRect）。
+
+
+def test_free_mode_rot_basis_frame_reaches_placement() -> None:
+    """free + rot_basis='frame'：经 compose 分派后 rot 必须是 0（画面竖直）。
+
+    相机 roll=20°：'world' 应得到 rot=20°（弧度 0.349），'frame' 必须是 0。
+    """
+    roll_cam = Camera(W, H, 1.6, 23.0, -8.0, 20.0)
+    world = _placement(CHAR, SUBJ, roll_cam, mode="free", size_pct=50.0,
+                       char_scale=1.0, rot_basis="world",
+                       rect=frame_rect("1:1", W, H))
+    frame = _placement(CHAR, SUBJ, roll_cam, mode="free", size_pct=50.0,
+                       char_scale=1.0, rot_basis="frame",
+                       rect=frame_rect("1:1", W, H))
+    assert world is not None and frame is not None
+    assert world.rot == pytest.approx(math.radians(20.0))
+    assert frame.rot == 0.0                       # 断链时这里会是 0.349（跟随 roll）
+
+
+def test_free_mode_rot_basis_frame_changes_rendered_shot() -> None:
+    """渲染链：free + rot_basis='frame' 与 'world' 出图必须不同（曾逐像素相同）。"""
+    roll_cam = Camera(W, H, 1.6, 23.0, -8.0, 20.0)
+    kw = dict(frame_key="1:1", mode="free", size_pct=40.0)
+    a = compose_shot(BG, CHAR, SUBJ, roll_cam, rot_basis="frame", **kw)
+    b = compose_shot(BG, CHAR, SUBJ, roll_cam, rot_basis="world", **kw)
+    assert not np.array_equal(a.shot, b.shot)
+    assert not np.array_equal(a.char_layer, b.char_layer)
+    # 与「直接按该摆位合成」一致：frame 基准下立绘竖直（外接框不再倾斜）
+    pc = current_placement(CHAR, SUBJ, roll_cam, mode="free", rot_basis="frame",
+                           size_pct=40.0, rect=frame_rect("1:1", W, H))
+    assert pc is not None and pc.rot == 0.0
+
+
+def test_free_mode_edge_bar_snaps_in_compose_shot() -> None:
+    """渲染链：free + edge_bar 必须真的吸附（曾与不吸附逐像素相同 = 空操作）。"""
+    r = frame_rect("1:1", W, H)                   # 吸附目标 rect = 本遍 frameRect
+    kw = dict(frame_key="1:1", mode="free", size_pct=30.0, rot_basis="world")
+    no_snap = compose_shot(BG, CHAR, SUBJ, CAM, edge_bar=0, **kw)
+    snapped = compose_shot(BG, CHAR, SUBJ, CAM, edge_bar=1, **kw)   # 1 = 上边
+    assert not np.array_equal(no_snap.shot, snapped.shot)
+    assert not np.array_equal(no_snap.char_layer, snapped.char_layer)
+    # 吸附后图心落在 rect 上边：v = rect.y + bh/2（旋转后外接盒）
+    p = _placement(CHAR, SUBJ, CAM, mode="free", size_pct=30.0, char_scale=1.0,
+                   rot_basis="world", edge_bar=1, rect=r)
+    assert p is not None
+    bh = (64 / 128 * p.h) * abs(math.sin(p.rot)) + p.h * abs(math.cos(p.rot))
+    assert p.v == pytest.approx(r.y + bh / 2.0)
+    # 采光框跟着吸附后的立绘走（lightRegion 读的也是吸附后的落位）
+    region = _light_region_rect(CHAR, SUBJ, CAM, mode="free", size_pct=30.0,
+                                char_scale=1.0, rot_basis="world", edge_bar=1,
+                                rect=r)
+    assert region is not None and region.y >= 0.0
+    assert snapped.light is not None and no_snap.light is not None
+    assert snapped.light.mean != no_snap.light.mean
+
+
+def test_free_mode_edge_bar_ignores_unknown_bar_numbers() -> None:
+    """edge_bar=2/3/4 同样生效（下/左/右），且互不相同。"""
+    r = frame_rect("1:1", W, H)
+    outs = {}
+    for bar in (1, 2, 3, 4):
+        p = _placement(CHAR, SUBJ, CAM, mode="free", size_pct=30.0,
+                       char_scale=1.0, rot_basis="world", edge_bar=bar, rect=r)
+        assert p is not None
+        outs[bar] = (round(p.u, 6), round(p.v, 6))
+    assert len(set(outs.values())) == 4
+    assert outs[1][1] < outs[2][1]                    # 上边比下边高
+    assert outs[3][0] < outs[4][0]                    # 左边比右边左
+
+
+def test_ground_mode_ignores_rect_and_edge_bar() -> None:
+    """贴地分支不收 rect / edge_bar（groundPlacement 没有这些形参）。"""
+    r = frame_rect("1:1", W, H)
+    a = _placement(CHAR, SUBJ, CAM, mode="ground", size_pct=50.0, char_scale=1.0,
+                   rot_basis="world", edge_bar=1, rect=r)
+    b = _placement(CHAR, SUBJ, CAM, mode="ground", size_pct=50.0, char_scale=1.0,
+                   rot_basis="world")
+    assert a == b
+
+
+def test_compose_char_layer_frame_key_passthrough() -> None:
+    """compose_char_layer 收 frame_key：层与同画幅 compose_shot 的 char_layer 逐像素相同。
+
+    历史 bug：签名里没有 frame_key、内部固定 DEFAULT_FRAME('满幅')，导致
+    char-layer --frame X 静默无效、层与 shot.jpg 错位（原版 buildCharCanvas =
+    composeShot(null, LAST_SHOT_LIGHT) 用的就是当前 S.frame，index.html:3709）。
+    """
+    for key in ("1:1", "4:5", "16:9"):
+        shot = compose_shot(BG, CHAR, SUBJ, CAM, frame_key=key)
+        layer, rect = compose_char_layer(CHAR, SUBJ, CAM, light=shot.light,
+                                         frame_key=key)
+        assert rect == frame_rect(key, W, H)
+        assert layer.shape == shot.char_layer.shape
+        assert np.array_equal(layer, shot.char_layer), key
+
+
+def test_compose_char_layer_frame_key_default_is_full_frame() -> None:
+    """缺省 frame_key = DEFAULT_FRAME('满幅')：旧调用点行为不变（红线：签名兼容）。"""
+    a, rect_a = compose_char_layer(CHAR, SUBJ, CAM, light=compose_shot(
+        BG, CHAR, SUBJ, CAM, frame_key="满幅").light)
+    b, rect_b = compose_char_layer(CHAR, SUBJ, CAM, frame_key="满幅", light=compose_shot(
+        BG, CHAR, SUBJ, CAM, frame_key="满幅").light)
+    assert rect_a == rect_b == Rect(0.0, 0.0, float(W), float(H))
+    assert np.array_equal(a, b)
+
+
+def test_compose_char_layer_free_mode_frame_key() -> None:
+    """free 模式立绘层同样按 frame_key 裁（吸附矩形也来自该画幅）。"""
+    shot = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="1:1", mode="free",
+                        size_pct=30.0, edge_bar=1)
+    layer, rect = compose_char_layer(CHAR, SUBJ, CAM, light=shot.light,
+                                     frame_key="1:1", mode="free",
+                                     size_pct=30.0, edge_bar=1)
+    assert rect == frame_rect("1:1", W, H)
+    assert np.array_equal(layer, shot.char_layer)

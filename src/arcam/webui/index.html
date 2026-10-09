@@ -12,34 +12,34 @@
 <div id="app">
 
   <header id="topbar">
-    <h1 id="app-title">AR 取景器</h1>
+    <h1>AR 取景器</h1>
     <p id="app-sub">让她走出屏幕 · 本地单机工具（照片 + 立绘 + 可选 LiDAR 深度）</p>
   </header>
 
   <main id="layout">
 
     <!-- 左栏：输入 -->
-    <section id="panel-input" class="col">
+    <section class="col">
       <h2>输入</h2>
 
       <div class="drop-zone" id="drop-photo">
         <strong>照片（必选）</strong>
         <span class="dz-hint">拖拽图片到此处，或点击选择</span>
-        <span class="dz-name" id="photo-name">未选择</span>
+        <span class="dz-name empty" id="photo-name">未选择</span>
       </div>
       <input type="file" id="file-photo" accept="image/*" hidden>
 
       <div class="drop-zone" id="drop-char">
         <strong>立绘</strong>
         <span class="dz-hint">带 alpha 的 PNG 最佳；普通图请先点「抠图」</span>
-        <span class="dz-name" id="char-name">未选择</span>
+        <span class="dz-name empty" id="char-name">未选择</span>
       </div>
       <input type="file" id="file-char" accept="image/*" hidden>
 
       <div class="drop-zone" id="drop-depth">
         <strong>深度帧（可选）</strong>
         <span class="dz-hint">LiDAR 深度：png/tif(16bit) / npy / depth / exr / heic</span>
-        <span class="dz-name" id="depth-name">未选择</span>
+        <span class="dz-name empty" id="depth-name">未选择</span>
       </div>
       <input type="file" id="file-depth" accept="image/*,.npy,.depth,.exr,.heic" hidden>
 
@@ -53,7 +53,7 @@
     </section>
 
     <!-- 右栏：预览 -->
-    <section id="panel-preview" class="col">
+    <section class="col">
       <h2>预览</h2>
       <div class="canvas-wrap">
         <canvas id="preview-canvas" width="16" height="9"></canvas>
@@ -74,43 +74,43 @@
     <h2>摆放参数</h2>
     <div id="param-grid">
 
-      <div class="param-row" id="row-x">
+      <div class="param-row">
         <label for="p-x-num">x 横向偏移（米）</label>
         <input type="number" id="p-x-num" step="0.05" value="0">
         <input type="range" id="p-x-rng" min="-6" max="6" step="0.05" value="0">
       </div>
 
-      <div class="param-row" id="row-d">
+      <div class="param-row">
         <label for="p-d-num">d 人物距离（米）</label>
         <input type="number" id="p-d-num" step="0.05" value="4">
         <input type="range" id="p-d-rng" min="0.5" max="12" step="0.05" value="4">
       </div>
 
-      <div class="param-row" id="row-h">
+      <div class="param-row">
         <label for="p-h-num">h 相机离地高（米）</label>
         <input type="number" id="p-h-num" step="0.05" value="1.6">
         <input type="range" id="p-h-rng" min="0.3" max="3" step="0.05" value="1.6">
       </div>
 
-      <div class="param-row" id="row-hp">
+      <div class="param-row">
         <label for="p-hp-num">hp 人物身高（米）</label>
         <input type="number" id="p-hp-num" step="0.01" value="1.65">
         <input type="range" id="p-hp-rng" min="0.4" max="2.5" step="0.01" value="1.65">
       </div>
 
-      <div class="param-row" id="row-feq">
+      <div class="param-row">
         <label for="p-feq-num">feq 等效焦距（mm）</label>
         <input type="number" id="p-feq-num" step="0.5" value="23">
         <input type="range" id="p-feq-rng" min="10" max="120" step="0.5" value="23">
       </div>
 
-      <div class="param-row" id="row-pitch">
+      <div class="param-row">
         <label for="p-pitch-num">pitch 俯角（度，低头为正）</label>
         <input type="number" id="p-pitch-num" step="0.5" value="0">
         <input type="range" id="p-pitch-rng" min="-60" max="60" step="0.5" value="0">
       </div>
 
-      <div class="param-row" id="row-roll">
+      <div class="param-row">
         <label for="p-roll-num">roll 横滚（度，顺时针）</label>
         <input type="number" id="p-roll-num" step="0.5" value="0">
         <input type="range" id="p-roll-rng" min="-90" max="90" step="0.5" value="0">

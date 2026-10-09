@@ -70,6 +70,12 @@ def scene_a(**kw):
                        mode="ground", **kw)
 
 
+def scene_b(**kw):
+    return build_scene(RECT_B, PLACE_B, SUBJ_B, CAM_B, frame_key="9:16",
+                       char_rgba01=np.zeros((96, 48, 4)), char_name="b.png",
+                       mode="free", **kw)
+
+
 # ───────────────────────── 字段顺序 ─────────────────────────
 def test_top_level_field_order_is_identical_to_original() -> None:
     d = scene_a()
@@ -206,9 +212,7 @@ def test_character_fields() -> None:
 def test_focal_px_is_to_fixed_two_decimals_half_up() -> None:
     """focalPx 两位小数、round-half-up。"""
     assert scene_a()["camera"]["focalPx"] == js_to_fixed(ref_focal(320, 240, 23.0), 2)
-    b = build_scene(RECT_B, PLACE_B, SUBJ_B, CAM_B, frame_key="9:16",
-                    char_rgba01=np.zeros((96, 48, 4)), char_name="b.png", mode="free")
-    assert b["camera"]["focalPx"] == js_to_fixed(ref_focal(540, 960, 35.0), 2)
+    assert scene_b()["camera"]["focalPx"] == js_to_fixed(ref_focal(540, 960, 35.0), 2)
     # 半向上取：0.125 → 0.13（不是银行家的 0.12）
     assert js_to_fixed(0.125, 2) == 0.13
     assert js_to_fixed(2.675, 2) == 2.68
@@ -218,8 +222,7 @@ def test_pitch_roll_three_decimals() -> None:
     d = scene_a()
     assert d["camera"]["pitchDeg"] == js_to_fixed(-8.0, 3) == -8.0
     assert d["camera"]["rollDeg"] == js_to_fixed(3.0, 3) == 3.0
-    b = build_scene(RECT_B, PLACE_B, SUBJ_B, CAM_B, frame_key="9:16",
-                    char_rgba01=np.zeros((96, 48, 4)), char_name="b.png", mode="free")
+    b = scene_b()
     assert b["camera"]["pitchDeg"] == 12.5
     assert b["camera"]["rollDeg"] == -6.25
     # 位置本身是浮点，toFixed 只影响小数位

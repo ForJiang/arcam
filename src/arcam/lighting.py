@@ -22,8 +22,8 @@
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass
-from functools import lru_cache
 
 import numpy as np
 
@@ -195,15 +195,38 @@ def light_levels(sample: LightSample) -> tuple[float, float]:
 
 
 # ── 颗粒噪声砖（index.html:1168-1180）─────────────────────────────────
-@lru_cache(maxsize=1)
+_GRAIN_TILE: np.ndarray | None = None
+_GRAIN_LOCK = threading.Lock()
+
+
 def grain_tile() -> np.ndarray:
     """256×256 固定种子噪声砖，值域 [-1, 1)。
 
     对应 ``grainTile``（index.html:1168-1180）：xorshift32、种子 0x9E3779B9，
     ``s >>> 17`` 是无符号右移、``s / 2147483648`` 线性映射到 [-1,1)。
     ⚠ 必须按 32 位回绕实现（JS 位运算全是 int32），用 Python 原生无限精度
-    整数会得到不同序列。**只读**，调用方不得改写。
+    整数会得到不同序列。**只读**，调用方不得改写 —— 返回数组已置
+    ``write=False``，误改写会当场抛错而不是静默污染别人看到的同一张砖。
+
+    线程安全（2026-10-09 审计）：``lru_cache`` 只保证值不出错，并发**首调**时
+    多个线程可能各建一张值相同但身份不同的数组（8 线程并发首调可复现，
+    ``a is b`` 不再成立）。改为双检锁单例：全进程同一对象、只建一次，
+    与原版「只建一次」的承诺一致。
     """
+    global _GRAIN_TILE
+    tile = _GRAIN_TILE
+    if tile is None:
+        with _GRAIN_LOCK:
+            tile = _GRAIN_TILE
+            if tile is None:
+                tile = _grain_tile_build()
+                tile.setflags(write=False)   # 强制 docstring 的只读契约
+                _GRAIN_TILE = tile
+    return tile
+
+
+def _grain_tile_build() -> np.ndarray:
+    """xorshift32 序列本体（原版 ``grainTile``，index.html:1168-1180）。"""
     s = 0x9E3779B9 - 0x100000000          # |0 → int32
     out = np.empty(256 * 256, dtype=np.float64)
     for i in range(out.shape[0]):
@@ -242,6 +265,12 @@ def _char_stats(char_rgba: np.ndarray) -> tuple[float, float, float, float]:
     缩到宽 32、高 ``max(1, js_round(H/W*32))``；**alpha < 8 跳过**（阈值 8/255，
     不是 0）；n==0 时亮度按原版返回 0.5，其余统计离线无残留态按 0。
     缩采样滤波用面积平均（原版 drawImage 滤波未指定，见模块 docstring）。
+
+    ⚠ alpha 判据按原版 ``getImageData`` 的**字节**语义先量化再比（2026-10-09
+      审计）：原版 drawImage 缩采样后读回的是 0..255 整数，``d[i+3] < 8`` 比的
+      是字节；浮点 alpha 在精确 8/255 边界上会因求和顺序落在 7.9999999999998x /
+      8.0000000000000x 两侧（整幅 alpha=8 的立绘实测 1/3 像素被误跳过），
+      ``np.rint``（ToUint8Clamp 的 round-half-even）后比较与原版逐位一致。
     """
     src = _to_float01(char_rgba, 4)
     h_px, w_px = src.shape[:2]
@@ -251,7 +280,7 @@ def _char_stats(char_rgba: np.ndarray) -> tuple[float, float, float, float]:
     n_y = max(1, js_round(h_px / w_px * 32))
     grid = _box_resample(src, 0.0, 0.0, float(w_px), float(h_px), n_x, n_y)
     rgb = grid[..., :3] * 255.0
-    alpha = grid[..., 3] * 255.0
+    alpha = np.rint(np.clip(grid[..., 3], 0.0, 1.0) * 255.0)   # 字节量化（见 docstring）
     solid = alpha >= 8.0
     n = int(solid.sum())
     if n == 0:

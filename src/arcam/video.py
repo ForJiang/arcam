@@ -48,6 +48,7 @@ __all__ = [
     "ROLL_RANGE",
     "DISTANCE_RANGE",
     "FRAME_FMT",
+    "FRAME_SUFFIXES",
     "MP4_NAME",
     "load_track",
     "save_track",
@@ -95,8 +96,10 @@ _TRACK_DEFAULTS: dict[str, object] = {
     "frame_key": "满幅",
     "shot": "全身",
 }
-"""轨道级默认值。前九个数值/字符串字段与 S 的默认值逐字对齐（index.html:921–937）；
-width/height/fps 是离线新增（原版 canvas 像素 = 视频像素，index.html:3941）。"""
+"""轨道级默认值。除 width/height/fps 外的八个字段（height_m/feq_mm/
+subject_height_m/char_scale/size_pct/mode/frame_key/shot）与 S 的默认值逐字对齐
+（index.html:921–937）；width/height/fps 是离线新增（原版 canvas 像素 = 视频像素，
+index.html:3941）。"""
 
 _TRACK_FIELDS = tuple(_TRACK_DEFAULTS) + ("keys",)
 _KEY_BASE = ("t", "lateral_m", "distance_m", "pitch_deg", "roll_deg")
@@ -114,7 +117,8 @@ class PoseKey:
     """
 
     t: float
-    """时间戳（秒）。必须逐键递增。"""
+    """时间戳（秒）。必须逐键**严格**递增（重复时间戳会让前一键永远取不到，
+    属作者笔误，:func:`load_track` 直接报错）。"""
     lateral_m: float = 0.0
     """人物横向偏移（米，+右）。对应 S.x。"""
     distance_m: float = 4.0
@@ -248,7 +252,7 @@ def _key_num(data: dict, name: str, where: str, default: float) -> float:
 def load_track(path: str | Path) -> PoseTrack:
     """读轨道 JSON（schema 见 README）。
 
-    做结构校验（字段名、类型、必须项、时间戳单调、枚举成员），缺省字段回落
+    做结构校验（字段名、类型、必须项、时间戳严格递增、枚举成员），缺省字段回落
     :data:`_TRACK_DEFAULTS`。数值范围自检交给 :func:`track_issues`（``check`` 子命令
     与 :func:`render_track` 共用），这里只拦一定会算错的结构问题。
     """
@@ -298,8 +302,9 @@ def load_track(path: str | Path) -> PoseTrack:
             raise ValueError(f"{where} 应是一个 JSON 对象，得到 {type(raw).__name__}")
         _reject_unknown(raw, _KEY_FIELDS, where)
         t = _num(raw, "t", where)
-        if prev_t is not None and t < prev_t:
-            raise ValueError(f"{where} 时间戳 {t} 早于上一键 {prev_t} —— 键必须按时间递增")
+        if prev_t is not None and t <= prev_t:
+            raise ValueError(f"{where} 时间戳 {t} 早于上一键 {prev_t} —— "
+                             "键必须按时间严格递增（不允许重复）")
         prev_t = t
         key_kwargs: dict[str, object] = {
             "t": t,
@@ -423,6 +428,11 @@ def track_issues(track: PoseTrack) -> list[str]:
     ``check`` 子命令逐条打印；:func:`render_track` 也先过这一关，非空即拒绝渲染
     （原版不静默失败）。阈值见 :data:`PITCH_RANGE` / :data:`ROLL_RANGE` /
     :data:`DISTANCE_RANGE`。
+
+    :func:`load_track` 已经拦过枚举字段，这里再查一遍是因为 ``PoseTrack`` 是普通
+    dataclass、可以直接构造：写错的 ``mode``/``frame_key``/``shot`` 若漏过去，
+    ``frame_rect`` 会把未知画幅当 0（不裁）、``SHOTS[...]`` 直接 KeyError ——
+    都是难查的静默失败，所以在自检关一起拦掉。
     """
     problems: list[str] = []
     if track.fps <= 0:
@@ -430,6 +440,14 @@ def track_issues(track: PoseTrack) -> list[str]:
     if track.width < 8 or track.height < 8:
         problems.append(f"画布太小（{track.width}×{track.height}）；原版 compositionHints "
                         f"在 W/H<8 时直接罢工（index.html:1890），这里同样拒绝")
+    if track.mode not in ("ground", "free"):
+        problems.append(f"mode 只能是 'ground' 或 'free'，得到 {track.mode!r}")
+    if track.frame_key not in FRAMES:
+        problems.append(f"frame_key 必须是 FRAMES 的中文 key（{', '.join(FRAMES)}），"
+                        f"得到 {track.frame_key!r}")
+    if track.shot not in SHOTS:
+        problems.append(f"shot 必须是 SHOTS 的中文 key（{', '.join(SHOTS)}），"
+                        f"得到 {track.shot!r}")
     if not (0.0 < track.height_m <= 50.0):
         problems.append(f"相机高度 {track.height_m:g} m 不在合理范围 (0, 50]")
     if not (0.0 < track.feq_mm <= 500.0):
@@ -441,9 +459,9 @@ def track_issues(track: PoseTrack) -> list[str]:
     if not (0.0 < track.size_pct <= 1000.0):
         problems.append(f"立绘占比 {track.size_pct:g}% 不在合理范围 (0, 1000]")
     for i, key in enumerate(track.keys):
-        if i and key.t < track.keys[i - 1].t:
-            problems.append(f"keys[{i}] 时间戳 {key.t:g}s 早于上一键 {track.keys[i - 1].t:g}s —— "
-                            f"键必须按时间递增")
+        if i and key.t <= track.keys[i - 1].t:
+            problems.append(f"keys[{i}] 时间戳 {key.t:g}s 早于上一键 "
+                            f"{track.keys[i - 1].t:g}s —— 键必须按时间严格递增（不允许重复）")
         if not PITCH_RANGE[0] <= key.pitch_deg <= PITCH_RANGE[1]:
             problems.append(f"keys[{i}] 俯角 {key.pitch_deg:g}° 超出 "
                             f"[{PITCH_RANGE[0]:g}, {PITCH_RANGE[1]:g}]")
@@ -521,11 +539,21 @@ def save_png(arr: np.ndarray, path) -> None:
 # ---------- 背景（单图 / 帧目录） ----------
 
 def _fit_rgb01(arr: np.ndarray, track: PoseTrack) -> np.ndarray:
+    """背景 → 轨道画布尺寸的 float64 [0,1]。
+
+    收两种 dtype：**uint8**（0..255，:func:`_read_image` 的产物）与 **float64
+    [0,1]**（:func:`image_to_rgb01` 的产物 —— 调用方很自然会把它直接喂进来）。
+    浮点入参先量化回 uint8 再走后面的缩放/归一，与 matting 预处理同一量化时点；
+    不这么做的话 PIL 的 ``fromarray`` 根本不认 3 通道 float64（TypeError），
+    而尺寸恰好一致时又会被静默多除一次 255（整张背景近黑）。
+    """
     a = np.asarray(arr)
     if a.ndim != 3 or a.shape[2] not in (3, 4):
         raise ValueError(f"背景图片应为 (H,W,3) 或 (H,W,4)，得到 {a.shape}")
     if a.shape[2] == 4:
         a = a[..., :3]
+    if np.issubdtype(a.dtype, np.floating):
+        a = (np.clip(a, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
     if a.shape[0] != track.height or a.shape[1] != track.width:
         img = Image.fromarray(np.ascontiguousarray(a)).resize(
             (track.width, track.height), Image.BILINEAR)
@@ -578,8 +606,9 @@ def render_track(bg_source: str | Path | np.ndarray, track: PoseTrack,
                  *, tone: bool = False) -> list[Path]:
     """按轨道逐帧渲染：每帧解算摆位 → 走 compose_shot → 写 PNG 序列。
 
-    :param bg_source: 背景。单张图片路径、帧目录（按文件名排序）或已就绪的
-        RGB uint8 数组（每帧复用）。尺寸与轨道不一致时缩放到轨道画布（双线性）。
+    :param bg_source: 背景。单张图片路径、帧目录（按文件名排序）、已就绪的
+        RGB uint8 数组或 float64 [0,1] 数组（每帧复用）。尺寸与轨道不一致时
+        缩放到轨道画布（双线性）。
     :param track:     位姿轨道（键间线性插值，见 :func:`sample_track`）。
     :param char_rgba01: 立绘 RGBA，float64 已归一化到 [0,1]。
     :param out_dir:   输出目录；帧命名 ``frame_%06d.png``，从 1 开始。

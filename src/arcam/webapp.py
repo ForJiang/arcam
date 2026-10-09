@@ -58,6 +58,7 @@ from PIL import Image
 
 from arcam.compose import _merge_env, compose_shot
 from arcam.depth import LiDARFrame, align_to_canvas, load_depth
+from arcam.frames import frame_rect
 from arcam.geometry import Camera
 from arcam.matting import anime_cut
 from arcam.numeric import Rect
@@ -231,6 +232,9 @@ class Store:
     def depth_env(self) -> tuple[LiDARFrame, CameraEnv] | None:
         """深度帧 + 环境量（帧变了才重拟合；锁外做重活）。
 
+        返回的 **(帧, 环境量) 恒为自洽一对**：环境量总是对所返回帧拟合出来的
+        （拟合期间帧被并发换走也如此，见实现内注释）。无深度帧 → None。
+
         环境量只取决于**深度帧本身**：:func:`align_to_canvas` 是最近邻几何缩放、
         内参同比变换，拟出的平面不变（LIDAR-SPEC §2 对齐约定）。所以 inspect 时
         拟合一次、之后每遍渲染复用，预览少跑一遍我们自己的 RANSAC（实测省
@@ -253,7 +257,11 @@ class Store:
         with self.lock:
             if self.depth is frame:
                 self._env_cache = (frame, env)
-            return (self.depth, env) if self.depth is not None else None
+            # 恒返回**刚拟出的** (帧, env) 自洽一对：拟合耗几百 ms，期间另一线程
+            # （上传/inspect 换帧，均不持 render_lock）可能已换走 self.depth ——
+            # 那时绝不能把新帧与旧 env 配成一对返回（遮挡/落位会静默失真），
+            # 新帧留给下一遍渲染按需重拟
+            return (frame, env)
 
     def set_photo(self, arr: np.ndarray, name: str) -> None:
         with self.lock:
@@ -642,16 +650,23 @@ def _scene_placement(char01: np.ndarray | None, subj: Subject, cam: Camera,
                     params: dict) -> SpritePlacement | None:
     """给 build_scene 单独算一次落位（cli._placement 的 web 同构）。
 
-    只传当前模式收得下的 kwargs（ground 不收 size_pct/edge_bar、free 不收
+    只传当前模式收得下的 kwargs（ground 不收 size_pct/edge_bar/rect、free 不收
     char_scale/shot）—— placement.py 两个分支的签名决定的，否则 scene 记的
     参数与实际渲染不符。
+
+    ⚠ free 分支必须与 compose._placement 同参：``rot_basis`` 与 ``rect``
+    （本遍 frame_rect）都要传——漏传会让 scene.json 记的落位与预览/导出图
+    不一致（rot_basis=frame 时记 roll° 而渲染 0°；edge_bar 吸附记不吸而渲染
+    吸住）。ground 分支不收 rect（贴地模式无吸附）。
     """
     if char01 is None:
         return None
     if params["mode"] == "free":
         return current_placement(char01, subj, cam, mode="free",
                                  size_pct=params["size_pct"],
-                                 edge_bar=params["edge_bar"])
+                                 edge_bar=params["edge_bar"],
+                                 rot_basis=params["rot_basis"],
+                                 rect=frame_rect(params["frame"], cam.width, cam.height))
     return current_placement(char01, subj, cam, mode="ground",
                              char_scale=params["char_scale"],
                              rot_basis=params["rot_basis"], shot=params["shot"])
@@ -948,8 +963,15 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_static(self, path: str) -> None:
         relative = urllib.parse.unquote(path[len("/static/"):])
         root = WEBUI_DIR.resolve()
-        target = (root / relative).resolve() if relative else root
-        if target != root and root not in target.parents or not target.is_file():
+        try:
+            target = (root / relative).resolve() if relative else root
+            is_file = target.is_file()
+        except (OSError, ValueError):
+            # 路径解析本身失败（%00 空字节 / 超长名 / 非法字符）：坏输入 → 400，
+            # 不进 500（也不把 lstat 的内部报错文本透出响应体）
+            raise ApiError(400, f"静态路径无法解析：/static/{relative}",
+                           "URL 里不要带 %00 这类控制字符或超长文件名") from None
+        if target != root and root not in target.parents or not is_file:
             raise ApiError(404, f"静态文件不存在：/static/{relative}",
                            "前端三件套在 src/arcam/webui/（style.css / app.js 等）")
         suffix = target.suffix.lower()

@@ -361,6 +361,18 @@ GitHub Pages 只伺服静态文件、跑不了 Python 服务，所以把 focal/p
   逐位回归、`_merge_env` 三态优先级、CLI `lidar inspect/serve` 与 `render --depth`。
 - 其余模块的 golden 用例（投影 12 组公式手推、4×4 矩阵交叉验证、像素级合成性质）
   见 P1–P4 各自的测试文件。
+- `tests/test_golden_recompute.py`：Pages 版数值基准 `docs/tests/golden.json` 必须
+  能用当前 Python 实现逐向量重算（462 向量全比对），fixture 不许悄悄过期。
+  配套 `tools/golden-diff.mjs`（Node 跑 JS 侧差分，实测最大偏差 5.551e-17）：
+
+  ```bash
+  node tools/golden-diff.mjs     # 需要 Node ≥ 14
+  ```
+
+v1.1.0（2026-10-10）为全项目审计版本：修复 16 个功能障碍（free 模式 rot_basis/
+edge_bar 整条渲染链断链、char-layer --frame 静默失效、lidar serve 一帧不收、
+视频背景双重除法、Pages 抠图阈值 1 ulp 翻面等），清理死代码，明细见
+`CHANGELOG.md`。
 
 源码溯源：每个公开函数的 docstring 都注明对应 JS 的 `index.html:<line>` /
 `cutout.js:<line>`；契约全集在 `docs/SPEC.md`，原版逐字事实在

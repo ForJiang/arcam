@@ -133,6 +133,22 @@ def test_shadow_layer_color_from_ambient_goldens():
     assert dark[2, 20, 0:3].tolist() == [6, 6, 6]
 
 
+def test_shadow_layer_color_uint8_wraparound_258_to_2():
+    """q(v) 可以吐出 258（clampN(v,0,1)·255/6 半向 +∞ 取整 = 43 → 43·6）：
+    numpy uint8 **回绕**成 2，与 JS 端口 q() 的 ``% 256`` 逐位一致
+    （docs/arcam-render.js shadowColor：Uint8ClampedArray 会钳成 255，但对拍
+    基准是回绕；极暖环境 r=1/b=0.05 → rb=√20，lumS·rb 被 clampN 夹到 1）。
+
+    手推：lum = 0.2126+0.7152+0.0722·0.05 = 0.93141 → lumS = 0.512276
+          colR = q(0.512276·4.472136) = q(1.0) = 43·6 = 258 → 2
+          colG = q(0.512276) = round(21.7717)·6 = 132
+          colB = q(0.512276/4.472136) = q(0.114537) = round(4.86782)·6 = 30
+    """
+    layer = sprite.contact_shadow_layer(_char_blob(), _P(100, 100, 40, 60, 0.0),
+                                        (1.0, 1.0, 0.05))
+    assert layer[2, 20, 0:3].tolist() == [2, 132, 30]
+
+
 def test_shadow_layer_tiny_cases_return_transparent():
     """c.w < 14 / 立绘 w<12 或 h<12 → 原版直接不画（index.html:3118 / 3064）。"""
     tiny = sprite.contact_shadow_layer(_char_blob(), _P(100, 100, 10, 15, 0.0), (0.6,) * 3)

@@ -62,13 +62,9 @@ function shotVal(shot) {
  * 这里用 Dekker 拆分把平方和算成 double-double，再做一步牛顿修正，结果与
  * Python 逐位相同（200k 随机样本 + 全部 golden 用例 0 例外）。
  * 纯 JS、无 fma 依赖；量级超出安全区（平方和会溢出/次正态）时退回 Math.hypot。
+ * 平方和的低位补偿写成 fast2sum 误差项（a>=b 已由上面的 swap 保证，精确）。
  */
 const SPLIT = 134217729;                    // 2^27 + 1，Dekker 双精度拆分因子
-function twoSum(a, b) {                     // Knuth two-sum（无顺序要求）
-  const s = a + b;
-  const bb = s - a;
-  return [s, (a - (s - bb)) + (b - bb)];
-}
 function twoProd(a, b) {                    // 精确乘积 (p, e)，满足 p + e == a*b
   const ca = SPLIT * a, ah = ca - (ca - a), al = a - ah;
   const cb = SPLIT * b, bh = cb - (cb - b), bl = b - bh;

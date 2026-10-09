@@ -142,8 +142,9 @@ async function uploadFile(kind, file) {
   }
 }
 
+// 只把「上传成功」的文件写进 state（photo/char/depth 一视同仁）：失败时留旧值，
+// 界面上的「未选择」才与内部状态一致；深度帧的落账在 uploadFile 的 depth 分支。
 function handleFile(kind, file) {
-  if (kind === 'depth') state.depthFile = file;
   return uploadFile(kind, file);
 }
 
@@ -362,6 +363,12 @@ function bindNumeric(key) {
     if (isFinite(v)) commit(v); // 输入中途（"1."/"−"）不提交
   });
   rng.addEventListener('input', function () { commit(parseFloat(rng.value)); });
+  // 失焦时把夹取后的值写回两个控件：手输超量程时输入框还留着 99，
+  // 与真正发出去的 params（已夹到量程）不一致，会让人以为没夹成功
+  num.addEventListener('change', function () {
+    num.value = state.params[key];
+    rng.value = state.params[key];
+  });
 }
 
 function bindSelect(key, id, parse) {

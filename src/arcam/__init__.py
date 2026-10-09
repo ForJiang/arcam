@@ -8,7 +8,7 @@ scene.json 配方、位姿轨道视频渲染。
 逐条 file:line 映射）。
 """
 
-from arcam.numeric import Rect, clamp01, clampn, js_fixed_str, js_round, js_to_fixed
+from arcam.numeric import Rect, clampn, js_round, js_to_fixed
 from arcam.geometry import K_LONG, K_SHORT, Camera, focal_px, place, project
 from arcam.placement import (
     FRAMES,
@@ -50,7 +50,8 @@ __all__ = [
     "K_LONG", "K_SHORT", "Camera", "focal_px", "project", "place",
     "FRAMES", "SHOTS", "Subject", "SpritePlacement",
     "ground_placement", "free_placement", "current_placement", "auto_fix_x", "snap_to_edge",
-    "Rect", "view_rect", "frame_rect",
+    "Rect", "clampn", "js_round", "js_to_fixed",
+    "view_rect", "frame_rect",
     "LightSample", "measure_region", "light_levels", "char_lum", "bake_lit",
     "contact_shadow_layer", "composite_sprite",
     "ComposedShot", "compose_shot", "compose_char_layer",

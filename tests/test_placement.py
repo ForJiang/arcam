@@ -7,52 +7,24 @@ golden 期望值按 artifact A-projection-core.md §2.3 / §3.5 的公式手工�
 from __future__ import annotations
 
 import math
-import sys
-import types
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-try:
-    from arcam.placement import (
-        DEFAULT_FREE_P,
-        FRAMES,
-        SHOTS,
-        SpritePlacement,
-        Subject,
-        auto_fix_x,
-        current_placement,
-        free_placement,
-        ground_placement,
-        snap_to_edge,
-    )
-except ModuleNotFoundError as _exc:
-    if _exc.name in ("arcam.geometry", "arcam.placement"):
-        raise
-    # 并行开发期：arcam/__init__.py 会 import 其他 Agent 尚未创建的模块。注入一个只带
-    # __path__ 的空 arcam 包（跳过 __init__ 的 re-export 副作用），使本文件可单独加载
-    # geometry / placement；兄弟模块就位后本分支不会触发。
-    _pkg = types.ModuleType("arcam")
-    _pkg.__path__ = [str(Path(__file__).resolve().parents[1] / "src" / "arcam")]
-    sys.modules["arcam"] = _pkg
-    from arcam.placement import (
-        DEFAULT_FREE_P,
-        FRAMES,
-        SHOTS,
-        SpritePlacement,
-        Subject,
-        auto_fix_x,
-        current_placement,
-        free_placement,
-        ground_placement,
-        snap_to_edge,
-    )
-    from arcam.geometry import Camera
-    from arcam.numeric import Rect
-
 from arcam.geometry import Camera
 from arcam.numeric import Rect
+from arcam.placement import (
+    DEFAULT_FREE_P,
+    FRAMES,
+    SHOTS,
+    SpritePlacement,
+    Subject,
+    auto_fix_x,
+    current_placement,
+    free_placement,
+    ground_placement,
+    snap_to_edge,
+)
 
 F = 1275.828595201775  # focal_px(1920×1080, feq=23) = 960·23/17.3064（test_geometry 已推导）
 

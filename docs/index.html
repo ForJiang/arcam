@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AR 取景器 — arcam（GitHub Pages 版）</title>
 <!-- Pages 发布物：整体即 site/ 目录（SITE-SPEC §0）。零 CDN、零构建、零外链，
-     所有相对路径都在同目录内（arcam-core.js / arcam-render.js 由并行 Agent 产出）。 -->
+     所有相对路径都在同目录内（arcam-core.js / arcam-render.js / matte.js 由本页
+     按需动态 import，不写死在 index.html 里）。 -->
 <link rel="stylesheet" href="./style.css">
 <script type="module" src="./app.js"></script>
 </head>
@@ -13,14 +14,14 @@
 <div id="app">
 
   <header id="topbar">
-    <h1 id="app-title">AR 取景器</h1>
+    <h1>AR 取景器</h1>
     <p id="app-sub">让她走出屏幕 · GitHub Pages 纯客户端版（照片 + 立绘；运算全在你的浏览器里，不上传）</p>
   </header>
 
   <main id="layout">
 
     <!-- 左栏：输入（无 LiDAR 深度帧：Pages 版只跑照片 + 立绘） -->
-    <section id="panel-input" class="col">
+    <section class="col">
       <h2>输入</h2>
 
       <div class="drop-zone" id="drop-photo">
@@ -40,14 +41,14 @@
       <p class="hint" id="input-hint"></p>
 
       <div class="btn-row">
-        <!-- 抠图钮：仅当 window.arcamMatte 存在（site/matte.js 挂钩点）才显示，初始隐藏 -->
+        <!-- 抠图钮：仅当 window.arcamMatte 存在（matte.js 挂钩点）才显示，初始隐藏 -->
         <button type="button" id="btn-matte" hidden>抠图</button>
         <button type="button" id="btn-rerender">重新渲染</button>
       </div>
     </section>
 
     <!-- 右栏：预览 -->
-    <section id="panel-preview" class="col">
+    <section class="col">
       <h2>预览</h2>
       <div class="canvas-wrap">
         <canvas id="preview-canvas" width="16" height="9"></canvas>
@@ -67,43 +68,43 @@
     <h2>摆放参数</h2>
     <div id="param-grid">
 
-      <div class="param-row" id="row-x">
+      <div class="param-row">
         <label for="p-x-num">x 横向偏移（米）</label>
         <input type="number" id="p-x-num" step="0.05" value="0">
         <input type="range" id="p-x-rng" min="-6" max="6" step="0.05" value="0">
       </div>
 
-      <div class="param-row" id="row-d">
+      <div class="param-row">
         <label for="p-d-num">d 人物距离（米）</label>
         <input type="number" id="p-d-num" step="0.05" value="4">
         <input type="range" id="p-d-rng" min="0.5" max="12" step="0.05" value="4">
       </div>
 
-      <div class="param-row" id="row-h">
+      <div class="param-row">
         <label for="p-h-num">h 相机离地高（米）</label>
         <input type="number" id="p-h-num" step="0.05" value="1.6">
         <input type="range" id="p-h-rng" min="0.3" max="3" step="0.05" value="1.6">
       </div>
 
-      <div class="param-row" id="row-hp">
+      <div class="param-row">
         <label for="p-hp-num">hp 人物身高（米）</label>
         <input type="number" id="p-hp-num" step="0.01" value="1.65">
         <input type="range" id="p-hp-rng" min="0.4" max="2.5" step="0.01" value="1.65">
       </div>
 
-      <div class="param-row" id="row-feq">
+      <div class="param-row">
         <label for="p-feq-num">feq 等效焦距（mm）</label>
         <input type="number" id="p-feq-num" step="0.5" value="23">
         <input type="range" id="p-feq-rng" min="10" max="120" step="0.5" value="23">
       </div>
 
-      <div class="param-row" id="row-pitch">
+      <div class="param-row">
         <label for="p-pitch-num">pitch 俯角（度，低头为正）</label>
         <input type="number" id="p-pitch-num" step="0.5" value="0">
         <input type="range" id="p-pitch-rng" min="-60" max="60" step="0.5" value="0">
       </div>
 
-      <div class="param-row" id="row-roll">
+      <div class="param-row">
         <label for="p-roll-num">roll 横滚（度，顺时针）</label>
         <input type="number" id="p-roll-num" step="0.5" value="0">
         <input type="range" id="p-roll-rng" min="-90" max="90" step="0.5" value="0">

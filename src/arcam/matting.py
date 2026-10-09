@@ -286,8 +286,16 @@ def _load_session(path: Path, *, intra_op: int, simd: bool):
     # simd：原版 ort.env.wasm.simd=true（cutout.js:508）在 ORT CPU 无运行时开关，
     # SIMD 由构建决定；参数保留只为签名对齐 cutout.js:508。
     _ = simd
-    return ort.InferenceSession(str(path), sess_options=opts,
-                                providers=['CPUExecutionProvider'])
+    try:
+        return ort.InferenceSession(str(path), sess_options=opts,
+                                    providers=['CPUExecutionProvider'])
+    except Exception as e:
+        # ORT 的异常体系（InvalidProtobuf/Fail/NoSuchFile…）不是 ValueError/OSError
+        # 子类，直接抛会在 CLI 侧变成 traceback。转成人话，由调用方按 ValueError 接。
+        raise ValueError(
+            f'onnxruntime 打不开模型 {path}：{e}\n'
+            '（确认是 isnet-anime-q8.onnx 本体、没下断；换模型要连大小/sha256 一起换，'
+            f'期望 {MODEL_SIZE} B / sha256 {MODEL_SHA256[:8]}…）') from None
 
 
 def _find(parent: list[int], i: int) -> int:

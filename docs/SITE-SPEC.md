@@ -6,13 +6,13 @@
 
 ## 0. 硬规则
 
-- 原生 JS（ES2022，`<script type="module">`），零框架、零 CDN、零构建；`site/` 目录
-  整体即 Pages 发布物（仓库 Settings → Pages → branch main /site）。
+- 原生 JS（ES2022，`<script type="module">`），零框架、零 CDN、零构建；`docs/` 目录
+  整体即 Pages 发布物（Pages 只支持 / 或 /docs，故站点文件与 SPEC 文档同放 docs/）（仓库 Settings → Pages → branch main /site）。
 - 数值口径与 Python 逐字一致：`jsRound = (v) => Math.floor(v + 0.5)`（JS Math.round
   本身就是半向 +∞，正好等于 Python 的 js_round）；角度公开 API 用度；坐标 Y 上/Z 朝
   观察者/画布 v 向下。**禁止 `toFixed` 之外的任何取整捷径**（scene.json 的
   `toFixed(2)/(3)` 语义与 Python `js_to_fixed` 一致，直接用）。
-- 验收基准：`site/tests/golden.json`（Python 侧已生成：focal 40 / project 200 /
+- 验收基准：`docs/tests/golden.json`（Python 侧已生成：focal 40 / project 200 /
   place 120 / placement 84 / scene 3）。J1 必须用 node_repl（`mcp__node_repl__js`，
   纯 Node 内核）加载自己的 JS + golden 做**数值 diff 全过**（几何 1e-9 相对误差）。
 - 文件互斥：J1 只写 arcam-core.js；J2 只写 arcam-render.js；J3 只写
@@ -20,7 +20,7 @@
 - 视觉：`docs/WEB-STYLE.md` tokens（J3 的 style.css 用同一套 :root 变量，深浅色
   媒体查询照抄本地 webui 的即可——本地版已验证可用）。
 
-## 1. J1 `site/arcam-core.js`（纯数学，无 DOM）
+## 1. J1 `docs/arcam-core.js`（纯数学，无 DOM）
 
 ```js
 export const K_LONG = 17.3064, K_SHORT = 12.9798;
@@ -44,7 +44,7 @@ export function viewRect(W, H) -> {x:0,y:0,w:W,h:H}
 - **自验**：node_repl 里 `import('./arcam-core.js')` + 读 golden.json，断言
   focal/project/place/placement 全字段最大偏差 <1e-9；不过就修到过。
 
-## 2. J2 `site/arcam-render.js`（canvas 合成 + 配方）
+## 2. J2 `docs/arcam-render.js`（canvas 合成 + 配方）
 
 ```js
 export function contactShadowAlpha(charImg, placement, ambient) -> HTMLCanvasElement  // sprite.py 等价
@@ -62,7 +62,7 @@ export function buildScene(rect, placement, subj, cam, params) -> Object        
   3 组完整样例，字段顺序用 `Object.keys()` 逐项比）。
 - 缩放用 `imageSmoothingQuality='high'`（与原版浏览器一致）。
 
-## 3. J3 `site/index.html|style.css|app.js`（页面，功能对齐本地 webui）
+## 3. J3 `docs/index.html|style.css|app.js`（页面，功能对齐本地 webui）
 
 - 布局/控件 id 与本地 `webui/` 保持一致（照片/立绘上传、参数面板、预览、四个成品
   钮、状态条、scene.json 折叠、「仅在本地运行」chip 改成「页面在 GitHub Pages 运行，
@@ -75,10 +75,10 @@ export function buildScene(rect, placement, subj, cam, params) -> Object        
 - 上传支持 drag&drop + 点击；立绘无 alpha 时提示「请用本地版抠图」或存在 matte 时
   引导点抠图。
 
-## 4. J4 `site/matte.js` + `site/vendor/`（可选抠图，懒加载）
+## 4. J4 `docs/matte.js` + `docs/vendor/`（可选抠图，懒加载）
 
 - 从 `oss-teardown/repo/anime/` **只读复制** ort.min.js / ort-wasm-simd-threaded.mjs /
-  .wasm / isnet-anime-q8.onnx 到 `site/vendor/`（这是原版自带的运行时与模型，
+  .wasm / isnet-anime-q8.onnx 到 `docs/vendor/`（这是原版自带的运行时与模型，
   上游 README 声明该目录属本项目自身文件）。
 - 按 artifact A-matting-mmd-chars.md §1 的算法重写 `window.arcamMatte =
   async (imgEl, onProgress) => canvas`：segPreprocess（长边→1024、边缘延展补边、
@@ -91,7 +91,7 @@ export function buildScene(rect, placement, subj, cam, params) -> Object        
 
 ## 5. 交付定义（编排者验收）
 
-1. `site/` 可直接被 Pages 伺服：index.html + 上述 JS 全在同目录或相对路径，无绝对
+1. `docs/` 可直接被 Pages 伺服：index.html + 上述 JS 全在同目录或相对路径，无绝对
    路径、无外链。
 2. 浏览器差分：J1/J2 的数值/几何与 golden.json 全过；scene.json 字段与顺序一致；
    合成图与本地 webui 出图结构一致（立绘落位/尺寸偏差 <2px，alpha 覆盖率差 <3%）。

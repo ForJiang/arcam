@@ -1,5 +1,5 @@
 #!/bin/bash
-# 推送到 GitHub 并开启 GitHub Pages（/site 目录）。
+# 推送到 GitHub 并开启 GitHub Pages（/docs 目录）。
 #
 # 用法：
 #   GITHUB_TOKEN=ghp_xxx tools/push-to-github.sh [仓库名] [public|private]
@@ -48,14 +48,14 @@ git branch -M main
 git push -u origin main --quiet
 git remote set-url origin "https://github.com/$USER/$REPO.git"   # 撤掉 URL 里的 token
 
-echo "[push] 开启 Pages（main 分支 /site）…"
+echo "[push] 开启 Pages（main 分支 /docs）…"
 curl -sf -X POST -H "$AUTH" -H "X-GitHub-Api-Version: $VER" \
-  -d '{"source":{"branch":"main","path":"/site"}}' \
+  -d '{"source":{"branch":"main","path":"/docs"}}' \
   "$API/repos/$USER/$REPO/pages" >/dev/null 2>&1 \
   || curl -sf -X PUT -H "$AUTH" -H "X-GitHub-Api-Version: $VER" \
-       -d '{"source":{"branch":"main","path":"/site"}}' \
+       -d '{"source":{"branch":"main","path":"/docs"}}' \
        "$API/repos/$USER/$REPO/pages" >/dev/null 2>&1 \
-  || echo "（Pages 开启失败就手动：Settings → Pages → main /site）"
+  || echo "（Pages 开启失败就手动：Settings → Pages → main /docs）"
 
 cat <<MSG
 

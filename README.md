@@ -13,16 +13,25 @@
 | 形态 | 入口 | 说明 |
 |---|---|---|
 | 命令行 | `arcam` / `python -m arcam` | 六个子命令，脚本化、批处理 |
-| 本机网页 | `arcam web` 或双击启动器 | 参数全可调、300ms 防抖实时预览；数据不出本机 |
-| 网页版（免安装） | [forjiang.github.io/arcam](https://forjiang.github.io/arcam/) | 同一管线的纯客户端 JS 移植，运算全在访客浏览器里 |
+| 本机网页 | `arcam web` 或双击启动器 | 参数全可调、300ms 防抖实时预览、HUD 取景装饰、中英切换、立绘修图线；数据不出本机 |
+| 网页版（免安装） | [forjiang.github.io/arcam](https://forjiang.github.io/arcam/) | 同一管线的纯客户端 JS 移植 + 实时相机（getUserMedia + 陀螺仪 + 快门 + 变焦），运算全在访客浏览器里 |
 
 核心承诺：`scene.json` 与原版 **100% 同构**（同名字段、同顺序、同单位、同取整语义），
 「Python 出的图能和原版工具互认配方」。
 
-特色能力：**iPhone 激光雷达环境感知**——从深度帧（16-bit PNG / .npy / .depth /
-人像 HEIC / EXR）拟合地面平面，解出相机高度/俯角/滚转，驱动落位与遮挡抠除；
-深度语义采用 Apple 官方轴向 z（"距相机平面的距离"）。依赖只有 numpy + pillow
-（抠图/LiDAR/视频为可选 extra）。
+特色能力：
+
+- **iPhone 激光雷达环境感知**——从深度帧（16-bit PNG / .npy / .depth /
+  人像 HEIC / EXR）拟合地面平面，解出相机高度/俯角/滚转，驱动落位与遮挡抠除；
+  深度语义采用 Apple 官方轴向 z（"距相机平面的距离"）。
+- **实时相机取景**（网页两侧）——getUserMedia + 设备方向传感器实时驱动
+  pitch/roll，快门即出图，支持真·变焦（caps.zoom）与软转屏。
+- **立绘修图链**——纯色底抠图（泛洪）、自动裁边、柔边、镜头微糊、半身自动
+  判定，与原版 `autoPrepareChar` 五步逐字对等。
+- **HUD 取景装饰**——地面网格 / 地平线 / 人体骨架 / 构图体检 11 条，网页侧
+  实时浮层、CLI 侧 `arcam render --overlay` 可出图。
+
+依赖只有 numpy + pillow（抠图/LiDAR/视频为可选 extra）。
 
 不做：实时摄像头（Python 侧只接受已给定的 yaw/pitch/roll 参数）、MMD 3D 运行时
 （three.js 生态；相机矩阵交叉验证的接口契约见 `docs/SPEC.md` §6）。

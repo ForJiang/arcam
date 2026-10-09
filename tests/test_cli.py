@@ -366,3 +366,35 @@ def test_module_entrypoint(tmp_path: Path, photo: Path, char: Path) -> None:
         cwd=str(SRC.parent), env=env, capture_output=True, text=True, timeout=300)
     assert proc.returncode == 0, proc.stderr
     assert out.is_file()
+
+
+def test_render_overlay_modes(tmp_path: Path, photo: Path, char: Path) -> None:
+    """--overlay 四层各自生效且互不相同（HUD 排查构图的显式开关）。
+
+    踩过的坑（回归钉）：compose_shot 出 **uint8 0..255**，overlay 通路曾按
+    浮点口径又乘 255 再 clip —— 整图被洗白（均值差 128）。现在按 dtype 分流，
+    只在该画的像素上落笔。
+    """
+    from PIL import Image as _Image
+    import numpy as _np
+
+    plain = tmp_path / "plain.png"
+    assert main(["render", str(photo), str(char), "-o", str(plain), "--pitch", "12"]) == 0
+    base = _np.asarray(_Image.open(plain).convert("RGB")).astype(int)
+
+    outs = {}
+    for layer in ("grid", "horizon", "figure", "hud"):
+        p = tmp_path / f"ov-{layer}.png"
+        code = main(["render", str(photo), str(char), "-o", str(p),
+                     "--pitch", "12", "--overlay", layer])
+        assert code == 0, layer
+        arr = _np.asarray(_Image.open(p).convert("RGB")).astype(int)
+        outs[layer] = arr
+        diff = int((_np.abs(arr - base).sum(2) > 12).sum())
+        assert diff > 100, f"{layer} 层几乎没画东西（差异像素 {diff}）"
+
+    # 四层两两不同（防止某一层静默不画）
+    for a, b in (("grid", "hud"), ("grid", "figure"), ("grid", "horizon"),
+                 ("hud", "figure"), ("hud", "horizon"), ("figure", "horizon")):
+        d = int((_np.abs(outs[a] - outs[b]).sum(2) > 12).sum())
+        assert d > 0, f"{a} 与 {b} 输出相同"

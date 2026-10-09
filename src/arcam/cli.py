@@ -163,6 +163,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--depth", metavar="DEPTH", default=None,
                    help="LiDAR 深度帧：16-bit PNG/TIF（毫米）/ .npy（米）/ .depth（magic "
                         "ARCD）/ 人像 HEIC；E1-E4 全开，显式参数仍优先")
+    p.add_argument("--overlay", default=None, choices=("grid", "horizon", "figure", "hud"),
+                   metavar="层", help="出图后叠一层 HUD 取景装饰（默认不叠；原版那些"
+                                      "只在实时预览里画，出图不带——要排查构图时才开）")
     _add_placement(p)
     p.set_defaults(func=cmd_render)
 
@@ -399,8 +402,33 @@ def cmd_render(args) -> int:
         cam_eff, subj_eff = cam, subj
     shot = compose_shot(src01, char01, subj, cam, **kw)
     out = Path(args.out)
-    save_png(shot.shot, out)
-    print(f"已出图 {out}（{width}×{height}）")
+    # compose_shot 出 uint8 (0..255)；浮点口径也收（clip+四舍五入到字节），
+    # 与 video._to_pil 的量化时点一致，避免双重量化把图洗白。
+    base_arr = np.asarray(shot.shot)
+    if base_arr.dtype == np.uint8:
+        img_u8 = base_arr
+    else:
+        img_u8 = np.clip(base_arr.astype(np.float64) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    overlay_note = ""
+    if args.overlay:
+        # HUD 只叠指定的一层（原版出图不带 HUD，这是排查构图的显式开关）
+        from arcam.hud import draw_figure, draw_grid, draw_horizon, draw_hud_text
+        canvas = img_u8.copy()
+        if args.overlay == "grid":
+            canvas = draw_grid(canvas, cam_eff, subj_eff.lateral_m)
+        elif args.overlay == "horizon":
+            canvas = draw_horizon(canvas, cam_eff, "地平线")
+        elif args.overlay == "figure":
+            canvas = draw_figure(canvas, cam_eff, subj_eff)
+        else:
+            canvas, hints = draw_hud_text(canvas, cam_eff, subj_eff, has_char=True,
+                                          canvas_size=(width, height))
+            if hints:
+                overlay_note = "；构图提示：" + "；".join(hints)
+        img_u8 = canvas
+    save_png(img_u8, out)
+    print(f"已出图 {out}（{width}×{height}）"
+          + (f"｜已叠 HUD 层：{args.overlay}{overlay_note}" if args.overlay else ""))
     if args.scene:
         scene_path = Path(args.scene)
         if scene_path.parent and not scene_path.parent.exists():

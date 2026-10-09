@@ -71,7 +71,10 @@ body {
   font-size: 20px;
 }
 #app-sub {
-  margin: 0;
+  /* 与 forjiang-crypto 的 .sub 同规格：margin-bottom: 20px。grid 的 gap 不
+     作用于 header 与 main 之间，下边距为 0 时副标题行盒直接贴住卡片上沿，
+     字体度量差异会让卡片边框削到文字底部。 */
+  margin: 0 0 20px;
   font-size: 13px;
   color: var(--muted);
 }

@@ -66,13 +66,17 @@ body {
   padding: 0 16px;
 }
 
-/* ---------- 顶栏（WEB-STYLE：h1 20px / .sub 13px muted） ---------- */
+/* ---------- 顶栏（格式对齐 forjiang-crypto：h1 20px / .sub 13px muted + 20px 下边距） ---------- */
 #topbar h1 {
   margin: 0 0 4px;
   font-size: 20px;
 }
 #app-sub {
-  margin: 0;
+  /* ⚠ 与 forjiang-crypto 的 .sub 逐字同规格：margin-bottom: 20px。
+     grid 的 gap 不作用于 header 与 main 之间，副标题下边距为 0 时行盒直接
+     贴住卡片上沿——字体度量差异（更高的行盒/descender）会让卡片边框削到
+     文字底部（用户实报的「文字有遮挡」）。20px 与 crypto 页同频。 */
+  margin: 0 0 20px;
   font-size: 13px;
   color: var(--muted);
 }

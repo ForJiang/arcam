@@ -658,6 +658,7 @@ function init() {
   bindEditLine();
   bindLive();
   bindFx();
+  bindDrag();
   bind3D();
   $('hud-canvas').hidden = false;
   drawHudOverlay();
@@ -1102,27 +1103,77 @@ function bindFx() {
   $('btn-autofix').addEventListener('click', doAutoFix);
 }
 
-//: 自动摆正：arcam-core 的 autoFixX（与 Python placement.py:240 同算法）
+//: 自动摆正：hud.js 的 autoFixX（与 Python placement.py:240 同算法）。
+//  ⚠ 不走 window.arcamCore——arcam-core 是 module、由 app.js 动态 import，
+//     从不挂 window；hud.js 在 IIFE 里已把同算法的一份挂到 window.arcamHud。
 function doAutoFix() {
-  const core = window.arcamCore;
-  if (!core) return;
+  const H = window.arcamHud;
+  if (!H || !H.autoFixX) return;
   const cv = $('preview-canvas');
-  const W = cv.width, H = cv.height;
-  if (W < 8 || H < 8) return;
+  const W = cv.width, H2 = cv.height;
+  if (W < 8 || H2 < 8) return;
   const p = state.params;
-  const cam = { W: W, H: H, h: p.h, feq: p.feq, pitch: p.pitch, roll: p.roll };
+  const cam = { W: W, H: H2, h: p.h, feq: p.feq, pitch: p.pitch, roll: p.roll };
   const subj = { hp: p.hp, d: p.d, x: p.x };
   const aspect = state.charCanvas ? state.charCanvas.width / state.charCanvas.height : 0.6;
-  const r = core.autoFixX(aspect, aspect, subj, cam, {
-    mode: p.mode, sizePct: p.size_pct, charScale: p.char_scale,
-    shot: p.shot, edgeBar: p.edge_bar
-  });
+  const r = H.autoFixX(cam, subj, p.mode, p.size_pct,
+                       { shot: p.shot, charScale: p.char_scale, charAspect: aspect });
   if (!r) { setStatus('摆不正：人物在相机后方或参数退化', null, true); return; }
-  p.x = Math.round(r[0] * 100) / 100;
+  if (r.freeU !== undefined) {
+    setStatus('已吸附到 ' + Math.round(r.snapped * 100) + '% 三分线（自由模式请用拖动微调）');
+    return;
+  }
+  p.x = Math.round(r.x * 100) / 100;
   $('p-x-num').value = p.x;
   $('p-x-rng').value = p.x;
-  setStatus('已吸附到三分线（x=' + p.x + 'm，' + r[1] + '）');
+  setStatus('已吸附到 ' + Math.round(r.snapped * 100) + '% 三分线（x=' + p.x + 'm）');
   renderNow();
+}
+
+
+//: 拖拽摆位（原版核心交互；ground 拖画面把人摆到那块地面）
+function bindDrag() {
+  const cv = $('preview-canvas');
+  if (!cv) return;
+  let dragging = false;
+  const toCanvasPixel = (ev) => {
+    const r = cv.getBoundingClientRect();
+    return {
+      u: (ev.clientX - r.left) * (cv.width / r.width),
+      v: (ev.clientY - r.top) * (cv.height / r.height)
+    };
+  };
+  cv.addEventListener('pointerdown', (ev) => {
+    if (!state.photoCanvasFull || !state.charCanvas) return;
+    dragging = true;
+    try { cv.setPointerCapture(ev.pointerId); } catch (e) {}
+    ev.preventDefault();
+  });
+  cv.addEventListener('pointermove', (ev) => {
+    if (!dragging) return;
+    const px = toCanvasPixel(ev);
+    const p = state.params;
+    if (p.mode === 'free') {
+      setStatus('自由模式拖动：' + Math.round(px.u / cv.width * 100) + '% , '
+                + Math.round(px.v / cv.height * 100) + '%（精细位置请用左侧参数）');
+      return;
+    }
+    const H = window.arcamHud;
+    if (!H || !H.placeAt) return;
+    const cam = { W: cv.width, H: cv.height, h: p.h, feq: p.feq, pitch: p.pitch, roll: p.roll };
+    const hit = H.placeAt(px.u, px.v, cam);
+    if (!hit) return;
+    p.x = Math.round(hit.x * 100) / 100;
+    p.d = Math.round(hit.d * 100) / 100;
+    $('p-x-num').value = p.x;
+    $('p-x-rng').value = p.x;
+    $('p-d-num').value = p.d;
+    $('p-d-rng').value = p.d;
+    scheduleRender();
+  });
+  const end = () => { dragging = false; };
+  cv.addEventListener('pointerup', end);
+  cv.addEventListener('pointercancel', end);
 }
 
 /* ================= 12. 实时相机 + HUD（FEATURE-SPEC §4/§2） ================= */

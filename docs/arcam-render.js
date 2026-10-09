@@ -410,7 +410,7 @@ function drawInto(full, charImg, subj, cam, p, rect) {
     // shadow 门（原版 LIGHT_SHD；v1.3.0 与 Python/本地 web 同语义）。
     // ⚠ JS 侧没有 bakeLit（v1 起环境光烘焙就是 no-op，light 恒 null），
     //   所以 light/grain 两开关在网页版只影响**状态显示**、不改像素——
-    #   这一点在 UI 提示里写明，不假装生效。
+    //   这一点在 UI 提示里写明，不假装生效。
     const wantShadow = p.mode === 'ground' && p.shadow !== false;
     drawSprite(full, charImg, c, {
       shadow: wantShadow,                  // 阴影是「场景」的一部分：自由模式不铺

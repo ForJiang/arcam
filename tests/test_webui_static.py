@@ -658,3 +658,38 @@ def test_mmd_3d_wired():
     assert "charDraw" in render and "p.charDraw" in render, \
         "arcam-render.js 的 composeShot 没有 charDraw 钩子"
     assert "charDraw" in js and "draw3DInto" in js, "app.js 没接 charDraw"
+
+
+def test_no_python_style_comments_in_js():
+    """JS 文件里不许有 Python 风格 ``#`` 注释（SITE-SPEC §0 的零构建红线）。
+
+    踩过的坑：给 arcam-render.js 加 shadow 门时一行注释写成了 ``#`` —— 整个
+    module 语法错误、动态 import 失败、Pages 版**全部功能不可用**（状态条报
+    「运算模块未就绪」）。这种笔误单测看不见，只有真加载才炸，所以在静态门禁
+    里按行扫：行首（缩进后）是 ``#`` 的一律红。URL 片段（``http://x#y``）在
+    字符串里、不在行首，不受影响。
+    """
+    import shutil
+    import subprocess
+    folders = [WEBUI, DOCS]
+    for folder in folders:
+        for js in sorted(folder.glob("*.js")):
+            text = js.read_text(encoding="utf-8")
+            for i, line in enumerate(text.splitlines(), 1):
+                stripped = line.lstrip()
+                if stripped.startswith("#"):
+                    raise AssertionError(
+                        f"{js.relative_to(ROOT)}:{i} 是 Python 风格注释：{line.strip()[:60]}")
+            # 有 node 就再做一次真语法检查（module 语义：复制成 .mjs）
+            node = shutil.which("node")
+            if node:
+                import tempfile
+                with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as f:
+                    f.write(text)
+                    tmp = f.name
+                try:
+                    r = subprocess.run([node, "--check", tmp], capture_output=True, text=True)
+                    assert r.returncode == 0, \
+                        f"{js.relative_to(ROOT)} 语法错误：{r.stderr.strip()[:200]}"
+                finally:
+                    Path(tmp).unlink(missing_ok=True)

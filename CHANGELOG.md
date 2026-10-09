@@ -37,6 +37,13 @@
 
 - 网页版（Pages）的 light/grain 两开关**只影响状态显示**：JS 侧自 v1 起环境光
   烘焙就是 no-op（没有 bakeLit），UI 提示里写明，不假装生效；shadow 真生效。
+- 抓修两个静默失效（v1.3.0 收尾）：① docs/hud.js 直接用了 arcam-core 的
+  ``project`` 而它返回 **[u,v] 数组**（本文件内部按 {u,v} 对象用）——Pages 版
+  整个 HUD 一直在静默不画；包一层转换修复，浏览器实测网格 14.3 万像素。
+  ② arcam-render.js 混入一行 Python 风格 ``#`` 注释 → module 语法错误 →
+  动态 import 失败 → **Pages 全部功能不可用**；修为 ``//`` 并加
+  ``test_no_python_style_comments_in_js`` 门禁（行首 ``#`` 一律红 + 有 node
+  就真语法检查）。
 - 全套 490 passed / 1 skipped；golden 差分 462 向量 0 失败。
 
 ## [1.2.0] — 2026-10-11

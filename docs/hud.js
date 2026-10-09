@@ -3,12 +3,82 @@
 // index.html:1043-1057），供 webui 预览浮层实时绘制；出图不带 HUD。
 // ES module：从 arcam-core.js 静态 import（docs 侧 core 是 module、不挂 window）。
 // 加载完把绘制原语挂到 window.arcamHud 供 app.js（module，晚于本文件执行）使用。
-import { focalPx, project, frameRect } from "./arcam-core.js";
+import { focalPx, project as projectRaw, frameRect } from "./arcam-core.js";
 
 window.arcamHud = (function () {
   "use strict";
+  // ⚠ arcam-core 的 project 返回 [u, v] **数组**（SITE-SPEC 的纯函数口径），
+  //    而本文件内部一律按 {u, v} 对象用（与原版 canvas 代码同形）——包一层转换，
+  //    漏了这层会整个 HUD 静默不画（坐标全是 undefined）。
+  function project(x, y, d, cam) {
+    const q = projectRaw(x, y, d, cam);
+    return q === null ? null : { u: q[0], v: q[1] };
+  }
   // docs 侧复用 arcam-core.js 的 focalPx/project/frameRect（同一份公式），
   // 不复制第二份几何实现——golden 差分只认 arcam-core 那一份。
+
+  // ── place() 反投影（geometry.py:85 的 JS 对译）────────────────────
+  // 画布像素 (u,v) → 世界 (x, d)：人立在地面上（Y_world=0）的解析逆。
+  // 与 Python place() 逐字同式：d 夹 [0.5,20]、x 夹 [-6,6]（SPEC §5 冻结项）。
+  function placeAt(u, v, cam) {
+    var F = focalPx(cam.W, cam.H, cam.feq);
+    if (!F) return null;
+    var p = cam.pitch * Math.PI / 180, r = cam.roll * Math.PI / 180;
+    var up = u - cam.W / 2, vp = v - cam.H / 2;
+    var a = (up / F) * Math.cos(r) + (vp / F) * Math.sin(r);
+    var b = -(up / F) * Math.sin(r) + (vp / F) * Math.cos(r);
+    var den = Math.sin(p) + b * Math.cos(p);
+    if (Math.abs(den) < 1e-6) return null;
+    var d = cam.h * (Math.cos(p) - b * Math.sin(p)) / den;
+    if (d <= 0.05) return null;
+    d = Math.max(0.5, Math.min(20, d));
+    var x = a * (cam.h * Math.sin(p) + d * Math.cos(p));
+    x = Math.max(-6, Math.min(6, x));
+    return { x: x, d: d };
+  }
+
+  // ── autoFixX（placement.py:240 的 JS 对译；与 webui 版逐字相同）────
+  function autoFixX(cam, subj, mode, sizePct, opts) {
+    opts = opts || {};
+    var targets = [1 / 3, 0.5, 2 / 3];
+    var c0 = currentPlacementOf(cam, subj, mode, sizePct, opts);
+    if (!c0) return null;
+    var xr = c0.u / cam.W;
+    var best = targets[0];
+    for (var i = 1; i < targets.length; i++) {
+      if (Math.abs(xr - targets[i]) < Math.abs(xr - best)) best = targets[i];
+    }
+    var targetU = best * cam.W;
+    if (mode === "free") {
+      return { freeU: Math.max(0, Math.min(1, targetU / cam.W)), snapped: best };
+    }
+    var plus = project(subj.x + 0.05, -cam.h, subj.d, cam);
+    var minus = project(subj.x - 0.05, -cam.h, subj.d, cam);
+    if (!plus || !minus) return { x: subj.x, snapped: best };
+    var grad = (plus.u - minus.u) / 0.1;
+    if (!isFinite(grad) || Math.abs(grad) < 1e-6) return { x: subj.x, snapped: best };
+    var nx = subj.x - (c0.u - targetU) / grad;
+    return { x: Math.max(-20, Math.min(20, nx)), snapped: best };
+  }
+
+  function currentPlacementOf(cam, subj, mode, sizePct, opts) {
+    if (mode === "free") {
+      var h = sizePct / 100 * cam.H;
+      return { u: (opts.freeP || [0.5, 0.6])[0] * cam.W, v: (opts.freeP || [0.5, 0.6])[1] * cam.H,
+               w: h * (opts.charAspect || 0.6), h: h };
+    }
+    var SHOTS = { "全身": 1.00, "膝上": 0.72, "腰上": 0.47, "胸上": 0.28, "头肩": 0.20 };
+    var k = SHOTS[opts.shot || "全身"];
+    var yb = (1.0 - k) * subj.hp;
+    var pb = project(subj.x, yb - cam.h, subj.d, cam);
+    var pt = project(subj.x, subj.hp - cam.h, subj.d, cam);
+    if (!pb || !pt) return null;
+    var span = Math.hypot(pb.u - pt.u, pb.v - pt.v);
+    if (span < 2) return null;
+    var hh = span * (opts.charScale || 1);
+    var ux = (pt.u - pb.u) / span, uy = (pt.v - pb.v) / span;
+    return { u: pb.u + ux * hh / 2, v: pb.v + uy * hh / 2, w: hh * (opts.charAspect || 0.6), h: hh };
+  }
 
   // ── drawFrame（index.html:1746-1772）─────────────────────────────
   function drawFrame(ctx, R, V, W, H) {
@@ -225,6 +295,8 @@ window.arcamHud = (function () {
   return {
     focalPx: focalPx,
     project: project,
+    placeAt: placeAt,
+    autoFixX: autoFixX,
     frameRect: frameRect,
     drawFrame: drawFrame,
     drawGrid: drawGrid,

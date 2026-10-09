@@ -302,3 +302,15 @@ button:hover { background: var(--btn-bg-hover); }
 }
 .lang-btn:hover { background: var(--btn-bg-hover, #f3f4f6); }
 #topbar { position: relative; }
+
+/* ---------- 效果开关（光影三件 + HUD 三件 + 自动摆正） ---------- */
+.check-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin: 10px 0;
+}
+.check-grid .chk {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 13px; color: var(--text); cursor: pointer;
+}
+.check-grid .chk input { accent-color: var(--accent); width: 15px; height: 15px; }
+#preview-canvas { cursor: grab; touch-action: none; }
+#preview-canvas:active { cursor: grabbing; }

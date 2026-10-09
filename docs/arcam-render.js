@@ -371,6 +371,7 @@ function normalizeParams(params) {
     // ⚠ 必须在这儿放行 —— 少了这一条，调用方传进来的 charDraw 会被 normalizeParams
     //   丢掉，composeShot/composeCharLayer 里的分支永远不生效（静默失效）。
     charDraw: typeof p.charDraw === 'function' ? p.charDraw : null,
+    shadow: p.shadow === undefined ? true : !!p.shadow,
   };
 }
 
@@ -406,10 +407,15 @@ function cropOffset(full, rect) {
 function drawInto(full, charImg, subj, cam, p, rect) {
   const c = placementFor(charImg, subj, cam, p, rect);
   if (c !== null && c !== undefined) {
+    // shadow 门（原版 LIGHT_SHD；v1.3.0 与 Python/本地 web 同语义）。
+    // ⚠ JS 侧没有 bakeLit（v1 起环境光烘焙就是 no-op，light 恒 null），
+    //   所以 light/grain 两开关在网页版只影响**状态显示**、不改像素——
+    #   这一点在 UI 提示里写明，不假装生效。
+    const wantShadow = p.mode === 'ground' && p.shadow !== false;
     drawSprite(full, charImg, c, {
-      shadow: p.mode === 'ground',         // 阴影是「场景」的一部分：自由模式不铺
+      shadow: wantShadow,                  // 阴影是「场景」的一部分：自由模式不铺
       ambient: p.ambient,
-      shadowLayer: p.mode === 'ground' ? contactShadowAlpha(charImg, c, p.ambient) : null,
+      shadowLayer: wantShadow ? contactShadowAlpha(charImg, c, p.ambient) : null,
     });
   }
   return c;

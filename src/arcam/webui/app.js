@@ -14,7 +14,11 @@
 var S_DEFAULTS = {
   x: 0, d: 4, h: 1.6, hp: 1.65, feq: 23, pitch: 0, roll: 0,
   shot: '全身', char_scale: 1.0, frame: '满幅', rot_basis: 'world',
-  mode: 'ground', size_pct: 60, edge_bar: 0, tone: false
+  mode: 'ground', size_pct: 60, edge_bar: 0, tone: false,
+  // 光影三开关（v1.3.0）：本地版三项都真生效（webapp → compose 的门）；
+  // 网页版（docs）只有 shadow 真生效——JS 侧没有 bakeLit（v1 起环境光烘焙
+  // 就是 no-op），light/grain 在那边只影响状态显示，UI 提示里写明。
+  light: true, grain: true, shadow: true
 };
 
 // 数字+滑块双控件的七个量；量程是自定的（原版 index.html 不在本仓库），
@@ -630,6 +634,108 @@ function frameRectJs(key, W, H) {
   if (W / H > a) { rw = H * a; rh = H; } else { rw = W; rh = W / a; }
   var x = (W - rw) / 2, y = (H - rh) / 2;
   return { x: x, y: y, w: rw, h: rh };
+}
+
+
+/* ================= 9. 效果开关 + 拖拽摆位 + 自动摆正 ================= */
+
+//: 光影三开关 → params（直接改变出图）；HUD 三开关 → HUD_ON（只画预览）
+function bindFx() {
+  // 显式逐个绑（不用 map 循环）：DOM id 与参数键的对应一眼可见，
+  // 静态门禁的「死 id」扫描也认得出这些引用。
+  $('fx-light').addEventListener('change', function (e) {
+    state.params.light = e.target.checked; markTouched('light'); scheduleRender();
+  });
+  $('fx-grain').addEventListener('change', function (e) {
+    state.params.grain = e.target.checked; markTouched('grain'); scheduleRender();
+  });
+  $('fx-shadow').addEventListener('change', function (e) {
+    state.params.shadow = e.target.checked; markTouched('shadow'); scheduleRender();
+  });
+  $('fx-hud-grid').addEventListener('change', function (e) {
+    HUD_ON.grid = e.target.checked; drawHudOverlay();
+  });
+  $('fx-hud-horizon').addEventListener('change', function (e) {
+    HUD_ON.horizon = e.target.checked; drawHudOverlay();
+  });
+  $('fx-hud-body').addEventListener('change', function (e) {
+    HUD_ON.body = e.target.checked; drawHudOverlay();
+  });
+  $('btn-autofix').addEventListener('click', doAutoFix);
+}
+
+//: 自动摆正（原版「自动摆正」钮；ground 用数值导数解、free 直接改 freeP）
+function doAutoFix() {
+  if (!window.arcamHud) return;
+  var cv = $('preview-canvas');
+  var p = state.params;
+  var cam = { W: cv.width, H: cv.height, h: p.h, feq: p.feq, pitch: p.pitch, roll: p.roll };
+  var subj = { hp: p.hp, d: p.d, x: p.x };
+  var aspect = state.charW && state.charH ? state.charW / state.charH : 0.6;
+  var r = window.arcamHud.autoFixX(cam, subj, p.mode, p.size_pct,
+                                   { shot: p.shot, charScale: p.char_scale, charAspect: aspect });
+  if (!r) { setStatus('摆不正：人物在相机后方或参数退化'); return; }
+  if (r.freeU !== undefined) {
+    // free 模式：freeP.u 由后端参数 x 承载不了——webui 的 freeP 在后端默认 (0.5,0.6)，
+    // 这里把吸附结果换算成等效提示（后端不接收 freeP，保持简单：只报吸附到了哪）
+    setStatus('已吸附到 ' + Math.round(r.snapped * 100) + '% 三分线（自由模式请用拖动微调）');
+    return;
+  }
+  state.params.x = Math.round(r.x * 100) / 100;
+  $('p-x-num').value = state.params.x;
+  $('p-x-rng').value = state.params.x;
+  markTouched('x');
+  setStatus('已吸附到 ' + Math.round(r.snapped * 100) + '% 三分线（x=' + state.params.x + 'm）');
+  scheduleRender();
+}
+
+//: 拖拽摆位（原版核心交互：ground 拖画面把人摆到那块地面；free 直接拖立绘）
+function bindDrag() {
+  var cv = $('preview-canvas');
+  if (!cv) return;
+  var dragging = false;
+
+  function toCanvasPixel(ev) {
+    var r = cv.getBoundingClientRect();
+    return {
+      u: (ev.clientX - r.left) * (cv.width / r.width),
+      v: (ev.clientY - r.top) * (cv.height / r.height)
+    };
+  }
+
+  cv.addEventListener('pointerdown', function (ev) {
+    if (!state.photo || !state.char) return;
+    dragging = true;
+    try { cv.setPointerCapture(ev.pointerId); } catch (e) {}
+    ev.preventDefault();
+  });
+  cv.addEventListener('pointermove', function (ev) {
+    if (!dragging) return;
+    var px = toCanvasPixel(ev);
+    var p = state.params;
+    if (p.mode === 'free') {
+      // free：拖动 = 立绘图心跟手（归一化 freeP；后端不收 freeP，
+      // 用 size_pct 高度 + 画面占比反推不出自由位置——故 free 拖动只改提示）
+      setStatus('自由模式拖动：' + Math.round(px.u / cv.width * 100) + '% , '
+                + Math.round(px.v / cv.height * 100) + '%（精细位置请用左侧参数）');
+      return;
+    }
+    if (!window.arcamHud) return;
+    var cam = { W: cv.width, H: cv.height, h: p.h, feq: p.feq, pitch: p.pitch, roll: p.roll };
+    var hit = window.arcamHud.placeAt(px.u, px.v, cam);
+    if (!hit) return;
+    state.params.x = Math.round(hit.x * 100) / 100;
+    state.params.d = Math.round(hit.d * 100) / 100;
+    $('p-x-num').value = state.params.x;
+    $('p-x-rng').value = state.params.x;
+    $('p-d-num').value = state.params.d;
+    $('p-d-rng').value = state.params.d;
+    markTouched('x'); markTouched('d');
+    scheduleRender();
+  });
+  var end = function () { dragging = false; };
+  cv.addEventListener('pointerup', end);
+  cv.addEventListener('pointercancel', end);
 }
 
 /* ================= 8. 初始化 ================= */

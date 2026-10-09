@@ -71,7 +71,9 @@ HTML_DEFAULTS = [
 # params schema 十五键（WEB-SPEC §2 / cli.py 逐字同名）；depth_uploaded 由诊断状态自动带
 PARAM_KEYS = ["x", "d", "h", "hp", "feq", "pitch", "roll", "shot",
               "char_scale", "frame", "rot_basis", "mode", "size_pct",
-              "edge_bar", "tone"]
+              "edge_bar", "tone",
+              # 光影三开关（原版 LIGHT_ON/GRN/SHD；v1.3.0 接入，web 与 CLI 同语义）
+              "light", "grain", "shadow"]
 
 # bindNumeric 动态拼 id 的七个量（'p-' + key + '-num'/'-rng'）
 NUMERIC_KEYS = ["x", "d", "h", "hp", "feq", "pitch", "roll"]
@@ -626,7 +628,7 @@ def test_i18n_tables_match_between_python_and_js():
         f"仅 Python {sorted(set(PY_TXT) - set(js_txt))[:5]}"
     for key, (zh, en) in PY_TXT.items():
         assert list(js_txt[key]) == [zh, en], f"{key} 两侧文案不同"
-    assert len(PY_TXT) == 177, f"表条数变了：{len(PY_TXT)}（原版 160 + webui 17；3D 五键原版就有）"
+    assert len(PY_TXT) == 182, f"表条数变了：{len(PY_TXT)}（原版 160 + webui 17 + CLI 1；3D 五键原版就有）"
 
 
 def test_mmd_3d_wired():

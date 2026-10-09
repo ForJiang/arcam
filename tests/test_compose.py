@@ -297,7 +297,7 @@ def test_bake_lit_receives_target_box() -> None:
     seen: list[tuple] = []
     real = bake_lit
 
-    def spy(char, sample, canvas):
+    def spy(char, sample, canvas, **kw):   # grain 门（默认 True）不影响本断言
         seen.append(canvas)
         return real(char, sample, canvas)
 

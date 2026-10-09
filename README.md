@@ -62,6 +62,8 @@ uv venv
 ```bash
 # 1) 出图：立绘贴地放进照片，顺带写 scene.json 配方
 arcam render photo.jpg char.png -o shot.png --scene scene.json
+#   光影开关：--no-light / --no-grain / --no-shadow（原版那三个钮）
+#   HUD 排查构图：--overlay grid|horizon|figure|hud
 
 # 2) 只要透明立绘层（和照片逐像素对应，事后自己叠）
 arcam char-layer char.png -o layer.png --mode free --size-pct 70
@@ -76,7 +78,13 @@ arcam video track.json char.png -o frames/ --bg bg/ --tone
 arcam matte photo.jpg -o cut.png --model isnet-anime-q8.onnx
 arcam check track.json
 
-# 6) LiDAR 环境数据：先诊断深度帧，再深度驱动出图（显式参数仍优先）
+# 6) 批量：一个文件夹的照片 × 同一立绘同一组参数（深度帧按同名匹配）
+arcam batch photos/ char.png -o out/ --pitch 10
+# 7) 配方库：存/列/看/取一组摆放参数（apply 打印可直接粘的旗标）
+arcam recipe save 半身站姿 --mode free --size-pct 65 && arcam recipe apply 半身站姿
+# 8) 对比网格：扫一组参数出一张总览，肉眼挑最满意的一档
+arcam contact-sheet photo.jpg char.png -o sheet.png --vary d=3,4,5 --vary pitch=0,15
+# 9) LiDAR 环境数据：先诊断深度帧，再深度驱动出图（显式参数仍优先）
 arcam lidar inspect scan_0001.png [--json]
 arcam render photo.jpg char.png -o shot.png --depth scan_0001.png
 ```

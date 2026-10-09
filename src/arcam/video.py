@@ -70,6 +70,9 @@ FRAME_FMT = "frame_%06d.png"
 MP4_NAME = "video.mp4"
 """imageio 可用时追加写入的成片文件名。"""
 
+GIF_NAME = "video.gif"
+"""``render_track(gif=True)`` 追加写入的动画 GIF 文件名（纯 PIL）。"""
+
 FRAME_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 """背景帧目录认得的图片后缀。"""
 
@@ -580,6 +583,25 @@ def _resolve_bg(bg_source, track: PoseTrack) -> tuple[list[Path] | None, np.ndar
     return None, _fit_rgb01(_read_image(p), track)
 
 
+def _write_gif(frame_paths: list[Path], path: Path, fps: float) -> None:
+    """PNG 帧序列 → 动画 GIF（纯 PIL；逐帧自适应调色板）。
+
+    GIF 的 256 色限制对合成图是硬约束：全局调色板在光线变化大的轨道上会出色带，
+    所以每帧独立 ``quantize``（Fast OCTree）。``duration`` 取 1000/fps 毫秒
+    （GIF 以 1/100s 为单位，PIL 会自行取整）；``loop=0`` 无限循环。
+    """
+    from PIL import Image
+    duration_ms = max(20, int(round(1000.0 / max(fps, 0.001))))
+    frames: list[Image.Image] = []
+    for p in frame_paths:
+        with Image.open(p) as im:
+            frames.append(im.convert("RGB").quantize(colors=256, method=Image.FASTOCTREE))
+    if not frames:
+        return
+    frames[0].save(path, format="GIF", save_all=True, append_images=frames[1:],
+                   duration=duration_ms, loop=0, optimize=False)
+
+
 def _open_mp4(path: Path, fps: float):
     """懒加载 imageio 开一个 mp4 writer；不可用/失败一律返回 None（只出 PNG）。
 
@@ -603,7 +625,7 @@ def _open_mp4(path: Path, fps: float):
 
 def render_track(bg_source: str | Path | np.ndarray, track: PoseTrack,
                  char_rgba01: np.ndarray, out_dir: str | Path,
-                 *, tone: bool = False) -> list[Path]:
+                 *, tone: bool = False, gif: bool = False) -> list[Path]:
     """按轨道逐帧渲染：每帧解算摆位 → 走 compose_shot → 写 PNG 序列。
 
     :param bg_source: 背景。单张图片路径、帧目录（按文件名排序）、已就绪的
@@ -614,6 +636,9 @@ def render_track(bg_source: str | Path | np.ndarray, track: PoseTrack,
     :param out_dir:   输出目录；帧命名 ``frame_%06d.png``，从 1 开始。
     :param tone:      色调匹配开关，透传给 compose_shot（原版 TONE_ON=!!src，
         只有照片路径生效，index.html:3690）。
+    :param gif:      追加写动画 GIF（``video.gif``，纯 PIL、零依赖）。GIF 只有
+        256 色，逐帧自适应调色板（每帧独立 quantize）——比全局调色板耐得住
+        光线变化大的轨道；要更小/更通用的文件用 mp4（需 imageio-ffmpeg）。
     :return: 写出的 PNG 帧路径列表（按帧序）。
 
     与原版的差异（如实记录，README 同步）：
@@ -669,6 +694,8 @@ def render_track(bg_source: str | Path | np.ndarray, track: PoseTrack,
                 writer.close()
             except Exception:
                 writer = None
+    if gif and written:
+        _write_gif(written, out / GIF_NAME, track.fps)
     if not (out / MP4_NAME).exists():
         print("提示：未安装 imageio / imageio-ffmpeg，仅输出 PNG 序列；"
               "pip install imageio imageio-ffmpeg 可追加 mp4", flush=True)

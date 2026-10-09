@@ -178,6 +178,11 @@ window.ARCAM_TXT = {
   "btn.bundle": ["下载素材包 zip", "Download bundle zip"],
   "btn.copyScene": ["复制 scene.json", "Copy scene.json"],
   "kind.close": ["不选，保持现状", "Skip, keep as is"],
+  "note.batchDone": ["批处理完成：{0}/{1} 张全部成功", "Batch done: {0}/{1} succeeded"],
+  "fold.fx": ["效果开关", "Effects"],
+  "btn.horizon": ["地平线", "Horizon"],
+  "hint.fx": ["HUD 三件只画在预览上，不出图；光影三件直接改变出图", "The three HUD toggles only affect the preview, never the export; the three lighting toggles change the export"],
+  "hint.fxWeb": ["网页版只叠阴影开关；光线/颗粒烘焙为本地版专属（JS 侧无 bakeLit）", "Web build only has the shadow toggle; light and grain baking are local-only (no bakeLit in JS)"],
 };
 
 window.ARCAM_LANGS = ["zh", "en"];

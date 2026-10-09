@@ -365,13 +365,15 @@ def _to_u8_rgba(char_rgba: np.ndarray) -> np.ndarray:
 
 
 def bake_lit(char_rgba: np.ndarray, sample: LightSample | None,
-             canvas: tuple[int, int]) -> np.ndarray:
+             canvas: tuple[int, int], *, grain: bool = True) -> np.ndarray:
     """把立绘按采样到的环境亮度/色温烘一版（gamma 曲线 + 白平衡 + 饱和 + 颗粒）。
 
     对应 ``bakeLit``（index.html:1285-1447）+ ``charLum``（1263-1283）+
     ``grainTile``（1168-1180）+ ``litScaleBucket``（1455-1458）。
     ``sample`` 为 None 时按原版「总开关关 / 采样无效」分支**原样返回立绘**
-    （index.html:1305-1306）。``canvas`` = 立绘落在画布上的目标矩形尺寸
+    （index.html:1305-1306）。``grain=False`` 只门控颗粒那一段（原版
+    ``LIGHT_GRN`` 开关，index.html:1142）——曲线/白平衡/饱和的数值一个字节
+    都不动，关掉颗粒不等于关掉光。``canvas`` = 立绘落在画布上的目标矩形尺寸
     (目标宽, 目标高)，仅用于颗粒缩放补偿 —— 原版的 ``litScale`` 由 drawCharTo
     在绘制前填 ``c.w/chCanvas.width``（index.html:3153），离线没有绘制句柄，
     由调用方把这个比例的目标宽传进来；传整块画布尺寸时补偿退化为 1（不补偿），
@@ -408,7 +410,7 @@ def bake_lit(char_rgba: np.ndarray, sample: LightSample | None,
         r = y + (r - y) * s_k
         g = y + (g - y) * s_k
         b = y + (b - y) * s_k
-    if g_amp > 0.0:
+    if g_amp > 0.0 and grain:
         tile = grain_tile()
         yy, xx = np.meshgrid(np.arange(h_px), np.arange(w_px), indexing="ij")
         n = tile[(yy & 255), (xx & 255)]

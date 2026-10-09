@@ -2,6 +2,43 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.0] — 2026-10-11
+
+功能扩充版：三个新 CLI 子命令、光影开关组、网页拖拽摆位、GIF 导出。
+
+### 新增（CLI）
+
+- `arcam batch PHOTO_DIR CHAR -o OUTDIR`：批量出图——一个文件夹的照片 ×
+  同一立绘同一组参数。深度帧按 stem 逐张匹配（匹配不到走无深度路径，不因
+  一张缺深度整批失败）；单张失败记一条继续跑，汇总退出码。
+- `arcam recipe save|list|show|apply NAME`：摆放配方库（存 `~/.arcam/recipes/`，
+  `$ARCAM_RECIPES` 可改根目录）。`save --from scene.json` 从既有配方提摆放段；
+  `apply` 打印可直接粘的 CLI 旗标，`--set K=V` 临时覆盖单项。
+- `arcam contact-sheet PHOTO CHAR -o sheet.png --vary K=V,V`：参数对比网格——
+  笛卡尔积逐格渲染拼成带标注总览（上限 24 格防手滑），每格标注该格非默认取值。
+- `arcam video --gif`：轨道渲染追加动画 GIF（纯 PIL 零依赖；256 色逐帧自适应
+  调色板，比全局调色板耐得住光线变化大的轨道）。
+- 摆放参数组新增 `--no-light / --no-grain / --no-shadow`（原版 LIGHT_ON/GRN/SHD
+  三开关的 CLI 侧）。
+
+### 新增（核心与网页）
+
+- compose 层开三个门（`shadow` / `grain` / `sample_light`，默认全 True = 原行为）：
+  门只控整段开关，曲线/白平衡/饱和的数值一个字节不动。webapp params schema 同步
+  收 `light/grain/shadow` 三键。
+- 网页两侧新增「效果开关」折叠区：光影三件 + HUD 三件（网格/地平线/人体）+
+  「自动摆正」按钮。
+- 网页新增**拖拽摆位**（原版核心交互）：预览画布上拖动即改站位——ground 模式
+  经 `placeAt` 反投影解世界 (x, d)，round-trip 实测闭合（du=0, dv=0）。
+- hud.js 新增 `placeAt`（place() 的 JS 对译，含 d∈[0.5,20]/x∈[-6,6] 夹取）与
+  `autoFixX`（三分线吸附，ground 走数值导数一步解，与 Python 同算法）。
+
+### 备注
+
+- 网页版（Pages）的 light/grain 两开关**只影响状态显示**：JS 侧自 v1 起环境光
+  烘焙就是 no-op（没有 bakeLit），UI 提示里写明，不假装生效；shadow 真生效。
+- 全套 490 passed / 1 skipped；golden 差分 462 向量 0 失败。
+
 ## [1.2.0] — 2026-10-11
 
 功能对等版：把原版网站的交互能力补进项目（契约 `docs/FEATURE-SPEC.md`）。
@@ -191,6 +228,7 @@ cli/video/matting · depth/plane/lidar/webapp · webui/Pages JS），修复 16 �
   `point(u,v,1)·depth`），与径向（cosθ）解释的仲裁结论一致，有回归测试钉住。
 - scene.json 与原版 1:1 同构（字段序/单位/toFixed 口径），未因本次审计变动。
 
+[1.3.0]: https://github.com/ForJiang/arcam/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/ForJiang/arcam/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/ForJiang/arcam/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/ForJiang/arcam/compare/v1.1.0...v1.1.1

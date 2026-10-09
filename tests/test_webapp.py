@@ -895,3 +895,34 @@ class TestConcurrency:
                 status, _headers, raw = future.result(timeout=180)
                 assert status == 200, raw[:200]
                 assert json.loads(raw)["ok"] is True
+
+
+class TestLightingSwitches:
+    """光影三开关（v1.3.0）：light/grain/shadow 进 params 并真改变出图。"""
+
+    def test_defaults_present(self):
+        from arcam.webapp import PARAM_DEFAULTS
+        for k in ("light", "grain", "shadow"):
+            assert PARAM_DEFAULTS[k] is True, k
+
+    def test_shadow_off_changes_pixels(self, server, uploaded):
+        """关阴影 → 出图像素变（贴地模式默认铺阴影）。"""
+        port = _port(server)
+        base = dict(FULL_PARAMS)
+        on = post_json(Client(port), "/api/render", {"params": base, "scale": 0.5})
+        off_kw = dict(base, shadow=False)
+        off = post_json(Client(port), "/api/render", {"params": off_kw, "scale": 0.5})
+        assert on[0] == 200 and off[0] == 200
+        import base64 as _b64
+        a = _b64.b64decode(on[2] and json.loads(on[2])["image"].split(",", 1)[1])
+        b = _b64.b64decode(json.loads(off[2])["image"].split(",", 1)[1])
+        assert a != b, "关阴影后出图应不同"
+
+    def test_light_off_changes_pixels(self, server, uploaded):
+        """关采光 → bakeLit 原样返回立绘，出图与默认不同。"""
+        port = _port(server)
+        on = post_json(Client(port), "/api/render", {"params": dict(FULL_PARAMS), "scale": 0.5})
+        off = post_json(Client(port), "/api/render",
+                        {"params": dict(FULL_PARAMS, light=False), "scale": 0.5})
+        assert on[0] == 200 and off[0] == 200
+        assert json.loads(on[2])["image"] != json.loads(off[2])["image"]

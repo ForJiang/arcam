@@ -25,6 +25,79 @@
     return { u: cam.W / 2 + F * xr / zc, v: cam.H / 2 + F * yr / zc };
   }
 
+  // ── place() 反投影（geometry.py:85 的 JS 对译）────────────────────
+  // 画布像素 (u,v) → 世界 (x, d)：人立在地面上（Y_world=0）的解析逆。
+  // 与 Python place() 逐字同式：d 夹 [0.5,20]、x 夹 [-6,6]（SPEC §5 冻结项）。
+  function placeAt(u, v, cam) {
+    var F = focalPx(cam.W, cam.H, cam.feq);
+    if (!F) return null;
+    var p = cam.pitch * Math.PI / 180, r = cam.roll * Math.PI / 180;
+    var up = u - cam.W / 2, vp = v - cam.H / 2;
+    var a = (up / F) * Math.cos(r) + (vp / F) * Math.sin(r);
+    var b = -(up / F) * Math.sin(r) + (vp / F) * Math.cos(r);
+    var den = Math.sin(p) + b * Math.cos(p);
+    if (Math.abs(den) < 1e-6) return null;
+    var d = cam.h * (Math.cos(p) - b * Math.sin(p)) / den;
+    if (d <= 0.05) return null;
+    d = Math.max(0.5, Math.min(20, d));
+    var x = a * (cam.h * Math.sin(p) + d * Math.cos(p));
+    x = Math.max(-6, Math.min(6, x));
+    return { x: x, d: d };
+  }
+
+  // ── autoFixX（placement.py:240 的 JS 对译）──────────────────────
+  // 把立绘横向吸到最近的三分线。ground：project 非线性 → 数值导数一步解
+  //（dx=0.05，clamp ±20，与 Python 逐字同）；free：直接改归一化 freeP.u。
+  function autoFixX(cam, subj, mode, sizePct, opts) {
+    opts = opts || {};
+    var targets = [1 / 3, 0.5, 2 / 3];
+    var c0 = currentPlacementOf(cam, subj, mode, sizePct, opts);
+    if (!c0) return null;
+    var width = cam.W;
+    var xr = c0.u / width;
+    var best = targets[0];
+    for (var i = 1; i < targets.length; i++) {
+      if (Math.abs(xr - targets[i]) < Math.abs(xr - best)) best = targets[i];
+    }
+    var targetU = best * width;
+    if (mode === "free") {
+      var newU = Math.max(0, Math.min(1, targetU / width));
+      return { freeU: newU, snapped: best };
+    }
+    // ground：数值导数一步解（与 Python 的 dx=0.05 同）
+    var plus = project(subj.x + 0.05, -cam.h, subj.d, cam);
+    var minus = project(subj.x - 0.05, -cam.h, subj.d, cam);
+    if (!plus || !minus) return { x: subj.x, snapped: best };
+    var grad = (plus.u - minus.u) / 0.1;
+    if (!isFinite(grad) || Math.abs(grad) < 1e-6) return { x: subj.x, snapped: best };
+    var nx = subj.x - (c0.u - targetU) / grad;
+    nx = Math.max(-20, Math.min(20, nx));
+    return { x: nx, snapped: best };
+  }
+
+  // 当前摆位（webui 没有 arcam-core，用一份最小落位对译）
+  function currentPlacementOf(cam, subj, mode, sizePct, opts) {
+    if (mode === "free") {
+      var h = sizePct / 100 * cam.H;
+      var w = h * (opts.charAspect || 0.6);
+      var freeP = opts.freeP || [0.5, 0.6];
+      var u = freeP[0] * cam.W, v = freeP[1] * cam.H;
+      return { u: u, v: v, w: w, h: h };
+    }
+    // ground：足底 pb 与头顶 pt 的投影（与 groundPlacement 同式）
+    var SHOTS = { "全身": 1.00, "膝上": 0.72, "腰上": 0.47, "胸上": 0.28, "头肩": 0.20 };
+    var k = SHOTS[opts.shot || "全身"];
+    var yb = (1.0 - k) * subj.hp;
+    var pb = project(subj.x, yb - cam.h, subj.d, cam);
+    var pt = project(subj.x, subj.hp - cam.h, subj.d, cam);
+    if (!pb || !pt) return null;
+    var span = Math.hypot(pb.u - pt.u, pb.v - pt.v);
+    if (span < 2) return null;
+    var hh = span * (opts.charScale || 1);
+    var ux = (pt.u - pb.u) / span, uy = (pt.v - pb.v) / span;
+    return { u: pb.u + ux * hh / 2, v: pb.v + uy * hh / 2, w: hh * (opts.charAspect || 0.6), h: hh };
+  }
+
   // ── drawFrame（index.html:1746-1772）─────────────────────────────
   function drawFrame(ctx, R, V, W, H) {
     if (R.x <= V.x + 0.5 && R.y <= V.y + 0.5 &&
@@ -240,6 +313,9 @@
   window.arcamHud = {
     focalPx: focalPx,
     project: project,
+    placeAt: placeAt,
+    autoFixX: autoFixX,
+    currentPlacementOf: currentPlacementOf,
     drawFrame: drawFrame,
     drawGrid: drawGrid,
     drawHorizon: drawHorizon,

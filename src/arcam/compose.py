@@ -97,7 +97,9 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
                  rot_basis: str = 'world', tone: bool = False,
                  shot: str = '全身', edge_bar: int = 0,
                  depth: LiDARFrame | None = None,
-                 env_overrides: dict | None = None) -> ComposedShot:
+                 env_overrides: dict | None = None,
+                 shadow: bool = True, grain: bool = True,
+                 sample_light: bool = True) -> ComposedShot:
     """composeShot 六步（index.html:3673-3701）。
 
     ① ``R = frameRect(frame_key)``
@@ -148,13 +150,13 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
         src_rgb01, char_rgba01, subj, cam, frame_key,
         light=light, mode=mode, size_pct=size_pct, char_scale=char_scale,
         rot_basis=rot_basis, tone=tone, shot=shot, edge_bar=edge_bar,
-        depth=depth)
+        depth=depth, shadow=shadow, grain=grain, sample_light=sample_light)
     # 立绘层与照片**同一个裁切框**：同一份 frame_key、同一套光，两张图才逐像素对应
     _, _, layer_rgba = _engine(
         None, char_rgba01, subj, cam, frame_key,
         light=light_used, mode=mode, size_pct=size_pct, char_scale=char_scale,
         rot_basis=rot_basis, tone=False, shot=shot, edge_bar=edge_bar,
-        depth=depth)
+        depth=depth, shadow=shadow, grain=grain, sample_light=sample_light)
     return ComposedShot(shot=shot_rgba[..., :3], rect=rect,
                         light=light_used, char_layer=layer_rgba, env=env)
 
@@ -166,7 +168,9 @@ def compose_char_layer(char_rgba01: np.ndarray, subj: Subject, cam: Camera, *,
                        rot_basis: str = 'world', tone: bool = False,
                        shot: str = '全身', edge_bar: int = 0,
                        depth: LiDARFrame | None = None,
-                       env_overrides: dict | None = None
+                       env_overrides: dict | None = None,
+                       shadow: bool = True, grain: bool = True,
+                       sample_light: bool = True
                        ) -> tuple[np.ndarray, Rect]:
     """buildCharCanvas（index.html:3709-3712）：同变换、不铺帧的透明立绘层。
 
@@ -205,7 +209,7 @@ def compose_char_layer(char_rgba01: np.ndarray, subj: Subject, cam: Camera, *,
         None, char_rgba01, subj, cam, frame_key,
         light=light, mode=mode, size_pct=size_pct, char_scale=char_scale,
         rot_basis=rot_basis, tone=False, shot=shot, edge_bar=edge_bar,
-        depth=depth)
+        depth=depth, shadow=shadow, grain=grain, sample_light=sample_light)
     return layer_rgba, rect
 
 
@@ -214,7 +218,9 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
             light: LightSample | None, mode: str, size_pct: float,
             char_scale: float, rot_basis: str, tone: bool,
             shot: str = '全身', edge_bar: int = 0,
-            depth: LiDARFrame | None = None
+            depth: LiDARFrame | None = None,
+            shadow: bool = True, grain: bool = True,
+            sample_light: bool = True
             ) -> tuple[Rect, LightSample | None, np.ndarray]:
     """composeShot 的公共引擎：返回 ``(rect, light_used, rgba_uint8)``。
 
@@ -247,9 +253,11 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
         base = np.asarray(src_rgb01, dtype=np.float64)
         opaque = True
 
-    # ③ 采光：调用方给了就用；否则仅照片路径当场量"正要导出的这一帧"
+    # ③ 采光：调用方给了就用；否则仅照片路径当场量"正要导出的这一帧"。
+    #    sample_light=False（原版 LIGHT_ON 关，index.html:1133）→ 不采，m 保持
+    #    None，bakeLit 按原版同分支原样返回立绘。
     m = light
-    if m is None and opaque:
+    if m is None and opaque and sample_light:
         region = _light_region_rect(char_rgba01, subj, cam, mode=mode,
                                     size_pct=size_pct, char_scale=char_scale,
                                     rot_basis=rot_basis, shot=shot,
@@ -271,10 +279,11 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
         ambient = m.mean if m is not None else None
         drawn = char_rgba01
         if m is not None:
-            drawn = bake_lit(drawn, m, (js_round(c.w), js_round(c.h)))
-        # 阴影是"场景"的一部分：自由模式不知道地面在哪，不铺（index.html:3131）
+            drawn = bake_lit(drawn, m, (js_round(c.w), js_round(c.h)), grain=grain)
+        # 阴影是"场景"的一部分：自由模式不知道地面在哪，不铺（index.html:3131）；
+        # shadow=False 是显式开关（原版 LIGHT_SHD，index.html:1144）
         shadow_layer = None
-        if mode == 'ground':
+        if mode == 'ground' and shadow:
             shadow_layer = contact_shadow_layer(char_rgba01, c, ambient)
         draw_shadow = shadow_layer is not None
         kw = dict(shadow=draw_shadow, ambient=ambient, shadow_layer=shadow_layer)

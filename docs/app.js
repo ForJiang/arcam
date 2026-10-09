@@ -23,7 +23,11 @@ const pipelineReady = core !== null && renderMod !== null;
 const S_DEFAULTS = {
   x: 0, d: 4, h: 1.6, hp: 1.65, feq: 23, pitch: 0, roll: 0,
   shot: '全身', char_scale: 1.0, frame: '满幅', rot_basis: 'world',
-  mode: 'ground', size_pct: 60, edge_bar: 0, tone: false
+  mode: 'ground', size_pct: 60, edge_bar: 0, tone: false,
+  // 光影三开关（v1.3.0）：本地版三项都真生效（webapp → compose 的门）；
+  // 网页版（docs）只有 shadow 真生效——JS 侧没有 bakeLit（v1 起环境光烘焙
+  // 就是 no-op），light/grain 在那边只影响状态显示，UI 提示里写明。
+  light: true, grain: true, shadow: true
 };
 
 // 数字+滑块双控件的七个量；量程同本地 webui（x ±6 对应 place 的夹取范围，SPEC §3.1）。
@@ -246,7 +250,8 @@ function composeParams(p) {
     charScale: p.char_scale,
     rotBasis: p.rot_basis,
     edgeBar: p.edge_bar,
-    tone: !!p.tone
+    tone: !!p.tone,
+    shadow: p.shadow !== false
   };
   if (mmdReady()) {
     kw.charDraw = draw3DInto;      // 3D 层挂钩点：替换 arcam-render.js 里的 drawInto
@@ -652,6 +657,7 @@ function init() {
   initLang();
   bindEditLine();
   bindLive();
+  bindFx();
   bind3D();
   $('hud-canvas').hidden = false;
   drawHudOverlay();
@@ -1071,6 +1077,52 @@ function bind3D() {
   bind3('el3d', 'keyEl', (v) => v.toFixed(0) + '°');
   bind3('focus3d', 'focus', (v) => v.toFixed(1) + 'm');
   bind3('dof3d', 'dof', (v) => v.toFixed(2));
+}
+
+
+/* ================= 12.6 效果开关 + 自动摆正（v1.3.0） ================= */
+
+function bindFx() {
+  $('fx-shadow').addEventListener('change', (e) => {
+    state.params.shadow = e.target.checked;
+    renderNow();
+  });
+  $('fx-hud-grid').addEventListener('change', (e) => {
+    HUD_ON.grid = e.target.checked;
+    drawHudOverlay();
+  });
+  $('fx-hud-horizon').addEventListener('change', (e) => {
+    HUD_ON.horizon = e.target.checked;
+    drawHudOverlay();
+  });
+  $('fx-hud-body').addEventListener('change', (e) => {
+    HUD_ON.body = e.target.checked;
+    drawHudOverlay();
+  });
+  $('btn-autofix').addEventListener('click', doAutoFix);
+}
+
+//: 自动摆正：arcam-core 的 autoFixX（与 Python placement.py:240 同算法）
+function doAutoFix() {
+  const core = window.arcamCore;
+  if (!core) return;
+  const cv = $('preview-canvas');
+  const W = cv.width, H = cv.height;
+  if (W < 8 || H < 8) return;
+  const p = state.params;
+  const cam = { W: W, H: H, h: p.h, feq: p.feq, pitch: p.pitch, roll: p.roll };
+  const subj = { hp: p.hp, d: p.d, x: p.x };
+  const aspect = state.charCanvas ? state.charCanvas.width / state.charCanvas.height : 0.6;
+  const r = core.autoFixX(aspect, aspect, subj, cam, {
+    mode: p.mode, sizePct: p.size_pct, charScale: p.char_scale,
+    shot: p.shot, edgeBar: p.edge_bar
+  });
+  if (!r) { setStatus('摆不正：人物在相机后方或参数退化', null, true); return; }
+  p.x = Math.round(r[0] * 100) / 100;
+  $('p-x-num').value = p.x;
+  $('p-x-rng').value = p.x;
+  setStatus('已吸附到三分线（x=' + p.x + 'm，' + r[1] + '）');
+  renderNow();
 }
 
 /* ================= 12. 实时相机 + HUD（FEATURE-SPEC §4/§2） ================= */

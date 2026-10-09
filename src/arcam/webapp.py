@@ -114,6 +114,7 @@ PARAM_DEFAULTS: dict = {
     "x": 0.0, "d": 4.0, "h": 1.6, "hp": 1.65, "feq": 23.0, "pitch": 0.0, "roll": 0.0,
     "shot": "全身", "char_scale": 1.0, "frame": "满幅", "rot_basis": "world",
     "mode": "ground", "size_pct": 60.0, "edge_bar": 0, "tone": False,
+    "light": True, "grain": True, "shadow": True,
     "depth_uploaded": False,
 }
 
@@ -139,7 +140,7 @@ _CHOICE_SPECS: dict[str, tuple] = {
     "edge_bar": (0, 1, 2, 3, 4),
 }
 
-_BOOL_FIELDS = ("tone", "depth_uploaded")
+_BOOL_FIELDS = ("tone", "light", "grain", "shadow", "depth_uploaded")
 
 #: 环境量键（compose._ENV_OVERRIDE_KEYS 的 web 侧镜像）：params 里**显式出现**的键
 #: 才进 env_overrides（LIDAR-SPEC §0「显式 > 测出 > 标称」的显式端）。
@@ -614,6 +615,8 @@ def _compose(store: Store, params: dict, explicit: set, scale: float = 1.0) -> _
     kw = dict(frame_key=params["frame"], mode=params["mode"],
               size_pct=params["size_pct"], char_scale=params["char_scale"],
               rot_basis=params["rot_basis"], tone=params["tone"],
+              shadow=params["shadow"], grain=params["grain"],
+              sample_light=params["light"],
               shot=params["shot"], edge_bar=params["edge_bar"])
 
     depth = None

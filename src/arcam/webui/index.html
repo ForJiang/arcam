@@ -67,6 +67,23 @@
         </div>
         <p class="hint" id="edit-note"></p>
       </details>
+
+      <!-- 效果开关（原版 btn.grid/light/grain/shadow + 自动摆正） -->
+      <details class="fold">
+        <summary data-t="fold.fx">效果开关</summary>
+        <div class="check-grid">
+          <label class="chk"><input type="checkbox" id="fx-light" checked> <span data-t="btn.light">光线匹配</span></label>
+          <label class="chk"><input type="checkbox" id="fx-grain" checked> <span data-t="btn.grain">颗粒匹配</span></label>
+          <label class="chk"><input type="checkbox" id="fx-shadow" checked> <span data-t="btn.shadow">接触阴影</span></label>
+          <label class="chk"><input type="checkbox" id="fx-hud-grid" checked> <span data-t="btn.grid">地面网格</span></label>
+          <label class="chk"><input type="checkbox" id="fx-hud-horizon"> <span data-t="btn.horizon">地平线</span></label>
+          <label class="chk"><input type="checkbox" id="fx-hud-body"> <span data-t="btn.body">人体参考</span></label>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="btn-autofix" data-t="btn.autoFix">自动摆正</button>
+        </div>
+        <p class="hint" data-t="hint.fx">HUD 三件只画在预览上，不出图；光影三件直接改变出图</p>
+      </details>
     </section>
 
     <!-- 右栏：预览（含相机视频层与 HUD 浮层） -->

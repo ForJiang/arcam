@@ -1,11 +1,11 @@
-"""中英语言表 —— index.html:600-830 ``TXT`` 的逐条搬运 + webui 新增键（FEATURE-SPEC §3）。
+"""中英语言表 —— index.html:600-830 ``TXT`` 的逐条搬运 + webui/CLI 新增键（FEATURE-SPEC §3）。
 
 原版是数组形式 [中文, English]：少一条会立刻现形（t() 回退成裸 key），
 不会静默漏翻。{0} {1} 是 t() 的占位符；数字和单位（1.60m / 23mm）
 本身不翻。表内 HTML 标签（<b>/<br>/<span>）是网页侧 innerHTML 用的，
 CLI 侧只取纯文本键。
 
-条目顺序 = 原版 TXT 的书写顺序，之后是 webui 新增键（追加不重排——对译审查
+条目顺序 = 原版 TXT 的书写顺序，之后是新增键（追加不重排——对译审查
 按行号对照）。3D（MMD）五键原版就有，用原译文。
 """
 
@@ -193,6 +193,11 @@ TXT: dict[str, tuple[str, str]] = {
     "btn.bundle": ("下载素材包 zip", "Download bundle zip"),
     "btn.copyScene": ("复制 scene.json", "Copy scene.json"),
     "kind.close": ("不选，保持现状", "Skip, keep as is"),
+    "note.batchDone": ("批处理完成：{0}/{1} 张全部成功", "Batch done: {0}/{1} succeeded"),
+    "fold.fx": ("效果开关", "Effects"),
+    "btn.horizon": ("地平线", "Horizon"),
+    "hint.fx": ("HUD 三件只画在预览上，不出图；光影三件直接改变出图", "The three HUD toggles only affect the preview, never the export; the three lighting toggles change the export"),
+    "hint.fxWeb": ("网页版只叠阴影开关；光线/颗粒烘焙为本地版专属（JS 侧无 bakeLit）", "Web build only has the shadow toggle; light and grain baking are local-only (no bakeLit in JS)"),
 }
 
 

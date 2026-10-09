@@ -72,6 +72,21 @@
         <p class="hint" id="edit-note"></p>
       </details>
 
+      <!-- 效果开关（v1.3.0）：shadow 真生效；light/grain 网页版仅状态显示 -->
+      <details class="fold">
+        <summary data-t="fold.fx">效果开关</summary>
+        <div class="check-grid">
+          <label class="chk"><input type="checkbox" id="fx-shadow" checked> <span data-t="btn.shadow">接触阴影</span></label>
+          <label class="chk"><input type="checkbox" id="fx-hud-grid" checked> <span data-t="btn.grid">地面网格</span></label>
+          <label class="chk"><input type="checkbox" id="fx-hud-horizon"> <span data-t="btn.horizon">地平线</span></label>
+          <label class="chk"><input type="checkbox" id="fx-hud-body"> <span data-t="btn.body">人体参考</span></label>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="btn-autofix" data-t="btn.autoFix">自动摆正</button>
+        </div>
+        <p class="hint" data-t="hint.fxWeb">网页版只叠阴影开关；光线/颗粒烘焙为本地版专属（JS 侧无 bakeLit）</p>
+      </details>
+
       <!-- 3D 立绘（MMD）：可选的一条路（C1 第一阶段；上游 index.html:258-306 / 1508-1710）。
            它**不改 2D 那条路的任何东西**：MMD 渲出一张全屏透明图层，贴在照片底上再走
            既有的 composeShot 裁切，于是预览/导出/scene.json 口径一行不动。

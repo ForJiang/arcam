@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from arcam.cli import main
+from arcam.cli import CliError, main
 from arcam.video import PoseKey, PoseTrack, save_track
 
 SRC = Path(__file__).resolve().parent.parent / "src"
@@ -398,3 +398,132 @@ def test_render_overlay_modes(tmp_path: Path, photo: Path, char: Path) -> None:
                  ("hud", "figure"), ("hud", "horizon"), ("figure", "horizon")):
         d = int((_np.abs(outs[a] - outs[b]).sum(2) > 12).sum())
         assert d > 0, f"{a} 与 {b} 输出相同"
+
+
+# ─────────────────────── 批量 / 配方 / 对比网格 / GIF（新功能） ───────────────────────
+
+def _make_photo(path, seed=0):
+    from PIL import Image
+    rng = np.random.default_rng(seed)
+    H, W = 240, 320
+    yy, xx = np.mgrid[0:H, 0:W].astype(float)
+    p = np.empty((H, W, 3), np.uint8)
+    p[..., 0] = (110 + 20 * np.sin(xx / 40 + seed)).clip(0, 255)
+    p[..., 1] = (130 + 25 * np.cos(yy / 50 + seed)).clip(0, 255)
+    p[..., 2] = 190
+    p[yy >= 140] = (95, 85, 75)
+    p = (p.astype(np.int16) + rng.integers(-3, 4, p.shape)).clip(0, 255).astype(np.uint8)
+    Image.fromarray(p, "RGB").save(path, quality=90)
+
+
+def test_batch_renders_every_photo(tmp_path, char, capsys):
+    """batch：目录里每张照片各出一张，参数只给一遍。"""
+    src = tmp_path / "photos"
+    src.mkdir()
+    for i in range(3):
+        _make_photo(src / f"p{i}.jpg", seed=i)
+    out = tmp_path / "out"
+    code = main(["batch", str(src), str(char), "-o", str(out), "--pitch", "8"])
+    assert code == 0
+    produced = sorted(p.name for p in out.glob("shot_p*.png"))
+    assert len(produced) == 3
+    # 每张内容不同（不是同一张重复）
+    from PIL import Image
+    imgs = [np.asarray(Image.open(out / n).convert("RGB")) for n in produced]
+    assert not np.array_equal(imgs[0], imgs[1])
+    assert "3/3" in capsys.readouterr().out
+
+
+def test_batch_empty_dir_errors(tmp_path, char, capsys):
+    """空目录 → 退出码 1 + 人话错误（main 捕获 CliError 打 stderr）。"""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert main(["batch", str(empty), str(char), "-o", str(tmp_path / "o")]) == 1
+    assert "没有图片文件" in capsys.readouterr().err
+
+
+def test_recipe_roundtrip(tmp_path, monkeypatch):
+    """recipe save/list/show/apply 四动作闭环；--set 可临时覆盖。"""
+    monkeypatch.setenv("ARCAM_RECIPES", str(tmp_path / "recipes"))
+    import arcam.cli as cli
+    monkeypatch.setattr(cli, "RECIPE_ROOT", tmp_path / "recipes")
+    args = ["recipe", "save", "t1", "--pitch", "15", "--mode", "free",
+            "--size-pct", "70", "--frame", "16:9"]
+    assert main(args) == 0
+    assert (tmp_path / "recipes" / "t1.json").is_file()
+    assert main(["recipe", "list"]) == 0
+    assert main(["recipe", "show", "t1"]) == 0
+    assert main(["recipe", "show", "nope"]) == 1
+    # apply 输出可直接粘的旗标；--set 覆盖生效
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert main(["recipe", "apply", "t1", "--set", "pitch=30"]) == 0
+    out = buf.getvalue()
+    assert "--pitch 30" in out and "--mode free" in out and "--frame 16:9" in out
+
+
+def test_recipe_from_scene(tmp_path, monkeypatch, photo, char):
+    """recipe save --from scene.json：从配方文件提摆放段。"""
+    monkeypatch.setenv("ARCAM_RECIPES", str(tmp_path / "recipes"))
+    import arcam.cli as cli
+    monkeypatch.setattr(cli, "RECIPE_ROOT", tmp_path / "recipes")
+    scene = tmp_path / "s.json"
+    assert main(["render", str(photo), str(char), "-o", str(tmp_path / "o.png"),
+                 "--scene", str(scene), "--pitch", "20", "--frame", "4:5"]) == 0
+    assert main(["recipe", "save", "fromscene", "--from", str(scene)]) == 0
+    data = json.loads((tmp_path / "recipes" / "fromscene.json").read_text(encoding="utf-8"))
+    assert data["params"]["pitch"] == 20.0
+    assert data["params"]["frame"] == "4:5"
+
+
+def test_contact_sheet_grid(tmp_path, photo, char):
+    """contact-sheet：笛卡尔积逐格渲染 + 拼图（格间互异）。"""
+    out = tmp_path / "sheet.png"
+    code = main(["contact-sheet", str(photo), str(char), "-o", str(out),
+                 "--vary", "d=3,4", "--vary", "pitch=0,12", "--cell-w", "160"])
+    assert code == 0 and out.is_file()
+    from PIL import Image
+    im = Image.open(out)
+    # 2×2 格、每格 160 宽、标签条 26px 高
+    assert im.size == (320, 2 * (120 + 26)) or im.size[0] == 320
+    a = np.asarray(im.convert("RGB"))
+    # 四个格子内容两两不同
+    cells = [a[26 + r * (120 + 26):26 + r * (120 + 26) + 100, c * 160:(c + 1) * 160]
+             for r in range(2) for c in range(2)]
+    for i in range(4):
+        for j in range(i + 1, 4):
+            assert not np.array_equal(cells[i], cells[j]), f"格 {i} 与 {j} 相同"
+
+
+def test_contact_sheet_rejects_over_wide(tmp_path, photo, char, capsys):
+    """笛卡尔积超上限 → 退出码 1 + 人话错误（防手滑炸内存）。"""
+    code = main(["contact-sheet", str(photo), str(char), "-o", str(tmp_path / "s.png"),
+                 "--vary", "d=1,2,3,4,5,6", "--vary", "pitch=0,10,20,30,40"])
+    assert code == 1
+    assert "超过上限" in capsys.readouterr().err
+
+
+def test_video_gif_export(tmp_path, photo, char, capsys):
+    """video --gif：纯 PIL 写出动画 GIF（帧数/循环/时长正确）。"""
+    from arcam.video import PoseTrack, PoseKey, save_track
+    track = PoseTrack(width=320, height=240, fps=8,
+                      height_m=1.5, feq_mm=30.0, subject_height_m=1.65,
+                      char_scale=1.0, size_pct=60.0, mode="ground",
+                      frame_key="满幅", shot="全身",
+                      keys=[PoseKey(t=0.0, pitch_deg=0.0, roll_deg=0.0, distance_m=4.0),
+                            PoseKey(t=0.5, pitch_deg=10.0, roll_deg=-6.0, distance_m=4.5),
+                            PoseKey(t=1.0, pitch_deg=-5.0, roll_deg=5.0, distance_m=3.5)])
+    tp = tmp_path / "t.json"
+    save_track(track, tp)
+    out = tmp_path / "frames"
+    code = main(["video", str(tp), str(char), "-o", str(out), "--bg", str(photo), "--gif"])
+    assert code == 0
+    gif = out / "video.gif"
+    assert gif.is_file(), "GIF 没写出来"
+    from PIL import Image
+    with Image.open(gif) as im:
+        assert im.format == "GIF"
+        assert im.n_frames == 9                 # 1s × 8fps + 1
+        assert im.info.get("loop") == 0         # 无限循环
+        assert im.info.get("duration") == 125 or 100 <= im.info.get("duration", 0) <= 150

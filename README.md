@@ -8,8 +8,21 @@
 本仓库把**同一条投影/合成管线**搬到命令行：喂给人像照片和立绘，按参数出图、
 导素材包、抠图，或者在一条位姿轨道下逐帧渲染。
 
+三种用法，一条管线：
+
+| 形态 | 入口 | 说明 |
+|---|---|---|
+| 命令行 | `arcam` / `python -m arcam` | 六个子命令，脚本化、批处理 |
+| 本机网页 | `arcam web` 或双击启动器 | 参数全可调、300ms 防抖实时预览；数据不出本机 |
+| 网页版（免安装） | [forjiang.github.io/arcam](https://forjiang.github.io/arcam/) | 同一管线的纯客户端 JS 移植，运算全在访客浏览器里 |
+
 核心承诺：`scene.json` 与原版 **100% 同构**（同名字段、同顺序、同单位、同取整语义），
 「Python 出的图能和原版工具互认配方」。
+
+特色能力：**iPhone 激光雷达环境感知**——从深度帧（16-bit PNG / .npy / .depth /
+人像 HEIC / EXR）拟合地面平面，解出相机高度/俯角/滚转，驱动落位与遮挡抠除；
+深度语义采用 Apple 官方轴向 z（"距相机平面的距离"）。依赖只有 numpy + pillow
+（抠图/LiDAR/视频为可选 extra）。
 
 不做：实时摄像头（Python 侧只接受已给定的 yaw/pitch/roll 参数）、MMD 3D 运行时
 （three.js 生态；相机矩阵交叉验证的接口契约见 `docs/SPEC.md` §6）。
@@ -342,9 +355,11 @@ GitHub Pages 只伺服静态文件、跑不了 Python 服务，所以把 focal/p
   （推送脚本 `tools/push-to-github.sh` 会一并开启）。站内所有运算都在访客浏览器里，
   照片立绘不出设备。
 - **正确性基准**：`docs/tests/golden.json` 由 Python 管线生成（40 组 focal /
-  200 组 project / 120 组 place / 84 组 placement / 3 组整帧 scene），JS 侧
+  200 组 project / 120 组 place / 102 组 placement / 3 组整帧 scene），JS 侧
   偏差 < 1e-9（引擎 libm 的 1 ulp 差，比阈值低 7 个数量级）；合成调用序列与
-  scene 字段顺序与 Python 逐项对齐。
+  scene 字段顺序与 Python 逐项对齐。差分夹具 `tools/golden-diff.mjs`
+  （Node 直跑，462 向量 0 失败），Python 侧重算门禁
+  `tests/test_golden_recompute.py`（fixture 必须能被当前实现逐向量重算）。
 
 ## 测试
 
@@ -369,10 +384,20 @@ GitHub Pages 只伺服静态文件、跑不了 Python 服务，所以把 focal/p
   node tools/golden-diff.mjs     # 需要 Node ≥ 14
   ```
 
-v1.1.0（2026-10-10）为全项目审计版本：修复 16 个功能障碍（free 模式 rot_basis/
-edge_bar 整条渲染链断链、char-layer --frame 静默失效、lidar serve 一帧不收、
-视频背景双重除法、Pages 抠图阈值 1 ulp 翻面等），清理死代码，明细见
-`CHANGELOG.md`。
+- `tools/lidar-e2e-smoke.py`：LiDAR 闭环冒烟——按 `place()` 逆投影合成已知真值
+  （相机高 1.5m/俯角 20°/滚转 -8°）的地面深度，装进真 HEIC 容器，过平面拟合解
+  外参**精确回真值**（rms 0.49mm），再深度驱动合成：
+
+  ```bash
+  .venv/bin/python tools/lidar-e2e-smoke.py
+  ```
+
+当前 **440 passed / 1 skipped**（1 skip 为 onnxruntime 已装时 CLI 抠图 E2E 由
+P4 覆盖的既定跳过；可选依赖 pillow-heif/OpenEXR/imageio 装全后 HEIC/EXR 深度
+与 mp4 路径全部真跑）。v1.1.1（2026-10-10）为全项目审计 + 补验版本：修 18 个
+功能障碍（free 模式 rot_basis/edge_bar 整条渲染链断链、char-layer --frame 静默
+失效、lidar serve 一帧不收、视频背景双重除法、Pages 抠图阈值 1 ulp 翻面、
+HEIC 量程预检 0 值误判、web listen backlog 竞态等），明细见 `CHANGELOG.md`。
 
 源码溯源：每个公开函数的 docstring 都注明对应 JS 的 `index.html:<line>` /
 `cutout.js:<line>`；契约全集在 `docs/SPEC.md`，原版逐字事实在

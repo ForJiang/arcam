@@ -73,7 +73,9 @@ PARAM_KEYS = ["x", "d", "h", "hp", "feq", "pitch", "roll", "shot",
               "char_scale", "frame", "rot_basis", "mode", "size_pct",
               "edge_bar", "tone",
               # 光影三开关（原版 LIGHT_ON/GRN/SHD；v1.3.0 接入，web 与 CLI 同语义）
-              "light", "grain", "shadow"]
+              "light", "grain", "shadow",
+              # 阴影方向/浓度（v1.6.0 新增创作控制，默认 = 原版行为）
+              "shadow_az", "shadow_opacity"]
 
 # bindNumeric 动态拼 id 的七个量（'p-' + key + '-num'/'-rng'）
 NUMERIC_KEYS = ["x", "d", "h", "hp", "feq", "pitch", "roll"]
@@ -657,7 +659,7 @@ def test_i18n_tables_match_between_python_and_js():
     # 两侧新增 26 条（sec.input/preview.empty/dz.*/btn.png/btn.layer/btn.bundle/
     # btn.copyScene/fold.fx/hint.fxWeb/btn.fullscreen/note.paramsRestored 等）
     # = 186。改这条断言前先跑 .venv/bin/python -c "from arcam.i18n import TXT; print(len(TXT))"。
-    assert len(PY_TXT) == 189, f"表条数变了：{len(PY_TXT)}（原版 160[含 4 条改名] + 新增 26）"
+    assert len(PY_TXT) == 190, f"表条数变了：{len(PY_TXT)}（原版 160[含 4 条改名] + 新增 26）"
 
 
 def test_mmd_3d_wired():

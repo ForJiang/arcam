@@ -185,8 +185,37 @@ def _shadow_color(ambient: tuple[float, float, float] | None) -> tuple[int, int,
     return q(lum_s * rb), q(lum_s), q(lum_s / rb)
 
 
+def _shear_profile(sm: np.ndarray, out_h: int, shadow_az: float) -> np.ndarray:
+    """斜射影子的拖偏：逐列轮廓按每行横移重采样（sprite.py 新增，原版无此项）。
+
+    第 ``y`` 行的采样位置左移 ``shear·(y+0.5)`` 列——影子离脚线越远（y 越大）
+    拖得越偏，方向由 ``shadow_az`` 决定。``shear`` 取 ``tan(az)`` 并按影子自身
+    宽高比归一（横向移动量以影子宽度为单位、纵向以影子高度为单位，两个方向
+    在画布上的缩放才一致）。
+
+    ⚠ ``shadow_az == 0`` 时调用方**不该**进来：整数位置的双线性虽精确返回原值，
+    但没必要为默认路径冒浮点风险（原版行为必须逐位不变）。
+    边界夹取（不反射/不补零）：夹取会让最外侧列被重复，视觉上影子沿拖偏方向
+    「续」了一截，比反射产生的对称鬼影合理。
+    """
+    w = sm.shape[0]
+    shear = math.tan(math.radians(shadow_az)) * (out_h / float(w))
+    xs = np.arange(w, dtype=np.float64)
+    out = np.empty((out_h, w), dtype=np.float64)
+    for y in range(out_h):
+        src = xs - shear * (y + 0.5)
+        lo = np.floor(src)
+        frac = src - lo
+        lo_c = np.clip(lo.astype(np.int64), 0, w - 1)
+        hi_c = np.clip(lo.astype(np.int64) + 1, 0, w - 1)
+        out[y] = sm[lo_c] * (1.0 - frac) + sm[hi_c] * frac
+    return out
+
+
 def contact_shadow_layer(char_rgba: np.ndarray, c: "SpritePlacement",
-                         ambient: tuple[float, float, float] | None) -> np.ndarray:
+                         ambient: tuple[float, float, float] | None,
+                         shadow_az: float = 0.0,
+                         shadow_opacity: float = 1.0) -> np.ndarray:
     """立绘原生分辨率下的接触阴影层（index.html:3027-3143；footPrint 3056-3113
     + drawContactShadow 的颜色段 3115-3138）。
 
@@ -201,6 +230,13 @@ def contact_shadow_layer(char_rgba: np.ndarray, c: "SpritePlacement",
          ``fall=exp(-dy²/(2·SH_SPREAD²))``；``fall<0.004`` 整行透明；
          ``a = sm[x]·fall·SH_ALPHA``，``a<=0.002`` 该像素透明，否则
          ``alpha = js_round(a·255)``，RGB = 阴影色。
+
+    ``shadow_az``（度，默认 0 = 原版行为）：光线方位角。0 = 光在相机正后
+    方（影子正落在脚下，与原版逐位一致）；非 0 = 斜射，影子沿背光方向拖偏
+    （逐行横移轮廓，见 :func:`_shear_profile`）。**原版 2D 阴影是旋转对称的、
+    没有方向**——这是离线侧新增的创作控制（MMD 3D 路径一向有 keyAz），
+    默认值保证与原版逐位相同。
+    ``shadow_opacity``（默认 1.0）：浓度倍率，乘在 ``SH_ALPHA`` 上。
 
     返回 (outH, w, 4) uint8 RGBA —— 即原版 ``drawImage(fp, -sw/2, top, sw, shh)``
     的源。颜色语义：阴影里没有直射光只剩漫射，所以更暗也更淡；不用 multiply
@@ -228,7 +264,9 @@ def contact_shadow_layer(char_rgba: np.ndarray, c: "SpritePlacement",
     t = (ys + 0.5) / out_h
     dy = t - SH_PEAK
     fall = np.exp(-(dy * dy) / (2.0 * SH_SPREAD * SH_SPREAD))
-    a = sm[None, :] * fall[:, None] * SH_ALPHA
+    if shadow_az:
+        sm = _shear_profile(sm, out_h, shadow_az)
+    a = sm[None, :] * fall[:, None] * (SH_ALPHA * shadow_opacity)
     keep = (fall[:, None] >= 0.004) & (a > 0.002)
     alpha = np.where(keep, np.floor(a * 255.0 + 0.5), 0.0)
     out = np.zeros((out_h, w_px, 4), dtype=np.float64)

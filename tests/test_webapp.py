@@ -1180,3 +1180,76 @@ class TestLightingSwitches:
         assert seen["sample_light"] is False
         assert seen["grain"] is False
         assert seen["shadow"] is False
+
+
+class TestBatchEndpoint:
+    """POST /api/batch：多照片 × 同一立绘同一组参数 → zip（v1.6.0）。"""
+
+    @staticmethod
+    def _data_uri(path: Path) -> str:
+        import base64
+        return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode()
+
+    def test_batch_zip_per_photo(self, server, uploaded, tmp_path):
+        import base64, io, zipfile
+        from PIL import Image
+        port = _port(server)
+        # 两张不同的照片 dataURI
+        uris = []
+        for i, (r, g) in enumerate(((200, 60), (60, 200))):
+            arr = np.full((64, 96, 3), 0, np.uint8)
+            arr[..., 0], arr[..., 2] = r, g
+            p = tmp_path / f"p{i}.png"
+            Image.fromarray(arr, "RGB").save(p)
+            uris.append(self._data_uri(p))
+        status, headers, raw = post_json(Client(port), "/api/batch",
+                                         {"photos": uris, "params": {"mode": "ground"}})
+        assert status == 200
+        assert headers.get("Content-Type", "").startswith("application/zip")
+        z = zipfile.ZipFile(io.BytesIO(raw))
+        names = sorted(z.namelist())
+        assert names == ["shot_001.png", "shot_002.png"], names
+        # 两张内容不同（不是同一张重复）
+        a = np.asarray(Image.open(io.BytesIO(z.read("shot_001.png"))).convert("RGB"))
+        b = np.asarray(Image.open(io.BytesIO(z.read("shot_002.png"))).convert("RGB"))
+        assert not np.array_equal(a, b)
+
+    def test_batch_requires_char(self, server):
+        port = _port(server)
+        status, _h, raw = post_json(Client(port), "/api/batch",
+                                    {"photos": ["data:image/png;base64,iVBORw0KGgo="]})
+        assert status == 400
+        assert "立绘" in json.loads(raw)["error"]
+
+    def test_batch_rejects_bad_photos(self, server, uploaded):
+        port = _port(server)
+        status, _h, raw = post_json(Client(port), "/api/batch",
+                                    {"photos": ["not-a-data-uri"]})
+        assert status == 400 and "dataURI" in json.loads(raw)["error"]
+        status, _h, raw = post_json(Client(port), "/api/batch", {"photos": []})
+        assert status == 400 and "非空" in json.loads(raw)["error"]
+        status, _h, raw = post_json(Client(port), "/api/batch",
+                                    {"photos": ["data:image/png;base64," + "A" * 100]})
+        assert status == 400, "解不开的 base64 应 400"
+
+    def test_batch_partial_failure_header(self, server, uploaded, tmp_path):
+        """一张坏图不拖垮整批：zip 仍出，X-Arcam-Batch-Failed 记明细。"""
+        import io, zipfile
+        from PIL import Image
+        port = _port(server)
+        good = np.full((64, 96, 3), 120, np.uint8)
+        p = tmp_path / "good.png"
+        Image.fromarray(good, "RGB").save(p)
+        uris = [self._data_uri(p), "data:image/png;base64,!!!notbase64!!!"]
+        status, headers, raw = post_json(Client(port), "/api/batch",
+                                         {"photos": uris, "params": {"mode": "ground"}})
+        assert status == 200
+        z = zipfile.ZipFile(io.BytesIO(raw))
+        # 坏图被跳过；明细落进 _errors.txt（HTTP 头是 latin-1，不能放中文原因）
+        assert "shot_001.png" in z.namelist() and "_errors.txt" in z.namelist()
+        assert "shot_002.png" not in z.namelist()
+        errs = z.read("_errors.txt").decode("utf-8")
+        assert "第 2 张" in errs and "base64" in errs
+        # 头只放数字（中文进头会 UnicodeEncodeError → 500，v1.6 踩过）
+        assert headers.get("X-Arcam-Batch-Failed") == "1"
+        assert "1 ok, 1 failed" in headers.get("X-Arcam-Batch", "")

@@ -24,7 +24,8 @@ var S_DEFAULTS = {
   // 光影三开关（v1.3.0）：本地版三项都真生效（webapp → compose 的门）；
   // 网页版（docs）只有 shadow 真生效——JS 侧没有 bakeLit（v1 起环境光烘焙
   // 就是 no-op），light/grain 在那边只影响状态显示，UI 提示里写明。
-  light: true, grain: true, shadow: true
+  light: true, grain: true, shadow: true,
+  shadow_az: 0, shadow_opacity: 1.0
 };
 
 // 数字+滑块双控件的七个量；量程是自定的（原版 index.html 不在本仓库），
@@ -679,6 +680,51 @@ function frameRectJs(key, W, H) {
 }
 
 
+
+/* ================= 6.5 批量出图（v1.6.0） ================= */
+
+//: 多选照片 → dataURI 数组 → /api/batch → zip 下载。
+//  与 CLI arcam batch 同语义：同一立绘同一组参数，逐张出图；单张失败不拖垮
+//  整批（服务端跳过的原因写进 zip 里的 _errors.txt）。
+function doBatch(files) {
+  if (!files || !files.length) return;
+  if (!state.char) { setStatus('批量出图需要先上传立绘', null, true); return; }
+  if (files.length > 12) { setStatus('一次最多 12 张（分批处理）', null, true); return; }
+  setStatus('批量出图中（' + files.length + ' 张）…');
+  var readers = Array.prototype.map.call(files, function (f) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(r.result); };
+      r.onerror = function () { reject(new Error(f.name + ' 读不出来')); };
+      r.readAsDataURL(f);
+    });
+  });
+  Promise.all(readers).then(function (uris) {
+    return fetch('/api/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photos: uris, params: buildParams() })
+    });
+  }).then(function (res) {
+    return res.blob().then(function (blob) {
+      if (!res.ok) {
+        return res.json().catch(function () { return null; }).then(function (d) {
+          throw new ApiError((d && d.error) || ('HTTP ' + res.status), d && d.hint);
+        });
+      }
+      var note = res.headers.get('X-Arcam-Batch') || '';
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'arcam-batch.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
+      setStatus('批量完成：' + note);
+    });
+  }).catch(function (e) { showApiError(e); });
+}
+
 /* ================= 9. 效果开关 + 拖拽摆位 + 自动摆正 ================= */
 
 //: 光影三开关 → params（直接改变出图）；HUD 三开关 → HUD_ON（只画预览）
@@ -703,6 +749,11 @@ function bindFx() {
   $('fx-hud-body').addEventListener('change', function (e) {
     HUD_ON.body = e.target.checked; drawHudOverlay();
   });
+  // 阴影方位/浓度（v1.6.0）：az=0、opacity=1 时与原版逐位一致
+  bindSlider('shadow_az', 'p-shadow-az-rng', 'p-shadow-az-val',
+             function (v) { return v.toFixed(0) + '°'; });
+  bindSlider('shadow_opacity', 'p-shadow-op-rng', 'p-shadow-op-val',
+             function (v) { return v.toFixed(2); });
   $('btn-autofix').addEventListener('click', doAutoFix);
 }
 
@@ -851,10 +902,58 @@ function syncControlsFromParams() {
   $('p-size-pct-rng').value = state.params.size_pct;
   $('p-size-pct-val').textContent = state.params.size_pct.toFixed(0) + '%';
   $('p-tone').checked = !!state.params.tone;
+  $('p-shadow-az-rng').value = state.params.shadow_az;
+  $('p-shadow-az-val').textContent = state.params.shadow_az.toFixed(0) + '°';
+  $('p-shadow-op-rng').value = state.params.shadow_opacity;
+  $('p-shadow-op-val').textContent = state.params.shadow_opacity.toFixed(2);
   $('fx-light').checked = !!state.params.light;
   $('fx-grain').checked = !!state.params.grain;
   $('fx-shadow').checked = !!state.params.shadow;
   syncModeVisibility();
+}
+
+/* ================= 7.9 批量出图（v1.6.0；/api/batch） ================= */
+
+//: 多选照片 → 每张转 dataURI → 一次 POST /api/batch → 下载 zip。
+//  服务端单张失败不拖垮整批（明细写进 zip 的 _errors.txt），这里把张数报出来。
+function bindBatch() {
+  $('btn-batch').addEventListener('click', function () { $('file-photos').click(); });
+  $('file-photos').addEventListener('change', function (e) {
+    var files = e.target.files;
+    if (!files || !files.length) return;
+    if (!state.char) { setStatus('批量出图需要先上传立绘', null, true); return; }
+    if (files.length > 12) { setStatus('一次最多 12 张（收到 ' + files.length + '）', null, true); return; }
+    setStatus('批量出图中（' + files.length + ' 张）…');
+    var readers = [];
+    for (var i = 0; i < files.length; i++) {
+      readers.push(new Promise(function (resolve, reject) {
+        var fr = new FileReader();
+        fr.onload = function () { resolve(fr.result); };
+        fr.onerror = function () { reject(new Error(files[i].name + ' 读不出来')); };
+        fr.readAsDataURL(files[i]);
+      }));
+    }
+    Promise.all(readers).then(function (uris) {
+      return fetch('/api/batch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ photos: uris, params: buildParams() })
+      });
+    }).then(function (res) {
+      if (!res.ok) {
+        return res.json().then(function (e) {
+          throw new Error((e && e.error) || ('HTTP ' + res.status));
+        });
+      }
+      return res.blob().then(function (blob) {
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'arcam-batch.zip';
+        a.click();
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
+        setStatus('批量完成：' + files.length + ' 张（见 zip）');
+      });
+    }).catch(function (e) { showApiError(e); });
+  });
 }
 
 /* ================= 8. 初始化 ================= */
@@ -877,6 +976,11 @@ function init() {
 
   $('btn-matte').addEventListener('click', doMatte);
   $('btn-lidar').addEventListener('click', doLidar);
+  $('btn-batch').addEventListener('click', function () { $('file-photos').click(); });
+  $('file-photos').addEventListener('change', function (e) {
+    doBatch(e.target.files);
+    e.target.value = '';                    // 清掉，否则同一批文件再选不触发 change
+  });
   $('btn-rerender').addEventListener('click', renderNow);
   $('btn-png').addEventListener('click', function () { doExport('png'); });
   $('btn-layer').addEventListener('click', function () { doExport('layer'); });
@@ -887,6 +991,7 @@ function init() {
   bindLive();
   bindFx();
   bindDrag();
+  bindBatch();
   bindFullscreen();
   syncModeVisibility();
   setStatus('就绪');

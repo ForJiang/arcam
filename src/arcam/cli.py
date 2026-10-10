@@ -127,6 +127,11 @@ def _add_placement(p: argparse.ArgumentParser) -> None:
                    help="关掉颗粒匹配（ bakeLit 里的颗粒那一段，光仍烘）")
     g.add_argument("--no-shadow", action="store_true",
                    help="关掉接触阴影（原版 LIGHT_SHD，index.html:1144）")
+    g.add_argument("--shadow-az", type=float, default=0.0, metavar="度",
+                   help="阴影光线方位角（默认 0 = 影子正落脚下，与原版一致；非 0 = "
+                        "斜射拖偏。原版 2D 阴影无方向，这是离线侧新增控制）")
+    g.add_argument("--shadow-opacity", type=float, default=1.0, metavar="倍",
+                   help="阴影浓度倍率（默认 1.0，乘在原版 SH_ALPHA 上）")
 
 
 def _add_lang(p: argparse.ArgumentParser) -> None:
@@ -361,12 +366,41 @@ def build_parser() -> argparse.ArgumentParser:
         "serve", help="实时流接收（TCP，协议见 docs/LIDAR-SPEC §6）",
         description="实时接收 iPhone 端推来的深度帧（arcam.lidar_live.serve，"
                     "LIDAR-SPEC §6 协议）：逐帧打印一行摘要，Ctrl-C 停止；"
-                    "--out 给目录时同步落盘 frame_%06d.depth。模块缺失才提示退出 0。")
+                    "--out 给目录时同步落盘 frame_%%06d.depth。模块缺失才提示退出 0。")
     ps.add_argument("--port", type=int, default=7707, metavar="端口",
                     help="监听端口（默认 7707）")
     ps.add_argument("--out", metavar="DIR", default=None,
                    help="帧序列输出目录（默认不落盘）")
     ps.set_defaults(func=cmd_lidar_serve)
+
+    pg = lidar_sub.add_parser(
+        "sim", help="合成深度帧：落盘 .depth 序列，或推给正在监听的 serve",
+        description="按已知真值（相机高/俯角/滚转）合成深度相机坐标的地面点云——"
+                    "没有真机时验证整条 LiDAR 链路（sim → serve → inspect → "
+                    "render --depth）。默认把帧写进 --out 目录（frame_%%06d.depth，"
+                    "ARCD 格式，内参外参齐备）；--push 给端口时改为推给正在跑的 "
+                    "arcam lidar serve。噪声由 (seed, index) 播种 → 同参同帧可复现。")
+    pg.add_argument("--h", type=float, default=1.6, metavar="米",
+                    help="相机离地高（真值，默认 1.6）")
+    pg.add_argument("--pitch", type=float, default=12.0, metavar="度",
+                    help="俯角（真值，默认 12）")
+    pg.add_argument("--roll", type=float, default=8.0, metavar="度",
+                    help="滚转角（真值，默认 8）")
+    pg.add_argument("--width", type=int, default=256, metavar="PX",
+                    help="深度帧宽（默认 256）")
+    pg.add_argument("--height", type=int, default=192, metavar="PX",
+                    help="深度帧高（默认 192）")
+    pg.add_argument("--frames", type=int, default=5, metavar="N",
+                    help="合成几帧（默认 5）")
+    pg.add_argument("--seed", type=int, default=0, metavar="N",
+                    help="随机种子（默认 0；同参同种子同帧可复现）")
+    pg.add_argument("--out", metavar="DIR", default=None,
+                    help="帧序列输出目录（frame_%%06d.depth）；与 --push 二选一")
+    pg.add_argument("--push", type=int, default=None, metavar="端口",
+                    help="推给 127.0.0.1:端口 上正在监听的 arcam lidar serve（不落盘）")
+    pg.add_argument("--json", action="store_true",
+                    help="只打印第一帧的 meta（JSON），不写盘不推流")
+    pg.set_defaults(func=cmd_lidar_sim)
 
     p = sub.add_parser("web", help="本地网页界面（标准库 HTTP 服务，仅本机回环）",
                        description="起本机回环（默认 127.0.0.1:8765）网页服务：照片/立绘上传、"
@@ -465,7 +499,9 @@ def _compose_kw(args) -> dict:
                 tone=args.tone, shot=args.shot, edge_bar=args.edge_bar,
                 shadow=not getattr(args, "no_shadow", False),
                 grain=not getattr(args, "no_grain", False),
-                sample_light=not _light_off(args))
+                sample_light=not _light_off(args),
+                shadow_az=getattr(args, "shadow_az", 0.0),
+                shadow_opacity=getattr(args, "shadow_opacity", 1.0))
 
 
 def _light_off(args) -> bool:
@@ -1439,6 +1475,56 @@ def cmd_check(args) -> int:
     print("轨道合法。")
     return 0
 
+
+
+def cmd_lidar_sim(args) -> int:
+    """合成深度帧（lidar_sim.synth_ground_frame）：落盘 .depth 或推给 serve。"""
+    from arcam.i18n import t
+    from arcam.lidar_sim import synth_ground_frame
+
+    if args.push is not None and args.out is not None:
+        raise CliError("--out 与 --push 二选一（落盘 或 推流，别同时给）")
+    if args.frames < 1:
+        raise CliError(f"--frames 至少 1（收到 {args.frames}）")
+    if args.width < 8 or args.height < 8:
+        raise CliError(f"深度帧尺寸太小：{args.width}×{args.height}（至少 8×8）")
+
+    meta0, depth0 = synth_ground_frame(h=args.h, pitch_deg=args.pitch,
+                                       roll_deg=args.roll, width=args.width,
+                                       height=args.height, index=0, seed=args.seed)
+    if args.json:
+        print(json.dumps(meta0, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.push is not None:
+        # 推流模式：起 daemon 线程扮演设备，主线程等它推完
+        from arcam.lidar_sim import simulate_scene_server
+        try:
+            th = simulate_scene_server(args.push, h=args.h, pitch=args.pitch,
+                                       roll=args.roll, frames=args.frames)
+        except OSError as exc:
+            raise CliError(f"连不上 127.0.0.1:{args.push}：{exc}\n"
+                           "先在另一个终端跑 arcam lidar serve --port <同端口>") from None
+        th.join(timeout=30.0 + args.frames)
+        print(f"已推送 {args.frames} 帧到 127.0.0.1:{args.push}"
+              f"（h={args.h} pitch={args.pitch} roll={args.roll}）")
+        return 0
+
+    # 落盘模式：frame_%06d.depth（ARCD，内参外参齐备）
+    from arcam.lidar_live import save_depth_file
+    out_dir = Path(args.out) if args.out else Path(f"lidar_sim_{args.width}x{args.height}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(args.frames):
+        meta, depth = synth_ground_frame(h=args.h, pitch_deg=args.pitch,
+                                         roll_deg=args.roll, width=args.width,
+                                         height=args.height, index=i, seed=args.seed)
+        save_depth_file(out_dir / f"frame_{i:06d}.depth", meta, depth)
+    valid = float(np.isfinite(depth0).mean())
+    print(f"已合成 {args.frames} 帧 → {out_dir}/frame_000000.depth …"
+          f"（{args.width}×{args.height}，有效覆盖率 {valid:.1%}，真值 h={args.h}"
+          f" pitch={args.pitch} roll={args.roll}）")
+    print(f"  验证闭环：arcam lidar inspect {out_dir}/frame_000000.depth")
+    return 0
 
 def cmd_lidar_inspect(args) -> int:
     """LiDAR 深度诊断：读帧 → 拟合地面平面 → 报告相机环境量（LIDAR-SPEC §6）。

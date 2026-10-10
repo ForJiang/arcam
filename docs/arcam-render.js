@@ -232,7 +232,7 @@ function shadowColor(ambient) {
  * drawImage(fp, -sw/2, top, sw, shh) 的源 footCv，由 drawSprite 一次 warp 进
  * 旋转矩形（一次重采样，与原版一次 drawImage+rotate 的滤波次数一致）。
  */
-export function contactShadowAlpha(charImg, placement, ambient) {
+export function contactShadowAlpha(charImg, placement, ambient, opts) {
   const c = placement;
   const px = pixelsOf(charImg);
   const wPx = px === null ? 0 : px.width;
@@ -275,13 +275,28 @@ export function contactShadowAlpha(charImg, placement, ambient) {
     out[i + 2] = colB;
     out[i + 3] = 0;
   }
+  // 斜射拖偏（shadowAz≠0；与 Python sprite._shear_profile 同算法）：
+  // out[x] = sm[x - shear·(y+0.5)]，双线性 + 边界夹取；az=0 时根本不进来，
+  // 默认路径与原版逐位一致。
+  const az = (opts && opts.shadowAz) || 0;
+  const opacity = (opts && opts.shadowOpacity !== undefined) ? opts.shadowOpacity : 1.0;
+  const alphaScale = SH_ALPHA * opacity;
+  const shear = az ? Math.tan(az * Math.PI / 180) * (outH / wPx) : 0;
+  const smAt = (x, y) => {
+    if (!shear) return sm[x];
+    const src = x - shear * (y + 0.5);
+    const lo = Math.floor(src), frac = src - lo;
+    const loC = Math.min(Math.max(lo, 0), wPx - 1);
+    const hiC = Math.min(Math.max(lo + 1, 0), wPx - 1);
+    return sm[loC] * (1 - frac) + sm[hiC] * frac;
+  };
   for (let y = 0; y < outH; y++) {
     const t = (y + 0.5) / outH;
     const dy = t - SH_PEAK;
     const fall = Math.exp(-(dy * dy) / (2.0 * SH_SPREAD * SH_SPREAD));
     if (fall < 0.004) continue;                     // 整行透明
     for (let x = 0; x < wPx; x++) {
-      const a = sm[x] * fall * SH_ALPHA;
+      const a = smAt(x, y) * fall * alphaScale;
       if (a <= 0.002) continue;                     // 该像素透明
       out[(y * wPx + x) * 4 + 3] = Math.floor(a * 255.0 + 0.5);
     }
@@ -316,7 +331,9 @@ export function drawSprite(base, charImg, c, opts) {
   let layer = o.shadowLayer === undefined ? null : o.shadowLayer;
   if (c === null || c === undefined || !(c.w > 0) || !(c.h > 0)) return base;
   if (shadow && (layer === null || layer === undefined)) {
-    layer = contactShadowAlpha(charImg, c, ambient);
+    layer = contactShadowAlpha(charImg, c, ambient, {
+      shadowAz: o.shadowAz, shadowOpacity: o.shadowOpacity
+    });
   }
   const g = ctx2d(base);
   g.save();
@@ -372,6 +389,11 @@ function normalizeParams(params) {
     //   丢掉，composeShot/composeCharLayer 里的分支永远不生效（静默失效）。
     charDraw: typeof p.charDraw === 'function' ? p.charDraw : null,
     shadow: p.shadow === undefined ? true : !!p.shadow,
+    // 阴影方向/浓度（v1.6.0；与 Python compose_shot 的 shadow_az/shadow_opacity
+    // 对应）。⚠ 同样必须在这儿放行——normalizeParams 是白名单，漏放这两个键
+    // 会让滑块静默失效（charDraw 那条注释记的就是同一个坑）。
+    shadowAz: numOr(p.shadowAz, 0.0),
+    shadowOpacity: numOr(p.shadowOpacity, 1.0),
   };
 }
 
@@ -415,7 +437,9 @@ function drawInto(full, charImg, subj, cam, p, rect) {
     drawSprite(full, charImg, c, {
       shadow: wantShadow,                  // 阴影是「场景」的一部分：自由模式不铺
       ambient: p.ambient,
-      shadowLayer: wantShadow ? contactShadowAlpha(charImg, c, p.ambient) : null,
+      shadowLayer: wantShadow
+        ? contactShadowAlpha(charImg, c, p.ambient, { shadowAz: p.shadowAz, shadowOpacity: p.shadowOpacity })
+        : null,
     });
   }
   return c;

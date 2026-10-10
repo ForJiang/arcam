@@ -251,7 +251,7 @@ class _Spy:
         real = sprite_mod.composite_sprite
         real_shadow = sprite_mod.contact_shadow_layer
 
-        def spy_shadow(char, c, ambient):
+        def spy_shadow(char, c, ambient, **kw):   # shadow_az/shadow_opacity 不影响本断言
             self.calls.append({"char": char is not None, "c": c, "ambient": ambient})
             return real_shadow(char, c, ambient)
 

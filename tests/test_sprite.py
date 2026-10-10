@@ -332,3 +332,76 @@ def test_composite_sprite_returns_float64_and_keeps_inputs():
     out_f = sprite.composite_sprite(base_f, char, _P(100, 100, 40, 60, 0.2), shadow=True,
                                     ambient=(0.6, 0.6, 0.6))
     assert np.array_equal(out, out_f)
+
+
+def test_shadow_az_zero_is_bit_identical():
+    """shadow_az=0 必须与原版行为逐位相同（新功能的默认路径不许漂）。"""
+    from arcam.sprite import contact_shadow_layer
+    from arcam.placement import SpritePlacement
+
+    rng = np.random.default_rng(5)
+    char = np.zeros((300, 200, 4))
+    char[..., :3] = rng.random((300, 200, 3))
+    char[..., 3] = (rng.random((300, 200)) > 0.3).astype(float)
+    c = SpritePlacement(u=960.0, v=540.0, w=200.0, h=300.0, rot=0.0)
+    ambient = (0.5, 0.45, 0.4)
+    base = contact_shadow_layer(char, c, ambient)
+    same = contact_shadow_layer(char, c, ambient, shadow_az=0.0, shadow_opacity=1.0)
+    assert np.array_equal(base, same), "默认参数改变了阴影输出"
+
+
+def test_shadow_az_nonzero_shifts_profile():
+    """shadow_az≠0 时影子拖偏：单元级直测 _shear_profile + 端到端抽样。
+
+    端到端只用「有像素变化」这种弱断言——斜射量经 alpha 量化后小角度可能
+    逐位相同（量化吞掉），强断言属于测试过拟合；精确行为由下面的单元测试钉。
+    """
+    from arcam.sprite import _shear_profile
+
+    # 单元级：单峰轮廓，az=45° 时每行右移 shear·(y+0.5) 列（峰位可无歧义读出）
+    sm = np.zeros(21, dtype=np.float64)
+    sm[10] = 1.0                                 # 峰在 x=10
+    out = _shear_profile(sm, 5, 45.0)
+    shear = math.tan(math.radians(45.0)) * (5 / 21.0)
+    for y in range(5):
+        # out[x] = sm[x-s]：sm 的峰落在 out 的 x = 10+s（右移），y 越大移越远
+        want_peak = 10.0 + shear * (y + 0.5)
+        got_peak = float(np.argmax(out[y]))
+        assert abs(got_peak - want_peak) < 1.0, f"y={y}: 峰位 {got_peak} != {want_peak:.2f}"
+    assert float(np.argmax(out[4])) > 10.0, "az=45° 应让峰右移"
+    assert float(np.argmax(out[0])) >= 10.0, "第 0 行也只右移（半列起）"
+
+    # 端到端：高对比 footprint + 大角度，确保至少有些像素变了
+    from arcam.sprite import contact_shadow_layer
+    from arcam.placement import SpritePlacement
+    rng = np.random.default_rng(6)
+    char = np.zeros((300, 200, 4))
+    char[..., :3] = 0.6
+    char[..., 3] = (rng.random((300, 200)) > 0.02).astype(float)
+    char[:, :60, 3] = 0.0                       # 左右留空 → 轮廓有边（拖偏才看得出来）
+    char[:, 140:, 3] = 0.0
+    c = SpritePlacement(u=960.0, v=540.0, w=200.0, h=300.0, rot=0.0)
+    base = contact_shadow_layer(char, c, (0.5, 0.5, 0.5))
+    pos = contact_shadow_layer(char, c, (0.5, 0.5, 0.5), shadow_az=75.0)
+    neg = contact_shadow_layer(char, c, (0.5, 0.5, 0.5), shadow_az=-75.0)
+    assert not np.array_equal(base, pos), "az=75° 没产生拖偏"
+    assert not np.array_equal(pos, neg), "az 符号没改变拖偏方向"
+
+
+def test_shadow_opacity_scales_alpha():
+    """shadow_opacity 线性缩放浓度（2.0 ≈ 翻倍，0.5 ≈ 减半；1.0 不变）。"""
+    from arcam.sprite import contact_shadow_layer
+    from arcam.placement import SpritePlacement
+
+    rng = np.random.default_rng(8)
+    char = np.zeros((300, 200, 4))
+    char[..., :3] = 0.6
+    char[..., 3] = (rng.random((300, 200)) > 0.2).astype(float)
+    c = SpritePlacement(u=960.0, v=540.0, w=200.0, h=300.0, rot=0.0)
+    one = contact_shadow_layer(char, c, (0.5, 0.5, 0.5)).astype(np.float64)
+    half = contact_shadow_layer(char, c, (0.5, 0.5, 0.5), shadow_opacity=0.5).astype(np.float64)
+    mask = one[..., 3] > 0
+    assert mask.any()
+    # 半浓度的 alpha ≈ 原值一半（量化容 1 个字节档：floor(a·255+0.5) 在奇数值上
+    # 会差 0.5，如 3 → floor(3/2·0.5+0.5)=2 而 3/2=1.5）
+    assert np.abs(half[..., 3][mask] - one[..., 3][mask] / 2).max() <= 1.0 + 1e-9

@@ -43,6 +43,9 @@
         <span class="dz-name empty" id="photo-name">未选择</span>
       </div>
       <input type="file" id="file-photo" accept="image/*" hidden>
+      <input type="file" id="file-photos" accept="image/*" multiple hidden>
+      <!-- 批量：多选照片 → 同一立绘同一组参数 → 一个 zip（客户端合成） -->
+      <input type="file" id="file-photos" accept="image/*" multiple hidden>
 
       <div class="drop-zone" id="drop-char">
         <strong data-t="dz.char">立绘</strong>
@@ -55,9 +58,11 @@
 
       <div class="btn-row">
         <button type="button" id="btn-live" data-t="btn.live">开启相机</button>
+        <button type="button" id="btn-batch" data-t="btn.batch">批量出图</button>
         <!-- 抠图钮：仅当 window.arcamMatte 存在（matte.js 挂钩点）才显示，初始隐藏 -->
         <button type="button" id="btn-matte" hidden data-t="btn.cutAi">抠图</button>
         <button type="button" id="btn-rerender" data-t="btn.rerender">重新渲染</button>
+        <button type="button" id="btn-batch" data-t="btn.batch">批量出图…</button>
       </div>
 
       <!-- 修图线：纯色底 / 裁边 / 还原（原版折叠区，index.html:242-246） -->
@@ -80,6 +85,14 @@
           <label class="chk"><input type="checkbox" id="fx-hud-grid" checked> <span data-t="btn.grid">地面网格</span></label>
           <label class="chk"><input type="checkbox" id="fx-hud-horizon"> <span data-t="btn.horizon">地平线</span></label>
           <label class="chk"><input type="checkbox" id="fx-hud-body"> <span data-t="btn.body">人体参考</span></label>
+        </div>
+        <div class="param-row">
+          <label for="p-shadow-az-rng">阴影方位 <span class="val" id="p-shadow-az-val">0°</span></label>
+          <input type="range" id="p-shadow-az-rng" min="-75" max="75" step="5" value="0">
+        </div>
+        <div class="param-row">
+          <label for="p-shadow-op-rng">阴影浓度 <span class="val" id="p-shadow-op-val">1.00</span></label>
+          <input type="range" id="p-shadow-op-rng" min="0" max="2" step="0.05" value="1">
         </div>
         <div class="btn-row">
           <button type="button" id="btn-autofix" data-t="btn.autoFix">自动摆正</button>

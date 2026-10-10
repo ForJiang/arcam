@@ -2,6 +2,52 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.6.0] — 2026-10-11
+
+功能再扩充：LiDAR 合成器命令、阴影创作控制、网页批量出图。
+
+### 新增（CLI）
+
+- `arcam lidar sim`：按已知真值（相机高/俯角/滚转）合成深度帧——**落盘
+  `.depth` 序列 或 推给正在监听的 `arcam lidar serve`**（`--push 端口`）。
+  补全了 LiDAR 闭环：sim（合成设备）→ serve（接收）→ inspect（解出真值，
+  实测 h/pitch/roll 精确回真值）→ render --depth（合成）。`--json` 只打印
+  第一帧 meta；噪声由 (seed, index) 播种，同参同帧可复现。
+- 摆放参数组新增 `--shadow-az`（阴影光线方位角，度）与 `--shadow-opacity`
+  （浓度倍率）。
+
+### 新增（核心）
+
+- **阴影方向与浓度可调**（`compose_shot(shadow_az=, shadow_opacity=)` →
+  `contact_shadow_layer`）：`shadow_az=0` 时影子正落脚下（与原版逐位相同，
+  有回归测试钉死）；非 0 = 斜射，影子沿背光方向逐行拖偏（可分离双线性重采样
+  + 边界夹取）。原版 2D 阴影旋转对称、没有方向——这是离线侧新增的创作控制
+  （MMD 3D 路径一向有 keyAz）。`shadow_opacity` 线性缩放 SH_ALPHA。
+- 网页两侧（webui + Pages）同步：效果开关区加「阴影方位/浓度」两个滑块，
+  `normalizeParams` 白名单放行 `shadowAz/shadowOpacity`（漏放 = 滑块静默失效，
+  注释里钉住这个坑）。
+
+### 新增（网页）
+
+- **批量出图**：本机网页版「批量出图」钮——多选照片 → 每张转 dataURI →
+  `POST /api/batch` → 下载 zip（`shot_001.png …`）。单张失败不拖垮整批：
+  跳过的张数进 `X-Arcam-Batch-Failed` 头（**只放数字**——HTTP 头按 latin-1
+  编码，中文会 UnicodeEncodeError 让整个响应 500，本版本人踩过），具体原因
+  写进 zip 内的 `_errors.txt`（UTF-8）。上限 12 张/次。
+- Pages 版同钮：纯客户端逐张合成（setPhoto → composeFull → 收集）再走既有
+  的 `buildBundleZip` 打包，失败明细同样进 `_errors.txt`。
+
+### 修复
+
+- `/api/batch` 响应头混入中文导致 500（latin-1 编码限制）——见上，明细改走
+  zip 内文本。
+
+### 备注
+
+- 全套 556 → **560 passed / 1 skipped**；golden 差分 462 向量 0 失败；
+  真图修图冒烟 7 张全过；LiDAR 闭环（sim → inspect）外参精确回真值；
+  `/api/batch` 混合好坏图实测 2 ok / 1 failed 且明细正确。
+
 ## [1.5.0] — 2026-10-11
 
 全项目审计轮次（五分区并行 + 编排者集成）：修复 30+ 个问题，其中 8 个是
@@ -375,6 +421,7 @@ cli/video/matting · depth/plane/lidar/webapp · webui/Pages JS），修复 16 �
   `point(u,v,1)·depth`），与径向（cosθ）解释的仲裁结论一致，有回归测试钉住。
 - scene.json 与原版 1:1 同构（字段序/单位/toFixed 口径），未因本次审计变动。
 
+[1.6.0]: https://github.com/ForJiang/arcam/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/ForJiang/arcam/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/ForJiang/arcam/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/ForJiang/arcam/compare/v1.2.0...v1.3.0

@@ -190,6 +190,7 @@ window.ARCAM_TXT = {
   "note.batchPartial": ["批处理完成：{0}/{1} 成功，{2} 张失败", "Batch done: {0}/{1} succeeded, {2} failed"],
   "note.batchDepth": ["（深度驱动）", "(depth-driven)"],
   "note.batchFailed": ["失败", "failed"],
+  "btn.batch": ["批量出图", "Batch render"],
 };
 
 window.ARCAM_LANGS = ["zh", "en"];

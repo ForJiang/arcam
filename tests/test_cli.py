@@ -874,3 +874,52 @@ def test_render_scene_free_edge_bar_roundtrip(tmp_path, photo, char):
     frame_bottom = crop[1] + crop[3]
     assert abs(bottom - frame_bottom) < 1.0, \
         f"外接盒底边 {bottom:.2f} 没贴住裁切框底边 {frame_bottom}（rect 漏传的症状）"
+
+
+# ─────────────────────── lidar sim（v1.6.0 新命令） ───────────────────────
+
+def test_lidar_sim_writes_frames_and_roundtrips(tmp_path):
+    """sim 落盘 → inspect 解回真值（无真机时验证整条 LiDAR 链路）。"""
+    from arcam.cli import main as _main
+    out = tmp_path / "sim"
+    code = _main(["lidar", "sim", "--frames", "2", "--out", str(out),
+                  "--h", "1.45", "--pitch", "20", "--roll", "-6",
+                  "--width", "128", "--height", "96"])
+    assert code == 0
+    files = sorted(out.glob("frame_*.depth"))
+    assert len(files) == 2
+    # inspect 把真值解回来（平面拟合的闭环，容差 0.05m / 1°）
+    code = _main(["lidar", "inspect", str(files[0]), "--json"])
+    assert code == 0
+
+
+def test_lidar_sim_json_meta(tmp_path, capsys):
+    """--json 只打印第一帧 meta（内参外参齐备，不写盘）。"""
+    import io, contextlib, json as _json
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = main(["lidar", "sim", "--json", "--h", "1.7", "--pitch", "5",
+                     "--roll", "3", "--width", "64", "--height", "48"])
+    assert code == 0
+    meta = _json.loads(buf.getvalue())
+    assert meta["height_m"] == 1.7 and meta["pitch_deg"] == 5.0
+    assert meta["W"] == 64 and meta["fx"] > 0
+    assert not list(tmp_path.glob("lidar_sim_*")), "--json 不该落盘"
+
+
+def test_lidar_sim_rejects_bad_args(tmp_path, capsys):
+    """--out 与 --push 同给 / frames<1 / 尺寸过小 → 退出码 1 + 人话错误。"""
+    import io, contextlib
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert main(["lidar", "sim", "--out", str(tmp_path), "--push", "7799"]) == 1
+    assert "二选一" in err.getvalue()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert main(["lidar", "sim", "--frames", "0", "--out", str(tmp_path)]) == 1
+    assert "至少 1" in err.getvalue()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert main(["lidar", "sim", "--width", "4", "--height", "4",
+                     "--out", str(tmp_path)]) == 1
+    assert "尺寸太小" in err.getvalue()

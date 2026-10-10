@@ -119,6 +119,7 @@ PARAM_DEFAULTS: dict = {
     "shot": "全身", "char_scale": 1.0, "frame": "满幅", "rot_basis": "world",
     "mode": "ground", "size_pct": 60.0, "edge_bar": 0, "tone": False,
     "light": True, "grain": True, "shadow": True,
+    "shadow_az": 0.0, "shadow_opacity": 1.0,
     "depth_uploaded": False,
 }
 
@@ -133,6 +134,8 @@ _NUM_SPECS: dict[str, tuple[str, str | None]] = {
     "roll": ("滚转角（度，画面顺时针）", None),
     "char_scale": ("立绘倍率（只乘投影跨度）", "positive"),
     "size_pct": ("自由模式立绘占画面高度百分比", "positive"),
+    "shadow_az": ("阴影光线方位角（度，0=正落脚下）", None),
+    "shadow_opacity": ("阴影浓度倍率", "positive"),
 }
 
 #: choices 字段（与 CLI argparse 的 choices 逐字同源）
@@ -614,8 +617,43 @@ class _Render:
     rect: Rect                   # 出图裁切框（frameRect，与 CLI 同口径）
 
 
-def _compose(store: Store, params: dict, explicit: set, scale: float = 1.0) -> _Render:
+#: /api/batch 单次照片数上限（防一次吃满 64MB 请求体 + 渲染时间爆炸）
+_BATCH_MAX = 12
+
+
+def _data_uri_to_rgb01(uri, what: str) -> np.ndarray:
+    """dataURI → RGB float64 [0,1]。非 dataURI / 解不开 → ApiError 400。"""
+    import base64
+    import binascii
+    import io
+    if not isinstance(uri, str) or not uri.startswith("data:"):
+        raise ApiError(400, f"{what} 不是 dataURI",
+                       "应形如 data:image/png;base64,…（FileReader.readAsDataURL 的产物）")
+    comma = uri.find(",")
+    if comma < 0:
+        raise ApiError(400, f"{what} 的 dataURI 缺逗号分隔", "检查 dataURI 是否完整")
+    head = uri[:comma]
+    if ";base64" not in head:
+        raise ApiError(400, f"{what} 只支持 base64 dataURI", "URL 编码（非 base64）暂不支持")
+    try:
+        raw = base64.b64decode(uri[comma + 1:], validate=False)
+    except (binascii.Error, ValueError) as exc:
+        raise ApiError(400, f"{what} 的 base64 解不开：{exc}", "重新生成 dataURI 再试") from None
+    try:
+        with Image.open(io.BytesIO(raw)) as im:
+            arr = np.asarray(im.convert("RGB"), dtype=np.uint8)
+    except Exception as exc:
+        raise ApiError(400, f"{what} 不是合法图片：{type(exc).__name__}",
+                       "确认 dataURI 对应的是 PNG/JPEG 等栅格图") from None
+    return arr.astype(np.float64) / 255.0
+
+
+def _compose(store: Store, params: dict, explicit: set, scale: float = 1.0,
+             src_override: np.ndarray | None = None) -> _Render:
     """照片 + 立绘（可选深度）→ 出图/配方/环境量。
+
+    ``src_override``：批量路径逐张换照片用（/api/batch）——其余（立绘、参数、
+    深度帧）完全复用会话态，与 CLI ``arcam batch`` 一folder 一 char 同语义。
 
     与 ``arcam render`` 逐字同构（cli.cmd_render）：
 
@@ -631,7 +669,7 @@ def _compose(store: Store, params: dict, explicit: set, scale: float = 1.0) -> _
         ApiError: 没传照片 / depth_uploaded 但没有深度帧 / compose 的 ValueError。
     """
     snap = store.snapshot()
-    photo01 = snap["photo01"]
+    photo01 = src_override if src_override is not None else snap["photo01"]
     if photo01 is None:
         raise ApiError(400, "还没有上传照片",
                        "先在左栏上传背景照片（POST /api/upload，字段 photo）再渲染")
@@ -653,6 +691,7 @@ def _compose(store: Store, params: dict, explicit: set, scale: float = 1.0) -> _
               rot_basis=params["rot_basis"], tone=params["tone"],
               shadow=params["shadow"], grain=params["grain"],
               sample_light=params["light"],
+              shadow_az=params["shadow_az"], shadow_opacity=params["shadow_opacity"],
               shot=params["shot"], edge_bar=params["edge_bar"])
 
     depth = None
@@ -1068,10 +1107,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._api_trim()
             elif path == "/api/reset":
                 self._api_reset()
+            elif path == "/api/batch":
+                self._api_batch()
             else:
                 raise ApiError(404, f"未知接口 {path}",
                                "可用：POST /api/upload|render|export|matte|prep|trim|reset|"
-                               "lidar/inspect|matte-result-as-char")
+                               "batch|lidar/inspect|matte-result-as-char")
         except ApiError as exc:
             self._send_error(exc)
         except Exception as exc:                    # 兜底：不吐 traceback 给浏览器
@@ -1170,6 +1211,63 @@ class Handler(BaseHTTPRequestHandler):
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Arcam-Export": f"{target}; {elapsed:.0f}ms",
         })
+
+    def _api_batch(self) -> None:
+        """批量出图（CLI arcam batch 的 web 版；FEATURE-SPEC §7）。
+
+        JSON：``{photos: [dataURI, …], params: {…}}`` → zip（每张一个
+        ``shot_<i>.png``，STORED 不压缩、时间戳固定——与 CLI bundle 同口径，
+        同参同图逐字节可复现）。照片以 dataURI 数组进（不扩 multipart 解析：
+        parse_multipart 是同名字段覆盖的 dict，批量要多个 photo 得改它的契约）。
+        单张失败不拖垮整批：跳过的张数进 ``X-Arcam-Batch-Failed`` 头（**只放
+        数字**——HTTP 头是 latin-1，中文原因放进去会 UnicodeEncodeError 直接
+        500，v1.6 踩过），具体原因写进 zip 里的 ``_errors.txt``（UTF-8，只在
+        有失败时才加，不污染全成功的产物）。
+        """
+        data = self._read_json()
+        params, explicit, _scale = self._params_of(data)
+        photos = data.get("photos")
+        if not isinstance(photos, list) or not photos:
+            raise ApiError(400, "photos 要是非空 dataURI 数组",
+                           "photos: ['data:image/png;base64,…', …]（先经 /api/upload "
+                           "或 FileReader 转 dataURI）")
+        if len(photos) > _BATCH_MAX:
+            raise ApiError(400, f"一次最多 {_BATCH_MAX} 张（收到 {len(photos)}）",
+                           "分批处理；单张渲染不便宜，别一次塞太多")
+        snap = self._store().snapshot()
+        char01 = snap["char01"]
+        if char01 is None:
+            raise ApiError(400, "批量出图需要立绘",
+                           "先上传立绘（POST /api/upload，字段 char）")
+        started = time.perf_counter()
+        parts, failed = [], []               # failed: [(1-based 序号, 原因)]
+        with self.server.render_lock:                # type: ignore[attr-defined]
+            for i, uri in enumerate(photos):
+                try:
+                    src01 = _data_uri_to_rgb01(uri, f"第 {i + 1} 张照片")
+                except ApiError as exc:
+                    failed.append((i + 1, exc.error))
+                    continue
+                result = _compose(self._store(), params, explicit, scale=1.0,
+                                  src_override=src01)
+                parts.append((f"shot_{i + 1:03d}.png", encode_png(result.shot01)))
+        if not parts:
+            detail = "；".join(f"第 {i} 张 {why}" for i, why in failed[:3])
+            raise ApiError(400, f"一张都没出图：{detail}",
+                           "检查 photos 里的 dataURI 是否是合法图片")
+        if failed:
+            # 明细进 zip（UTF-8 文本）而不是响应头（latin-1，见 docstring）
+            lines = ["arcam batch —— 跳过的照片及原因：", ""]
+            lines += [f"  第 {i} 张：{why}" for i, why in failed]
+            parts.append(("_errors.txt", "\n".join(lines).encode("utf-8")))
+        body = _zip_bytes(parts)
+        elapsed = time.perf_counter() - started
+        headers = {"Content-Disposition": 'attachment; filename="arcam-batch.zip"',
+                   "X-Arcam-Batch": f"{len(parts) - (1 if failed else 0)} ok, "
+                                    f"{len(failed)} failed; {elapsed * 1000.0:.0f}ms"}
+        if failed:
+            headers["X-Arcam-Batch-Failed"] = str(len(failed))
+        self._send_bytes(200, body, "application/zip", headers)
 
     def _api_prep(self) -> None:
         """立绘自动修图链（FEATURE-SPEC §1；index.html:2400-2440 的 1:1 对译）。

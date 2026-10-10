@@ -45,7 +45,7 @@ def test_table_is_complete_and_bilingual():
     frame.16:9 并成对（中英同形，见下面的豁免）；其余 156 条逐字搬运。
     """
     # 156 条逐字 + 4 条改名 + 26 条新增（webui/docs 25 + CLI 1）= 186
-    assert len(TXT) == 189, f"表条数变了：{len(TXT)}"
+    assert len(TXT) == 190, f"表条数变了：{len(TXT)}"
     for k, (zh, en) in TXT.items():
         assert zh and en, f"{k} 有空白列"
         # 画幅比与"已保存"这类中英本就同形（1:1 / 4:5 / {0} {1}），不算漏翻

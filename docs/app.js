@@ -27,7 +27,8 @@ const S_DEFAULTS = {
   // 光影三开关（v1.3.0）：本地版三项都真生效（webapp → compose 的门）；
   // 网页版（docs）只有 shadow 真生效——JS 侧没有 bakeLit（v1 起环境光烘焙
   // 就是 no-op），light/grain 在那边只影响状态显示，UI 提示里写明。
-  light: true, grain: true, shadow: true
+  light: true, grain: true, shadow: true,
+  shadow_az: 0, shadow_opacity: 1.0
 };
 
 // 数字+滑块双控件的七个量；量程同本地 webui（x ±6 对应 place 的夹取范围，SPEC §3.1）。
@@ -251,7 +252,9 @@ function composeParams(p) {
     rotBasis: p.rot_basis,
     edgeBar: p.edge_bar,
     tone: !!p.tone,
-    shadow: p.shadow !== false
+    shadow: p.shadow !== false,
+    shadowAz: p.shadow_az, shadowOpacity: p.shadow_opacity,
+    shadow_az: p.shadow_az, shadow_opacity: p.shadow_opacity
   };
   if (mmdReady()) {
     kw.charDraw = draw3DInto;      // 3D 层挂钩点：替换 arcam-render.js 里的 drawInto
@@ -635,6 +638,11 @@ function init() {
 
   $('btn-matte').addEventListener('click', doMatte);
   $('btn-rerender').addEventListener('click', renderNow);
+  $('btn-batch').addEventListener('click', () => $('file-photos').click());
+  $('file-photos').addEventListener('change', (e) => {
+    doBatch(e.target.files);
+    e.target.value = '';
+  });
   $('btn-png').addEventListener('click', doExportPng);
   $('btn-layer').addEventListener('click', doExportLayer);
   $('btn-bundle').addEventListener('click', doExportBundle);
@@ -659,6 +667,7 @@ function init() {
   bindLive();
   bindFx();
   bindDrag();
+  bindBatch();
   bindFullscreen();
   if (restoreParams()) {
     syncControlsFromParams();
@@ -1114,6 +1123,8 @@ function bindFx() {
     HUD_ON.body = e.target.checked;
     drawHudOverlay();
   });
+  bindSlider('shadow_az', 'p-shadow-az-rng', 'p-shadow-az-val', (v) => v.toFixed(0) + '°');
+  bindSlider('shadow_opacity', 'p-shadow-op-rng', 'p-shadow-op-val', (v) => v.toFixed(2));
   $('btn-autofix').addEventListener('click', doAutoFix);
 }
 
@@ -1243,8 +1254,94 @@ function syncControlsFromParams() {
   $('p-size-pct-rng').value = state.params.size_pct;
   $('p-size-pct-val').textContent = state.params.size_pct.toFixed(0) + '%';
   $('p-tone').checked = !!state.params.tone;
+  $('p-shadow-az-rng').value = state.params.shadow_az;
+  $('p-shadow-az-val').textContent = state.params.shadow_az.toFixed(0) + '°';
+  $('p-shadow-op-rng').value = state.params.shadow_opacity;
+  $('p-shadow-op-val').textContent = state.params.shadow_opacity.toFixed(2);
   $('fx-shadow').checked = state.params.shadow !== false;
   syncModeVisibility();
+}
+
+
+/* ================= 11.5 批量出图（v1.6.0，客户端） ================= */
+
+//: 多选照片 → 逐张 composeShot → 一个 zip。与 CLI arcam batch 同语义；单张
+//  失败不拖垮整批（跳过，明细进 zip 里的 _errors.txt——HTTP 头是 latin-1，
+//  中文原因进头会 500，那是服务端 /api/batch 踩过的坑，客户端同理不犯）。
+async function doBatch(files) {
+  try {
+    if (!files || !files.length) return;
+    if (!state.charCanvas) throw new Error('批量出图需要立绘');
+    if (files.length > 12) throw new Error('一次最多 12 张（分批处理）');
+    setStatus('批量出图中（' + files.length + ' 张）…');
+    const p = state.params;
+    const entries = [];
+    const errors = [];
+    for (let i = 0; i < files.length; i++) {
+      try {
+        const loaded = await loadImageEl(files[i]);
+        const canvas = drawToCanvas(loaded.img, loaded.w, loaded.h);
+        if (loaded.revoke) URL.revokeObjectURL(loaded.revoke);
+        const r = await renderMod.composeShot(
+          canvas, state.charCanvas, subjOf(p),
+          camOf(p, loaded.w, loaded.h), composeParams(p));
+        const blob = await canvasToBlob(r.shot, 'image/png');
+        entries.push({ name: `shot_${String(i + 1).padStart(3, '0')}.png`,
+                       data: new Uint8Array(await blob.arrayBuffer()) });
+      } catch (e) {
+        errors.push(`  第 ${i + 1} 张：${(e && e.message) || e}`);
+      }
+    }
+    if (!entries.length) throw new Error('一张都没出图：' + errors.slice(0, 3).join('；'));
+    if (errors.length) {
+      entries.push({ name: '_errors.txt',
+                     data: new TextEncoder().encode(
+                       'arcam batch —— 跳过的照片及原因：\n\n' + errors.join('\n')) });
+    }
+    const zip = buildBundleZip(entries);
+    saveBlob(zip, 'arcam-batch.zip');
+    setStatus(`批量完成：${entries.length - (errors.length ? 1 : 0)} 张出图` +
+              (errors.length ? `，${errors.length} 张跳过（见 zip 内 _errors.txt）` : ''));
+  } catch (e) {
+    setStatus('批量失败：' + (e && e.message ? e.message : e), null, true);
+  }
+}
+
+/* ================= 11.5 批量出图（v1.6.0；纯客户端逐张合成再打包） ================= */
+
+function bindBatch() {
+  $('btn-batch').addEventListener('click', () => $('file-photos').click());
+  $('file-photos').addEventListener('change', async (e) => {
+    const files = e.target.files;
+    if (!files || !files.length) return;
+    if (!state.charCanvas) { setStatus('批量出图需要先上传立绘', null, true); return; }
+    if (files.length > 12) { setStatus(`一次最多 12 张（收到 ${files.length}）`, null, true); return; }
+    setStatus(`批量出图中（${files.length} 张）…`);
+    const parts = [];
+    const failed = [];
+    for (let i = 0; i < files.length; i++) {
+      try {
+        await setPhoto(files[i]);                     // 逐张换成当前照片
+        const r = await composeFull();                // 全尺寸重合成（同 render 路径）
+        const blob = await canvasToBlob(r.shot, 'image/png');
+        parts.push({ name: `shot_${String(i + 1).padStart(3, '0')}.png`,
+                     data: new Uint8Array(await blob.arrayBuffer()) });
+      } catch (err) {
+        failed.push(`第 ${i + 1} 张：${(err && err.message) || err}`);
+      }
+    }
+    if (!parts.length) {
+      setStatus('一张都没出图：' + failed.slice(0, 3).join('；'), null, true);
+      return;
+    }
+    if (failed.length) {
+      parts.push({ name: '_errors.txt', data: new TextEncoder().encode(failed.join('\n') + '\n') });
+    }
+    const zip = buildBundleZip(parts);
+    saveBlob(zip, 'arcam-batch.zip');
+    setStatus(`批量完成：${parts.length - (failed.length ? 1 : 0)} 张` +
+              (failed.length ? `，${failed.length} 张跳过（见 zip 内 _errors.txt）` : ''));
+  });
 }
 
 /* ================= 12. 实时相机 + HUD（FEATURE-SPEC §4/§2） ================= */

@@ -32,6 +32,8 @@
   实时浮层、CLI 侧 `arcam render --overlay` 可出图。
 - **MMD 3D 立绘**（网页版）——three.js 真透视渲染：脚踩地面、影子落地、
   俯仰跟着走；四入口导入（zip/glb/文件夹/pmx）、姿势与主光/景深可调。
+- **阴影创作控制**——方位角（斜射拖偏）与浓度倍率；默认值与原版逐位相同。
+- **批量出图**——CLI `arcam batch` 与网页「批量出图」钮（多选照片 → 一套 zip）。
 
 依赖只有 numpy + pillow（抠图/LiDAR/视频为可选 extra）。
 
@@ -90,7 +92,11 @@ arcam multi photo.jpg char1.png char2.png -o duo.png --spec "x=0.8;d=3.0;scale=0
 arcam watch photo.jpg char.png -o shot.png --pitch 12
 # 11) 项目自报：规模/测试/功能矩阵
 arcam stats
-# 12) LiDAR 环境数据：先诊断深度帧，再深度驱动出图（显式参数仍优先）
+# 12) LiDAR 合成器：没有真机也能验证整条链路（sim → serve → inspect → render）
+arcam lidar sim --frames 5 --out sim/            # 落盘 .depth 序列（真值可配）
+arcam lidar inspect sim/frame_000000.depth       # 应解回上面那组真值
+arcam lidar sim --push 7707                      # 或推给正在监听的 serve
+# 13) LiDAR 环境数据：先诊断深度帧，再深度驱动出图（显式参数仍优先）
 arcam lidar inspect scan_0001.png [--json]
 arcam render photo.jpg char.png -o shot.png --depth scan_0001.png
 ```

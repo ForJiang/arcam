@@ -2,6 +2,38 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.7.0] — 2026-10-11
+
+**3D 模型支持进入本机网页版**（此前只有 Pages 版有）——两侧现在功能对等。
+
+### 新增
+
+- 本机网页版（`src/arcam/webui/`）vendor 完整 MMD 运行时：`mmd.js`（原版 1:1 搬运）
+  + `mmd/`（three.js / GLTFLoader / TGALoader / mmdparser / three-mmd / controls /
+  shaders / poses.json，2.6MB）。index.html 加 importmap（裸模块说明符 ``three``
+  的唯一解析方式，必须在任何动态 import 之前）+ mmd.js 经典 script。
+- UI 与 Pages 版同一套：3D 开关、导入模型（.zip/.glb/文件夹/.pmx 四入口）、
+  模型列表（多 pmx 时可切换/去掉）、姿势行（4 个）、主光方位/高度/对焦/虚化
+  四滑块、3D 状态提示。
+- **分工**（Python 没有 WebGL）：后端新增 ``base_only`` 参数——3D 就绪时只出
+  **照片底**（同裁切框），WebGL 层由客户端合成。scene.json 仍记 2D 落位，客户端
+  再挂 ``mmd`` 段（与 Pages 版同字段）。
+- 3D 导出（PNG / 素材包）：客户端合成 shot.jpg + scene.json + character.png
+  （MMD 层本身就是 alpha 画布，盖回去严丝合缝）。为此把 docs 版的最小 ZIP
+  writer（crc32 + store 方式 + 1980 时间戳）同源移植进 webui。
+
+### 验证
+
+- 本机版 3D 引擎浏览器实测：`mmd.js` 加载 20 个导出、poses.json 4 个姿势、
+  点开关后 `ready: true`（three.js 动态 import + 场景构建成功）、无模型时提示
+  「还没导入模型」。
+- `base_only` 后端实测：同参两版渲染差异 616 像素（= 立绘被跳过），scene 的
+  character 段照常记录。
+- 静态门禁 `test_webui_has_mmd_3d_stack`：vendor 在位 / importmap 顺序 / UI 控件
+  / app.js 接线（base_only、drawMmdLayer、attachMmdKey、buildBundleZip）/ docs 侧
+  同源，六项全查。
+- 全套 **561 passed / 1 skipped**；golden 差分 462 向量 0 失败。
+
 ## [1.6.0] — 2026-10-11
 
 功能再扩充：LiDAR 合成器命令、阴影创作控制、网页批量出图。
@@ -421,6 +453,7 @@ cli/video/matting · depth/plane/lidar/webapp · webui/Pages JS），修复 16 �
   `point(u,v,1)·depth`），与径向（cosθ）解释的仲裁结论一致，有回归测试钉住。
 - scene.json 与原版 1:1 同构（字段序/单位/toFixed 口径），未因本次审计变动。
 
+[1.7.0]: https://github.com/ForJiang/arcam/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/ForJiang/arcam/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/ForJiang/arcam/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/ForJiang/arcam/compare/v1.3.0...v1.4.0

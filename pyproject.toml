@@ -1,6 +1,6 @@
 [project]
 name = "arcam"
-version = "1.6.0"
+version = "1.7.0"
 description = "Python 移植：让她走出屏幕 —— 透视投影立绘合成管线（投影/摆位/合成/抠图/视频）"
 requires-python = ">=3.14"
 dependencies = [
@@ -26,8 +26,16 @@ where = ["src"]
 
 # arcam web 从包内 arcam/webui/ 提供页面（WEBUI_DIR 在 webapp.py 里按
 # __file__ 解析），这些文件不进 wheel，装出来的 arcam web 就只有占位页。
+# ⚠ mmd/* 是整个 3D 运行时子目录（three.js/loaders/poses.json…）：漏了它，
+#   装态的 arcam web 点「3D 立绘」会动态 import 404（本机源码树跑得出来、
+#   装态跑不出来——这类"只在一半环境坏"的坑最难发现）。
 [tool.setuptools.package-data]
-"arcam.webui" = ["*.html", "*.js", "*.css"]
+# ⚠ mmd/ 的**子目录**也要列（mmd/*/*、mmd/*/*/*）：setuptools 的 glob 不递归，
+#   只写 mmd/* 会漏掉 libs/loaders/three-mmd/utils 里的 10 个文件——装态的
+#   「3D 立绘」动态 import 直接 404（源码树跑得出来、装态跑不出来那类坑）。
+#   实际深度两层（mmd/<dir>/<file>），第三项是余量。
+"arcam.webui" = ["*.html", "*.js", "*.css",
+                 "mmd/*", "mmd/*/*", "mmd/*/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -321,3 +321,13 @@ button:hover { background: var(--btn-bg-hover); }
 #stage:fullscreen #hud-canvas { max-width: 100vw; max-height: 100vh; }
 #stage:fullscreen #cam-video { max-width: 100vw; max-height: 100vh; }
 #stage:fullscreen .tip { bottom: 48px; }
+
+/* ---------- 3D 立绘（MMD）控件（v1.7.0；与 Pages 版同规格） ---------- */
+.d3d-row {
+  display: grid; grid-template-columns: 1fr auto; gap: 4px 10px;
+  align-items: center; margin: 8px 0; font-size: 13px;
+}
+.d3d-row label { color: var(--text); }
+.d3d-row input[type="range"] { grid-column: 1 / -1; width: 100%; }
+.d3d-row .val { color: var(--muted); font-variant-numeric: tabular-nums; }
+#model3dRow button[data-busy] { opacity: .55; pointer-events: none; }

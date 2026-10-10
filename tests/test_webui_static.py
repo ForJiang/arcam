@@ -75,7 +75,9 @@ PARAM_KEYS = ["x", "d", "h", "hp", "feq", "pitch", "roll", "shot",
               # 光影三开关（原版 LIGHT_ON/GRN/SHD；v1.3.0 接入，web 与 CLI 同语义）
               "light", "grain", "shadow",
               # 阴影方向/浓度（v1.6.0 新增创作控制，默认 = 原版行为）
-              "shadow_az", "shadow_opacity"]
+              "shadow_az", "shadow_opacity",
+              # 3D 路径（v1.7.0）：后端只出照片底，MMD 层客户端合成
+              "base_only"]
 
 # bindNumeric 动态拼 id 的七个量（'p-' + key + '-num'/'-rng'）
 NUMERIC_KEYS = ["x", "d", "h", "hp", "feq", "pitch", "roll"]
@@ -280,8 +282,9 @@ def test_html_parses_tags_balanced_ids_complete():
     # 单页骨架：预览 canvas + HUD 浮层 canvas（FEATURE-SPEC §4 的 HUD 常驻
     # 浮层，出图不带 HUD）；i18n/hud/live/app 四模块 + 一个样式表
     assert html.count("<canvas") == 2
-    # webui：i18n/hud/live/app 四模块（app.js 是普通 script）
-    assert html.count("<script") == 4
+    # webui：importmap + i18n/hud/live/md/app（app.js 普通 script；importmap 不是 src script
+    # 但也算 <script 标签，mmd.js 是 3D 运行时，v1.7.0 加入）
+    assert html.count("<script") == 6
     assert html.count('rel="stylesheet"') == 1
 
 
@@ -724,3 +727,38 @@ def test_no_python_style_comments_in_js():
                         f"{js.relative_to(ROOT)} 语法错误：{r.stderr.strip()[:200]}"
                 finally:
                     Path(tmp).unlink(missing_ok=True)
+
+
+def test_webui_has_mmd_3d_stack():
+    """本机网页版 3D 立绘栈（v1.7.0）：vendor 在位、importmap/script、UI 与接线齐全。
+
+    与 Pages 版（docs/）同源；分工差异写在这里：后端只出照片底
+    （base_only），WebGL 层客户端合成。
+    """
+    html = (WEBUI / "index.html").read_text(encoding="utf-8")
+    js = (WEBUI / "app.js").read_text(encoding="utf-8")
+    # ① vendor 文件
+    for f in ("mmd.js", "mmd/three.module.js", "mmd/poses.json"):
+        assert (WEBUI / f).is_file(), f"webui/{f} 缺失"
+    # ② importmap 必须在任何 script 之前（裸模块说明符 'three' 的唯一解析方式）
+    assert 'type="importmap"' in html
+    assert html.index('type="importmap"') < html.index('src="/static/i18n.js"')
+    assert '/static/mmd/three.module.js' in html
+    assert 'src="/static/mmd.js"' in html
+    # ③ UI 控件（与 docs 版同一套 id）
+    for cid in ("t3d", "f3d", "f3dFile", "f3dDir", "model3dRow", "pose3dRow",
+                "az3d", "el3d", "focus3d", "dof3d", "d3dLight", "d3dNote"):
+        assert f'id="{cid}"' in html, f"3D UI 缺 {cid}"
+    # ④ app.js 接线：render 带 base_only、drawMmdLayer 合成、attachMmdKey 挂配方
+    for token in ("window.ARCAM_MMD", "base_only = true", "drawMmdLayer",
+                  "attachMmdKey", "refresh3dRows", "do3DImport", "bind3D();",
+                  "buildBundleZip"):
+        assert token in js, f"app.js 缺 3D 接线 {token}"
+    # ⑤ 客户端 zip writer（3D 导出用；从 docs/app.js 同源移植）
+    assert "function crc32(" in js and "ZIP_DOS_DATE" in js
+    # ⑥ docs 侧也要有同一套（两侧同源的门禁）
+    dhtml = (DOCS / "index.html").read_text(encoding="utf-8")
+    djs = (DOCS / "app.js").read_text(encoding="utf-8")
+    assert 'src="./mmd.js"' in dhtml and 'type="importmap"' in dhtml
+    for token in ("window.ARCAM_MMD", "draw3DInto", "attachMmdKey", "bind3D();"):
+        assert token in djs, f"docs/app.js 缺 3D 接线 {token}"

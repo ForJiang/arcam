@@ -120,6 +120,7 @@ PARAM_DEFAULTS: dict = {
     "mode": "ground", "size_pct": 60.0, "edge_bar": 0, "tone": False,
     "light": True, "grain": True, "shadow": True,
     "shadow_az": 0.0, "shadow_opacity": 1.0,
+    "base_only": False,
     "depth_uploaded": False,
 }
 
@@ -147,7 +148,7 @@ _CHOICE_SPECS: dict[str, tuple] = {
     "edge_bar": (0, 1, 2, 3, 4),
 }
 
-_BOOL_FIELDS = ("tone", "light", "grain", "shadow", "depth_uploaded")
+_BOOL_FIELDS = ("tone", "light", "grain", "shadow", "base_only", "depth_uploaded")
 
 #: /api/prep 的修图步骤名。**顺序即原版 autoPrepareChar 的执行序**
 #: （index.html:2400-2440），steps 子集也按这个序跑，与整链逐字一致。
@@ -719,7 +720,13 @@ def _compose(store: Store, params: dict, explicit: set, scale: float = 1.0,
             "x": subj_eff.lateral_m})
 
     try:
-        composed = compose_shot(photo01, char01, subj, cam, **kw)
+        if params["base_only"]:
+            # 3D 路径（webui）：后端只出**照片底**（同裁切框），立绘层由客户端
+            # WebGL（mmd.js）合成——Python 侧没有 WebGL，这是唯一分工方式。
+            # scene 仍记 2D 落位（与 2D 路径同构），mmd 段由客户端挂。
+            composed = compose_shot(photo01, None, subj, cam, **kw)
+        else:
+            composed = compose_shot(photo01, char01, subj, cam, **kw)
     except ValueError as exc:
         raise ApiError(400, f"合成失败：{exc}",
                        "检查摆放参数（h/d/x/pitch/roll/feq…）与素材尺寸是否合理") from None

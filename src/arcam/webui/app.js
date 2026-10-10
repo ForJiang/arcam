@@ -25,7 +25,8 @@ var S_DEFAULTS = {
   // 网页版（docs）只有 shadow 真生效——JS 侧没有 bakeLit（v1 起环境光烘焙
   // 就是 no-op），light/grain 在那边只影响状态显示，UI 提示里写明。
   light: true, grain: true, shadow: true,
-  shadow_az: 0, shadow_opacity: 1.0
+  shadow_az: 0, shadow_opacity: 1.0,
+  base_only: false          // 内部态：3D 就绪时由 buildParams 自动带上，不进用户面板
 };
 
 // 数字+滑块双控件的七个量；量程是自定的（原版 index.html 不在本仓库），
@@ -193,6 +194,7 @@ function buildParams() {
   var out = {};
   state.touched.forEach(function (k) { out[k] = state.params[k]; });
   if (state.depthUploaded) out.depth_uploaded = true; // 由诊断状态自动带
+  if (t3dReady()) out.base_only = true;   // 3D 层客户端合成：后端别画 2D 立绘
   return out;
 }
 
@@ -266,8 +268,16 @@ async function renderNow() {
     var r = await apiJson('/api/render', { params: buildParams(), scale: previewScale() });
     if (seq !== state.renderSeq) return; // 过期响应直接丢弃
     drawDataUri(r.image);
+    if (t3dReady()) {
+      var cv = $('preview-canvas');
+      if (!drawMmdLayer(cv, cv.width, cv.height)) {
+        d3dNote(t('note.3dDrawFail', 'render 返回 0'), true);
+      } else {
+        d3dNote('');
+      }
+    }
     $('preview-empty').hidden = true;
-    showScene(r.scene);
+    showScene(attachMmdKey(r.scene, $('preview-canvas').width, $('preview-canvas').height));
     if (r.env) mergeEnv(r.env, null); // render 的 env 只有三字段，合并进完整 env
     setStatus('渲染完成', typeof r.ms === 'number' ? r.ms : performance.now() - t0);
     drawHudOverlay();                   // HUD 浮层跟着预览尺寸/参数重画
@@ -314,7 +324,75 @@ async function doLidar() {
   }
 }
 
+//: 3D 模式的导出（v1.7.0）：服务端只会出 2D，这里客户端合成。
+//  shot = 照片底（base_only 全尺寸）+ MMD 层；character.png = MMD 层本身
+//  （alpha 画布，盖回去严丝合缝——与 2D 立绘层的契约一致）。
+async function doExport3D(target) {
+  try {
+    setStatus('3D 导出中…');
+    var p = state.params;
+    var r = await apiJson('/api/render', {
+      params: buildParams(), scale: 1        // base_only 由 buildParams 自动带
+    });
+    var base = await loadImage(r.image);
+    var W = base.width, H = base.height;
+    var cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    cv.getContext('2d').drawImage(base, 0, 0);
+    if (!drawMmdLayer(cv, W, H)) {
+      throw new ApiError('3D 层渲染失败（render 返回 0）', '换张照片或检查模型是否完好');
+    }
+    var scene = attachMmdKey(r.scene, W, H);
+    if (target === 'png') {
+      var blob = await canvasToBlob(cv, 'image/png');
+      saveBlob(blob, 'arcam-3d-' + stamp() + '.png');
+      setStatus('已开始下载 arcam-3d-*.png');
+      return;
+    }
+    // bundle：shot.jpg + scene.json + character.png（MMD 层）
+    var shotBlob = await canvasToBlob(cv, 'image/jpeg', 0.95);
+    var layerBlob = await canvasToBlob(window.ARCAM_MMD.canvas(), 'image/png');
+    var parts = [
+      { name: 'shot.jpg', data: new Uint8Array(await shotBlob.arrayBuffer()) },
+      { name: 'scene.json', data: new TextEncoder().encode(JSON.stringify(scene, null, 2)) },
+      { name: 'character.png', data: new Uint8Array(await layerBlob.arrayBuffer()) }
+    ];
+    saveBlob(buildBundleZip(parts), 'arcam-bundle-' + stamp() + '.zip');
+    setStatus('已开始下载 arcam-bundle-*.zip（shot.jpg + scene.json + character.png）');
+  } catch (e) { showApiError(e); }
+}
+
+function loadImage(uri) {
+  return new Promise(function (resolve, reject) {
+    var img = new Image();
+    img.onload = function () { resolve(img); };
+    img.onerror = function () { reject(new Error('图片解码失败')); };
+    img.src = uri;
+  });
+}
+function canvasToBlob(canvas, type, quality) {
+  return new Promise(function (resolve) {
+    canvas.toBlob(function (b) { resolve(b); }, type, quality);
+  });
+}
+function saveBlob(blob, name) {
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
+}
+function stamp() {
+  var d = new Date();
+  var z = function (n) { return String(n).padStart(2, '0'); };
+  return '' + d.getFullYear() + z(d.getMonth() + 1) + z(d.getDate()) + '-' +
+         z(d.getHours()) + z(d.getMinutes()) + z(d.getSeconds());
+}
+
 async function doExport(target) {
+  if (t3dReady() && (target === 'png' || target === 'bundle')) {
+    return doExport3D(target);      // 3D 模式：客户端合成（服务端只会出 2D）
+  }
   try {
     setStatus('导出中…');
     var res = await fetch('/api/export', {
@@ -956,6 +1034,360 @@ function bindBatch() {
   });
 }
 
+/* ============ zip 最小实现（store 方式，不压缩；v1.7.0 从 docs/app.js 移植） ============
+ * pure-JS ZIP writer：手写本地文件头 + 中央目录 + EOCD，stored（method 0）。
+ * 与 CLI bundle 语义一致的三件套 shot.jpg/scene.json/character.png；
+ * 时间戳固定 1980-01-01（DOS date 0x0021），与 Python cmd_bundle 的
+ * ZIP_DATE_TIME 一致，确定性复现。CRC32 用标准表驱动实现（多项式 0xEDB88320）。
+ */
+
+const ZIP_DOS_TIME = 0;     // 00:00:00
+const ZIP_DOS_DATE = 0x21;  // 1980-01-01 = (1980-1980)<<9 | 1<<5 | 1
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) { c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); }
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) {
+    c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  }
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function buildBundleZip(files) {
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    const nameBytes = new TextEncoder().encode(f.name);
+    const crc = crc32(f.data);
+    const size = f.data.length;
+
+    // 本地文件头（30 字节固定 + 文件名）
+    const lh = new Uint8Array(30 + nameBytes.length);
+    const dv = new DataView(lh.buffer);
+    dv.setUint32(0, 0x04034b50, true);  // local file header 签名
+    dv.setUint16(4, 20, true);          // version needed to extract
+    dv.setUint16(6, 0, true);           // general purpose flags（文件名全 ASCII，不置 UTF-8 位）
+    dv.setUint16(8, 0, true);           // method 0 = stored（不压缩）
+    dv.setUint16(10, ZIP_DOS_TIME, true);
+    dv.setUint16(12, ZIP_DOS_DATE, true);
+    dv.setUint32(14, crc, true);
+    dv.setUint32(18, size, true);       // compressed = uncompressed（store）
+    dv.setUint32(22, size, true);
+    dv.setUint16(26, nameBytes.length, true);
+    dv.setUint16(28, 0, true);          // extra field 长度
+    lh.set(nameBytes, 30);
+    chunks.push(lh, f.data);
+
+    // 中央目录头（46 字节固定 + 文件名）
+    const cd = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(cd.buffer);
+    cv.setUint32(0, 0x02014b50, true);  // central directory header 签名
+    cv.setUint16(4, (3 << 8) | 20, true); // version made by（unix，同 Python zipfile on darwin）
+    cv.setUint16(6, 20, true);          // version needed
+    cv.setUint16(8, 0, true);           // flags
+    cv.setUint16(10, 0, true);          // method 0
+    cv.setUint16(12, ZIP_DOS_TIME, true);
+    cv.setUint16(14, ZIP_DOS_DATE, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, size, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true);          // extra 长度
+    cv.setUint16(32, 0, true);          // comment 长度
+    cv.setUint16(34, 0, true);          // disk number start
+    cv.setUint16(36, 0, true);          // internal attrs
+    cv.setUint32(38, (0o644 << 16) >>> 0, true); // external attrs：rw-r--r--，同 CLI
+    cv.setUint32(42, offset, true);     // 本地头相对偏移
+    cd.set(nameBytes, 46);
+    central.push(cd);
+
+    offset += lh.length + size;
+  }
+
+  const cdSize = central.reduce((s, c) => s + c.length, 0);
+  const end = new Uint8Array(22);
+  const ev = new DataView(end.buffer);
+  ev.setUint32(0, 0x06054b50, true);    // end of central directory 签名
+  ev.setUint16(4, 0, true);             // 本磁盘编号
+  ev.setUint16(6, 0, true);             // 中央目录所在磁盘
+  ev.setUint16(8, files.length, true);  // 本磁盘条目数
+  ev.setUint16(10, files.length, true); // 总条目数
+  ev.setUint32(12, cdSize, true);
+  ev.setUint32(16, offset, true);       // 中央目录偏移
+  ev.setUint16(20, 0, true);            // comment 长度
+
+  return new Blob(chunks.concat(central, [end]), { type: 'application/zip' });
+}
+
+/* ================= 7.8 MMD 3D 层（v1.7.0；与 Pages 版同源） =================
+ * 分工：后端只出**照片底**（render 带 base_only=true，同裁切框），WebGL 层由
+ * 本页 mmd.js 合成——Python 没有 WebGL，这是唯一方式。预览/导出/参数全部照旧，
+ * 3D 只是把「画 2D 立绘」换成「画 MMD 层」。
+ * 引擎未就绪/没导模型 → 全部路径给人话提示，不静默失败；渲染抛异常只记落位。
+ */
+
+state.use3D = false;
+state.pose3D = -1;
+
+function t3dReady() {
+  var M3D = window.ARCAM_MMD;
+  return !!(state.use3D && M3D && M3D.ready && M3D.srcName);
+}
+
+function d3dNote(msg, isError) {
+  var el = $('d3dNote');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.hidden = !msg;
+  el.classList.toggle('error', !!isError);
+}
+
+//: 3D 要有个占位立绘的宽高比（吸附/构图提示/scene 全在用立绘几何）。
+//   真正画的是 MMD 层，这张全透明占位图只提供宽高比（≈0.58，接近全身立绘）。
+var char3dPh = null;
+function char3dPlaceholder() {
+  if (!char3dPh) {
+    char3dPh = document.createElement('canvas');
+    char3dPh.width = 300; char3dPh.height = 520;
+  }
+  return char3dPh;
+}
+function ensurePlaceholderChar() {
+  if (state.char) return;
+  state.char = char3dPlaceholder();
+  state.charW = 300; state.charH = 520;
+}
+
+/** 3D 必须站地上：自由模式那套（贴边吸附/高度占比）对真透视模型没意义 */
+function forceGroundForMmd() {
+  if (state.params.mode !== 'free') return;
+  state.params.mode = 'ground';
+  $('p-mode').value = 'ground';
+  markTouched('mode');
+  syncModeVisibility();
+}
+
+async function d3dInitEngine() {
+  var M3D = window.ARCAM_MMD;
+  if (!M3D) { d3dNote(t('note.3dNoEngine'), true); return false; }
+  if (M3D.ready) return true;
+  d3dNote(t('note.3dLoading'));
+  var ok = false;
+  try { ok = await M3D.init(); }
+  catch (e) { d3dNote(t('note.3dFail', (e && e.message) || e), true); return false; }
+  if (!ok) { d3dNote(t('note.3dFail', M3D.error || '?'), true); return false; }
+  return true;
+}
+
+function d3dNoteOk() {
+  if (!t3dReady()) return;
+  var M3D = window.ARCAM_MMD, st = M3D.stats;
+  d3dNote(t('note.3dOk', M3D.srcName, st.tris, st.bones, st.poses));
+}
+
+/** 给 3D 当环境贴图（IBL）的照片缩略图（64×36）。本地版有实拍照片——
+ *  照片就是这片环境（与 Pages 版同源）。缓存着，照片换了才重画。 */
+var envFrameCv = null, envFrameSrc = null;
+function mmdEnvFrame() {
+  var src = state.photo;
+  if (!src) return null;
+  if (!envFrameCv) {
+    envFrameCv = document.createElement('canvas');
+    envFrameCv.width = 64; envFrameCv.height = 36;
+  }
+  if (envFrameSrc !== src) {
+    try { envFrameCv.getContext('2d').drawImage(src, 0, 0, 64, 36); }
+    catch (e) { return null; }
+    envFrameSrc = src;
+  }
+  return envFrameCv;
+}
+
+/** 把 MMD 层画到目标画布上（预览/导出共用）。返回是否真画了。 */
+function drawMmdLayer(target, W, H) {
+  var M3D = window.ARCAM_MMD;
+  if (!t3dReady()) return false;
+  var p = state.params;
+  try {
+    var ms = M3D.render({
+      W: W, H: H, f: window.arcamHud.focalPx(W, H, p.feq),
+      camH: p.h, pitch: p.pitch, roll: p.roll,
+      x: p.x, d: p.d, hp: p.hp, scale: p.char_scale,
+      pose: state.pose3D, env: null, envFrame: mmdEnvFrame()
+    });
+    if (!ms) return false;
+    var lay = M3D.canvas();
+    if (!lay) return false;
+    target.getContext('2d').drawImage(lay, 0, 0, W, H);
+    return true;
+  } catch (e) {
+    console.warn('[arcam] 3D 层渲染抛异常：', e);
+    return false;
+  }
+}
+
+/** scene.json 挂 mmd 段（与 Pages 版同字段；老字段一个不动）。 */
+function attachMmdKey(scene, W, H) {
+  if (!scene) return scene;
+  var M3D = window.ARCAM_MMD;
+  if (!t3dReady()) { scene.mmd = null; return scene; }
+  var p = state.params;
+  scene.mmd = {
+    model: M3D.srcName,
+    pose: (M3D.poseNames()[state.pose3D]) || null,
+    modelHeightM: +(M3D.modelHeight()).toFixed(4),
+    heightM: +(p.hp * p.char_scale).toFixed(4),
+    groundPoint: { lateralM: +p.x.toFixed(3), distanceM: +p.d.toFixed(3) },
+    camera: {
+      heightM: +p.h.toFixed(4), pitchDeg: +p.pitch.toFixed(3), rollDeg: +p.roll.toFixed(3),
+      focalPx: +window.arcamHud.focalPx(W, H, p.feq).toFixed(2), canvas: [W, H]
+    },
+    stats: { tris: M3D.stats.tris, bones: M3D.stats.bones, morphs: M3D.stats.morphs }
+  };
+  return scene;
+}
+
+/** 模型列表 + 姿势行（一个包里多个 pmx 时列出来；姿势来自 mmd/poses.json） */
+function refresh3dRows() {
+  var M3D = window.ARCAM_MMD;
+  var on = t3dReady();
+  $('d3dLight').hidden = !on;
+  if (!on) { $('model3dRow').hidden = true; $('pose3dRow').hidden = true; return; }
+  var names = M3D.modelNames();
+  var mrow = $('model3dRow');
+  mrow.textContent = '';
+  names.forEach(function (name, i) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = name.split(/[\/]/).pop().replace(/\.pmx$/i, '');
+    b.className = (i === M3D.modelIndex()) ? 'on' : '';
+    b.addEventListener('click', async function () {
+      if (i === M3D.modelIndex()) return;
+      b.dataset.busy = '1';
+      var ok = await M3D.switchModel(i);   // 同一份输入重建，贴图自然还是这个包里的
+      delete b.dataset.busy;
+      if (!ok) { d3dNote(t('note.3dFail', M3D.error || '?'), true); return; }
+      refresh3dRows(); d3dNoteOk(); scheduleRender();
+    });
+    mrow.appendChild(b);
+  });
+  var del = document.createElement('button');
+  del.type = 'button';
+  del.style.marginLeft = '6px';
+  del.textContent = t('btn.modelDrop');
+  del.addEventListener('click', async function () {
+    del.dataset.busy = '1';
+    var ok = await M3D.dropModel(M3D.modelIndex());
+    delete del.dataset.busy;
+    if (!ok) { d3dNote(t('note.3dAllDropped')); return; }
+    refresh3dRows(); d3dNoteOk(); scheduleRender();
+  });
+  mrow.appendChild(del);
+  $('model3dLabel').hidden = names.length < 2;
+  mrow.hidden = names.length < 2;
+  var prow = $('pose3dRow');
+  prow.textContent = '';
+  var mk = function (label, idx) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.className = (state.pose3D === idx) ? 'on' : '';
+    b.addEventListener('click', function () { state.pose3D = idx; refresh3dRows(); scheduleRender(); });
+    return b;
+  };
+  prow.appendChild(mk('静止', -1));
+  M3D.poseNames().forEach(function (name, i) { prow.appendChild(mk(name, i)); });
+  var hasPose = M3D.poseNames().length > 0;
+  $('pose3dLabel').hidden = !hasPose;
+  prow.hidden = !hasPose;
+  var prm = M3D.params;
+  if (prm) {
+    $('az3d').value = prm.keyAz;  $('oaz3d').textContent = prm.keyAz + '°';
+    $('el3d').value = prm.keyEl;  $('oel3d').textContent = prm.keyEl + '°';
+    $('dof3d').value = prm.dof;   $('odof3d').textContent = (+prm.dof).toFixed(2);
+    $('focus3d').value = state.params.d;
+    $('ofocus3d').textContent = state.params.d.toFixed(1) + 'm';
+  }
+}
+
+/** 导入模型（zip/glb/文件夹/pmx）。load 成功返 true；统计在 M3D.stats。 */
+async function do3DImport(src, pmxIdx) {
+  if (!src) return;
+  var M3D = window.ARCAM_MMD;
+  if (!M3D) { d3dNote(t('note.3dNoEngine'), true); return; }
+  d3dNote(t('note.3dLoading'));
+  try {
+    var ok = await M3D.load(src, function (frac) {
+      d3dNote(t('note.3dLoading') + ' ' + Math.round(frac * 100) + '%');
+    }, pmxIdx);
+    if (!ok) { d3dNote(t('note.3dFail', M3D.error || '未知错误'), true); return; }
+    state.use3D = true;
+    $('t3d').classList.add('on');
+    forceGroundForMmd();
+    ensurePlaceholderChar();
+    refresh3dRows();
+    d3dNoteOk();
+    scheduleRender();
+  } catch (e) {
+    d3dNote(t('note.3dFail', (e && e.message) || e), true);
+  }
+}
+
+function bind3D() {
+  $('t3d').addEventListener('click', async function () {
+    state.use3D = !state.use3D;
+    $('t3d').classList.toggle('on', state.use3D);
+    if (state.use3D) {
+      forceGroundForMmd();
+      ensurePlaceholderChar();
+      var ok = await d3dInitEngine();
+      if (ok && window.ARCAM_MMD && !window.ARCAM_MMD.srcName) d3dNote(t('note.3dNeedModel'));
+    } else {
+      d3dNote('');
+    }
+    refresh3dRows();
+    scheduleRender();
+  });
+  $('f3d').addEventListener('click', function () { $('f3dFile').click(); });
+  $('f3dFile').addEventListener('change', function (e) {
+    if (e.target.files && e.target.files[0]) do3DImport(e.target.files[0]);
+    e.target.value = '';               // 同一个文件再选一次也要能触发
+  });
+  $('f3dDirBtn').addEventListener('click', function () { $('f3dDir').click(); });
+  $('f3dDir').addEventListener('change', function (e) {
+    var files = e.target.files;
+    if (!files || !files.length) return;
+    do3DImport(files);                 // FileList 原样喂给 mmd.js（它自己挑 pmx 与贴图）
+    e.target.value = '';
+  });
+  // 3D 专属控件（az/el/focus/dof）。mmd.js 的 params getter 返回 L 对象引用——
+  // 直接改字段即生效（无 setLight）。
+  var bind3 = function (id, key, fmt) {
+    var el = $(id), out = $('o' + id);
+    el.addEventListener('input', function () {
+      var v = parseFloat(el.value);
+      if (window.ARCAM_MMD && window.ARCAM_MMD.params) window.ARCAM_MMD.params[key] = v;
+      if (out) out.textContent = fmt(v);
+      scheduleRender();
+    });
+  };
+  bind3('az3d', 'keyAz', function (v) { return v.toFixed(0) + '°'; });
+  bind3('el3d', 'keyEl', function (v) { return v.toFixed(0) + '°'; });
+  bind3('focus3d', 'focus', function (v) { return v.toFixed(1) + 'm'; });
+  bind3('dof3d', 'dof', function (v) { return v.toFixed(2); });
+}
+
 /* ================= 8. 初始化 ================= */
 
 function init() {
@@ -991,6 +1423,7 @@ function init() {
   bindLive();
   bindFx();
   bindDrag();
+  bind3D();
   bindBatch();
   bindFullscreen();
   syncModeVisibility();

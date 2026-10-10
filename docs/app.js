@@ -28,7 +28,8 @@ const S_DEFAULTS = {
   // 网页版（docs）只有 shadow 真生效——JS 侧没有 bakeLit（v1 起环境光烘焙
   // 就是 no-op），light/grain 在那边只影响状态显示，UI 提示里写明。
   light: true, grain: true, shadow: true,
-  shadow_az: 0, shadow_opacity: 1.0
+  shadow_az: 0, shadow_opacity: 1.0,
+  base_only: false          // 内部态：3D 就绪时由 buildParams 自动带上，不进用户面板
 };
 
 // 数字+滑块双控件的七个量；量程同本地 webui（x ±6 对应 place 的夹取范围，SPEC §3.1）。

@@ -6,9 +6,16 @@
 <title>AR 取景器 — arcam web</title>
 <!-- 静态资源由 webapp 的 GET /static/* 提供（WEB-SPEC §1）；零 CDN、零构建。 -->
 <link rel="stylesheet" href="/static/style.css">
+<!-- 3D 立绘运行时（MMD；普通 script，内部按需动态 import three.js）。
+     ⚠ importmap 必须在任何动态 import 之前：GLTFLoader / three-mmd 里写的是
+       `import ... from 'three'`（裸模块说明符），只有 importmap 能映射到本地文件。
+     ⚠ mmd.js 用 document.currentScript 拼资源路径，**必须经典 script**。
+       它挂 window.ARCAM_MMD，由 app.js 在 3D 面板里按需调用。 -->
+<script type="importmap">{"imports":{"three":"/static/mmd/three.module.js","three/addons/":"/static/mmd/"}}</script>
 <script src="/static/i18n.js" defer></script>
 <script src="/static/hud.js" defer></script>
 <script src="/static/live.js" defer></script>
+<script src="/static/mmd.js" defer></script>
 <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -72,6 +79,42 @@
           <button type="button" id="btn-reset" data-t="btn.reset">还原</button>
         </div>
         <p class="hint" id="edit-note"></p>
+      </details>
+
+      <!-- 3D 立绘（MMD）：真透视模型摆进画面（与 Pages 版同源；mmd.js 1:1）。
+           后端只出照片底（render 带 base_only），WebGL 层由本页合成——Python 没有
+           WebGL，这是唯一分工方式。模型不随程序分发，只有本地导入这一条路。 -->
+      <details class="fold">
+        <summary data-t="fold.3d">3D 立绘（MMD）</summary>
+        <p class="fold-tip" data-t="fold.3dTip">用真透视把 MMD 模型摆进画面：脚踩地面、影子落地、俯仰跟着走（景别不适用，模型本来就是全身）</p>
+        <div class="btn-row">
+          <button type="button" id="t3d" data-t="btn.3d">3D 立绘</button>
+          <button type="button" id="f3d" data-t="btn.3dFile">导入模型(.zip/.glb)</button>
+          <button type="button" id="f3dDirBtn" data-t="btn.3dDir">导入文件夹</button>
+        </div>
+        <!-- accept 里必须有 application/octet-stream：安卓选择器按 MIME 过滤 -->
+        <input type="file" id="f3dFile" accept=".glb,.gltf,.zip,.pmx,application/octet-stream,application/zip,model/gltf-binary" hidden>
+        <input type="file" id="f3dDir" webkitdirectory directory multiple hidden>
+        <p class="hint" data-t="hint.3dFile">收 .zip（推荐）/ .glb / 文件夹（散开的 pmx+贴图）/ 单个 .pmx（会缺贴图）</p>
+        <div class="sub" id="model3dLabel" data-t="row.model3d" hidden>模型</div>
+        <div class="btn-row" id="model3dRow" hidden></div>
+        <div class="sub" id="pose3dLabel" data-t="row.pose3d" hidden>姿势</div>
+        <div class="btn-row" id="pose3dRow" hidden></div>
+        <div id="d3dLight" hidden>
+          <div class="d3d-row"><label for="az3d" data-t="light.az">主光方位</label>
+            <input type="range" id="az3d" min="-180" max="180" step="2" value="-38">
+            <span class="val" id="oaz3d">-38°</span></div>
+          <div class="d3d-row"><label for="el3d" data-t="light.el">主光高度</label>
+            <input type="range" id="el3d" min="5" max="85" step="1" value="52">
+            <span class="val" id="oel3d">52°</span></div>
+          <div class="d3d-row"><label for="focus3d" data-t="dof.focus">对焦距离</label>
+            <input type="range" id="focus3d" min="0.5" max="20" step="0.1" value="4">
+            <span class="val" id="ofocus3d">4.0m</span></div>
+          <div class="d3d-row"><label for="dof3d" data-t="dof.amt">虚化强度</label>
+            <input type="range" id="dof3d" min="0" max="1" step="0.05" value="0.45">
+            <span class="val" id="odof3d">0.45</span></div>
+        </div>
+        <p class="hint" id="d3dNote" hidden></p>
       </details>
 
       <!-- 效果开关（原版 btn.grid/light/grain/shadow + 自动摆正） -->

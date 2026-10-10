@@ -26,7 +26,8 @@ from arcam.placement import (
     snap_to_edge,
 )
 
-F = 1275.828595201775  # focal_px(1920×1080, feq=23) = 960·23/17.3064（test_geometry 已推导）
+# 下文 docstring 里的 F = focal_px(1920×1080, feq=23) = 960·23/17.3064
+# = 1275.828595201775（推导见 test_geometry.test_focal_wide_uses_long_edge）。
 
 
 def _char(w: int = 60, h: int = 100) -> np.ndarray:
@@ -266,6 +267,19 @@ def test_current_placement_ground_kw_forwarding():
     assert c.h == pytest.approx(2.0 * 105.25585910414645, abs=1e-9)
 
 
+def test_current_placement_free_free_p_none_means_default():
+    """free_p=None = 「用默认」(0.5, 0.6)，与不传该键逐位一致（公开 API 兜底）。
+
+    对应 arcam-core.js ``freePU`` 的 ``freeP === null`` 分支；不收 None 的话会在
+    ``free_p[0]`` 上抛 TypeError。"""
+    c_none = current_placement(_char(), _subj(), _cam(), mode='free', free_p=None)
+    c_default = current_placement(_char(), _subj(), _cam(), mode='free')
+    assert c_none is not None and c_default is not None
+    assert (c_none.u, c_none.v, c_none.w, c_none.h) == \
+        pytest.approx((c_default.u, c_default.v, c_default.w, c_default.h), abs=0.0)
+    assert c_none == c_default
+
+
 # ───────────── auto_fix_x（index.html:2983-3025）─────────────
 
 def test_auto_fix_ground_already_at_half():
@@ -347,6 +361,13 @@ def test_auto_fix_free_already_and_nochar():
     assert status == 'already'
     assert auto_fix_x(None, _subj(), _cam(), mode='free', free_p=(0.2, 0.5)) == \
         pytest.approx((0.2, 'nochar'), abs=1e-12)
+
+
+def test_auto_fix_free_free_p_none_uses_default():
+    """free 分支 free_p=None → 回落默认 (0.5, 0.6)：u = 0.5·W 正中本身是候选线
+    → 'already'，new_x = 0.5（不收 None 会在 keep_x 计算处抛 TypeError）。"""
+    new_x, status = auto_fix_x(_char(), _subj(), _cam(), mode='free', free_p=None)
+    assert (new_x, status) == pytest.approx((0.5, 'already'), abs=1e-12)
 
 
 def test_auto_fix_zero_canvas():

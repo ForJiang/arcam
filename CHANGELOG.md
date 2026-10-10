@@ -2,6 +2,112 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.5.0] — 2026-10-11
+
+全项目审计轮次（五分区并行 + 编排者集成）：修复 30+ 个问题，其中 8 个是
+「开关收了但不生效」类静默失效。
+
+### 修复（按严重度）
+
+**静默失效（开关/参数/端点收了但没到达生效点）**
+- `arcam batch --depth-dir` **整批静默失效**：`load_depth` 从未 import，NameError
+  被候选循环的 `except Exception: continue` 吞掉——输出与无深度逐位相同、退出码
+  仍 0（B3-01）
+- `char-layer --no-shadow/--no-grain/--no-light` 收下不生效：手抄 kwargs 漏了
+  光影三门（B3-03）
+- `contact-sheet --tone` 无效：base_params 另抄一份 compose 开关、漏了 tone
+  （B3-04）
+- `multi --scene` 裸 traceback（读 `args.char`，multi 的位置参数叫 `args.chars`）、
+  `multi` 非满幅画幅全线广播报错（层是裁切后尺寸直接 _over 到整幅）（B3-05/06）
+- webui 修图三钮整个点不动：`state.charName/charW/charH` 从未被赋值（5 处读 0 处
+  写）→ 恒走「先选一张立绘」；HUD 也恒显示「还没选立绘」（B5 B-01）
+- kind 弹窗选的 mode/shot/size_pct/edge_bar 一个都没进请求体：applyCharKind 改
+  params 但不 markTouched，而 buildParams 只发 touched 键（B5 B-02）
+- Pages 版取景框整块不画：`window.arcamCore` 从来没挂过（arcam-core 是 module），
+  `R` 恒 null（B5 B-03）
+- `cli._placement` free 分支漏传 `rect=frame_rect(...)`：scene.json 记的落位与
+  出图不一致（吸附记不吸；1:1+edge_bar=2 实测差 48px、16:9 差 189px），波及
+  render/char-layer/bundle/multi 的 free+非满幅+edge_bar≠0（B1 F-04 + B4 X1 双报）
+- `_recipe_from_scene` 把 rot_basis=frame 反推成 world（判据写成 rotationLocked）
+  （B3-07）
+
+**其它 bug**
+- `js_round(0.49999999999999994)` 得 1、ECMA 应为 0：唯一分歧输入，全定义域对齐
+  `Math.round`（B1 F-02，代价 1.33x 慢、单渲染多 2µs）
+- `place()` 零焦距/零维画布抛 ZeroDivisionError（同模块 focal_px/project 都不抛）
+  （B1 F-01）
+- `current_placement(free_p=None)` / `auto_fix_x(free_p=None)` TypeError（kw.get
+  不把显式 None 当缺省；JS 孪生有兜底）（B1 F-03）
+- `matte_tools.lens_blur`/`_flood_solid` 用内置 `round()`（半数取偶）而非 js_round：
+  w=75/k=0.62 恰好 46.5 → 差一档、364/6000 像素变（B2-01/02，违反 SPEC §1.4 红线）
+- `tone_stats` 用 `float(f"{sc:.3f}")`（半数取偶）而非 js_to_fixed（B2-04）
+- `is_half_body` 的 h<2 门与原版 `max(0,h-2)` 不符（h==1 时原版读第 0 行）
+  （B2-03；JS 侧同问题 B-07 一并修）
+- `/api/prep` steps 类型不校验 → 500（应 400）；`{"steps":"solid"}` 文案报
+  `['s','o','l','i','d']`（B4 F1）
+- `/api/prep` 单步入口丢了整链的「<8px 回退」兜底 → 产出碎立绘（trim-only 对
+  5×5 内容返回 5×5，整链/修复后回退 20×20）（B4 F3）
+- `lidar_live._write_depth_spec` 兜底路径写 NaN 位型，权威 save_depth 写 0——
+  同一帧两条路字节不同（B4 F9）
+- `batch` 的 `camera_env_from_plane` 漏传 roll_deg，与 render/inspect/compose
+  三处结论不同（同帧 roll 差 12°）（B3-02）
+- `do_GET` 不 drain body → 带 body 的 GET 之后同连接 POST 永久损坏（501）
+  （B4 F6）
+- `docs` 触屏拖动被浏览器手势吃掉（缺 `touch-action:none`）；`.check-grid` 样式
+  漏抄；全屏后 canvas 仍受 max-height 限死（B5 B-05）
+
+**保真度（与原版逐字对译的差距）**
+- **soften/flood 两处羽化内核**：原版 flood 是盒式均值 + `(s/n)|0` 字节截断、
+  soften 是**可分离 3 抽头横竖两遍、每遍 Math.round、半径硬编码 1**（feather 值
+  只当布尔）；现码两处都是浮点盒式。实测 24×24 单块最大差 **153/255**、96/576
+  像素不同。Python 与 JS 两侧同步修复 + 手算对拍测试钉死（5×5 单像素 → 28）。
+  副作用印证：默认素材 00_半身1 的半身判定从「否」翻回「是」——原版作者说过
+  默认素材就是下沿被切的半身，修好才与原版一致
+- `_write_gif`/`lens_blur`/`tone_stats` 的 round 口径（见上）
+
+### 优化
+
+- `compose_shot` 端到端 3439ms → 2174ms（**1.58×**，bit-exact：177 组参考哈希
+  0 mismatch；`_over` 1189→118ms、`_to_float01` 137→15ms、`_alpha_from` 430→323ms、
+  `bake_lit` 132→109ms）
+- `/api/prep` 单步（trim-only，3000×1500）：3514ms → **57ms**（不再白跑整链）
+- `bake_lit` 关颗粒时不再算 lit_scale/g_amp 与两张整幅 meshgrid
+- `js_round` 0.139s → 0.186s/200 万次（1.33x，换 ECMA 全定义域一致）
+
+### 删除（死代码，必要注释全留）
+
+- webapp：`_Render.char01`/`notes` 两个写了没人读的字段、`_env_of` 里重复的
+  fit/camera_env 两行（收敛到 compose._lidar_env）、HEIC 量程预检恒假的下界条件
+- hud：`_blend`（8 行无人调用）、`_to_pil` 恒 True 的第二返回值
+- tone：`tone_stats` 算出从不使用的 `t_lo`
+- sprite：`composite_sprite` 里 `_to_float01` 已保证新数组后的冗余整幅拷贝
+- docs/mmd.js：`pmxMod`/`pmxBuilder` 死变量、`imageToTexture`+`texLoader`（65 行，
+  唯一调用方本身是死代码）、`built.official=true` 重复行、死回退 2 行（净 −107 行）
+- docs/mmd/three-mmd/materials/ 三个零 import 文件（228 行/9.5KB，删前逐文件确认
+  mmdparser/zipread/three.core/utils 都真被加载才动）
+- 测试：死绑定常量、重复建数组代码、恒真断言（`abs(x-x)<1e-12`）、未用 import
+- cli：手抄 kwargs 9 行 + base_params 6 行（统一走 _compose_kw，顺带修掉两个
+  静默失效）、`_recipe_from_scene` 恒 None 的晦涩写法、`_subcommand_names` 死条件、
+  `cmd_multi` 不可达的 nargs 校验与空块
+
+### 测试与门禁
+
+- 496 → **550 passed / 1 skipped**（+54：光影三门端到端、prep/trim/reset 三端点
+  13 例、LiDAR 闭环、placement 对拍 40 组、soften 内核手算、死状态字段守卫
+  `test_state_fields_all_written` 等）
+- golden 差分 462 向量 0 失败（worst 5.551e-17）；真图修图冒烟 7 张全过；
+  LiDAR E2E 外参精确回真值；wheel 两种模式 stats 正常
+- 新增 `test_no_python_style_comments_in_js`：JS 行首 `#` 一律红 + 有 node 就
+  对所有 JS 做真语法检查（v1.3 踩过：一行 `#` 让整个 module 加载失败）
+
+### 契约回写
+
+- WEB-SPEC §1 路由表补 `/api/prep|trim|reset` 与 `GET /healthz`（上线三个版本
+  没回写）
+- FEATURE-SPEC §1 半身判定描述修正（原写「最底下一行 + >= 8/255」，实现与原版
+  都是「倒数第二行 + >200 + >30%」）
+- AUDIT-CHARTER 增补 v1.5.0 分区表与新代码关注点
+
 ## [1.4.0] — 2026-10-11
 
 功能再扩充：三个新 CLI 命令 + 网页全屏取景与参数记忆。
@@ -269,6 +375,7 @@ cli/video/matting · depth/plane/lidar/webapp · webui/Pages JS），修复 16 �
   `point(u,v,1)·depth`），与径向（cosθ）解释的仲裁结论一致，有回归测试钉住。
 - scene.json 与原版 1:1 同构（字段序/单位/toFixed 口径），未因本次审计变动。
 
+[1.5.0]: https://github.com/ForJiang/arcam/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/ForJiang/arcam/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/ForJiang/arcam/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/ForJiang/arcam/compare/v1.1.2...v1.2.0

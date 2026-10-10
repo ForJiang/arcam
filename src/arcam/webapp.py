@@ -8,10 +8,14 @@
 
     GET  /                         单页（webui/index.html；缺失时用内置占位页）
     GET  /static/*                 webui/ 下静态文件（MIME：html/css/js/png/svg/ico…）
+    GET  /healthz                  存活探针（编排者/启动器冒烟用）
     POST /api/upload               multipart：字段 photo/char/depth
     POST /api/render               预览渲染（JSON：params + scale）
     POST /api/export               成品下载（target: png|layer|bundle）
     POST /api/matte                抠图（source: char|photo；模型缺失 → 400 带指引）
+    POST /api/prep                 立绘自动修图链（steps 子集；替换会话立绘）
+    POST /api/trim                 只裁边（修图按钮组单步入口）
+    POST /api/reset                还原到上传时的立绘
     POST /api/lidar/inspect        深度帧诊断（multipart：字段 depth）
     POST /api/matte-result-as-char 把抠图结果设为当前立绘
 
@@ -56,14 +60,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 from PIL import Image
 
-from arcam.compose import _merge_env, compose_shot
+from arcam.compose import _lidar_env, _merge_env, compose_shot
 from arcam.depth import LiDARFrame, align_to_canvas, load_depth
 from arcam.frames import frame_rect
 from arcam.geometry import Camera
 from arcam.matting import anime_cut
 from arcam.numeric import Rect
 from arcam.placement import FRAMES, SHOTS, Subject, current_placement
-from arcam.plane import CameraEnv, camera_env_from_plane, fit_ground_plane
+from arcam.plane import CameraEnv
 from arcam.scene import build_scene
 from arcam.video import encode_jpeg, encode_png
 
@@ -141,6 +145,10 @@ _CHOICE_SPECS: dict[str, tuple] = {
 }
 
 _BOOL_FIELDS = ("tone", "light", "grain", "shadow", "depth_uploaded")
+
+#: /api/prep 的修图步骤名。**顺序即原版 autoPrepareChar 的执行序**
+#: （index.html:2400-2440），steps 子集也按这个序跑，与整链逐字一致。
+_PREP_STEPS = ("solid", "trim", "soften", "blur")
 
 #: 环境量键（compose._ENV_OVERRIDE_KEYS 的 web 侧镜像）：params 里**显式出现**的键
 #: 才进 env_overrides（LIDAR-SPEC §0「显式 > 测出 > 标称」的显式端）。
@@ -468,6 +476,36 @@ def _parse_scale(raw) -> float:
     return scale
 
 
+def _prep_steps_of(data: dict) -> list[str]:
+    """解析 ``/api/prep`` 请求体的 ``steps`` → 去重且按 :data:`_PREP_STEPS` 排好序的步骤表。
+
+    - 键缺省 / ``null`` → 四步全跑（原版整链的默认行为）；
+    - 类型不对（字符串/数字/布尔/对象…）或步骤名不认 → :class:`ApiError` 400
+      带可选值清单（WEB-SPEC §1：输入不合法是用户能自己修的问题，不许掉进
+      500 兜底—— 旧实现对 ``steps: 3`` 这类输入抛 TypeError，响应体写着
+      「这是 arcam 的 bug」，把前端的错报成后端的病）；
+    - 空数组 → 400（什么都不跑却回「修图完成」是误导，要么缺省全跑要么报错）；
+    - 重复/乱序都接受：同一步只跑一次（原版每步也只执行一次）。
+    """
+    steps = data.get("steps")
+    if steps is None:
+        return list(_PREP_STEPS)
+    if isinstance(steps, str) or not isinstance(steps, (list, tuple)):
+        raise ApiError(
+            400, f"steps 应为字符串数组，得到 {type(steps).__name__}",
+            'steps 形如 ["solid","trim","soften","blur"]；不给 steps 键时四步全跑')
+    if not steps:
+        raise ApiError(400, "steps 是空的",
+                       'steps 形如 ["solid","trim","soften","blur"]；'
+                       '不给 steps 键时四步全跑')
+    bad = [s for s in steps if s not in _PREP_STEPS]
+    if bad:
+        raise ApiError(
+            400, f"steps 里有不认识的步骤 {bad}",
+            "steps 可选：solid（纯色底）/ trim（裁边）/ soften（柔边）/ blur（微糊）")
+    return [s for s in _PREP_STEPS if s in set(steps)]
+
+
 # ---------------------------------------------------------------- 图片 IO
 
 def _decode_image(data: bytes, name: str, mode: str) -> tuple[np.ndarray, bool]:
@@ -572,10 +610,8 @@ class _Render:
     shot01: np.ndarray          # uint8 (H,W,3) 出图
     scene: dict                  # build_scene 配方（与实际渲染同源）
     env: dict | None             # 深度测出的环境量（无深度 → None）
-    char01: np.ndarray | None    # 本遍实际用的立绘（可能是降采样后的）
     char_layer: np.ndarray | None
     rect: Rect                   # 出图裁切框（frameRect，与 CLI 同口径）
-    notes: dict                  # _merge_env 的 source 记录（显式/测出/标称）
 
 
 def _compose(store: Store, params: dict, explicit: set, scale: float = 1.0) -> _Render:
@@ -620,7 +656,7 @@ def _compose(store: Store, params: dict, explicit: set, scale: float = 1.0) -> _
               shot=params["shot"], edge_bar=params["edge_bar"])
 
     depth = None
-    cam_eff, subj_eff, env, notes = cam, subj, None, {}
+    cam_eff, subj_eff, env = cam, subj, None
     if params["depth_uploaded"]:
         pair = store.depth_env()                  # (帧, 环境量)：平面拟合结果有缓存
         if pair is None:
@@ -633,9 +669,9 @@ def _compose(store: Store, params: dict, explicit: set, scale: float = 1.0) -> _
         # 几何等比缩放，平面不变（Store.depth_env）
         depth = align_to_canvas(frame, int(width), int(height))
         overrides = {k: params[k] for k in _ENV_KEYS if k in explicit}
-        cam_eff, subj_eff, notes = _merge_env(cam, subj, overrides, env,
-                                              depth=depth, mode=params["mode"],
-                                              shot=params["shot"])
+        cam_eff, subj_eff, _notes = _merge_env(cam, subj, overrides, env,
+                                               depth=depth, mode=params["mode"],
+                                               shot=params["shot"])
         # 把 effective 值全量显式喂回去：compose_shot 内部再合并一次得到同一结果
         # （cli.cmd_render 同款两遍合并），scene 记的也就是这一遍实际落位的值
         kw.update(depth=depth, env_overrides={
@@ -661,8 +697,7 @@ def _compose(store: Store, params: dict, explicit: set, scale: float = 1.0) -> _
                    "pitch_deg": float(composed.env.pitch_deg),
                    "roll_deg": float(composed.env.roll_deg)}
     return _Render(shot01=composed.shot, scene=scene, env=env_out,
-                   char01=char01, char_layer=composed.char_layer,
-                   rect=composed.rect, notes=notes)
+                   char_layer=composed.char_layer, rect=composed.rect)
 
 
 def _scene_placement(char01: np.ndarray | None, subj: Subject, cam: Camera,
@@ -695,11 +730,13 @@ def _env_of(frame: LiDARFrame) -> CameraEnv:
     """深度帧 → CameraEnv（LIDAR-SPEC §4①：fit_ground_plane → camera_env_from_plane）。
 
     ARKit 给了 roll（``frame.roll_deg``）就交给 camera_env_from_plane 先反旋再解
-    pitch；点数不足等 ValueError → 400 人话。
+    pitch。实现走 :func:`arcam.compose._lidar_env`—— 「拟合 → 解环境量」这条链
+    全仓只此一份（compose/cli 也用它）：roll 透传口径曾经在 cli 的 batch 分支
+    漏过一次（同一帧解出另一组 roll/pitch），各写一份就会再漏，故这里不重复
+    推导。点数不足等 ValueError → 400 人话。
     """
     try:
-        plane = fit_ground_plane(frame)
-        return camera_env_from_plane(plane, roll_deg=frame.roll_deg)
+        return _lidar_env(frame)
     except ValueError as exc:
         raise ApiError(400, f"深度帧拟不出地面平面：{exc}",
                        "换一帧覆盖率更高的深度（有效深度比例 > 2% 才会被读入）") from None
@@ -928,7 +965,8 @@ class Handler(BaseHTTPRequestHandler):
         HTTP/1.1 同一条连接会顺序处理多条请求；某个 handler 忘了读 body 时，
         残体会拼进下一条请求行（"{}POST /api/…" → 501），把连接永久搅坏。
         这里兜底：Content-Length 已知就把剩余字节读掉；chunked 猜不出长度，
-        直接断连重开（宁慢不漏）。
+        直接断连重开（宁慢不漏）。GET 也走这条（curl ``-X GET -d`` 会带 body，
+        浏览器不会）—— 响应发完再决定读不读，所以对正常 GET 是 no-op。
         """
         if self._body_read or self.close_connection:
             return
@@ -936,6 +974,11 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         if expected <= 0:
+            return
+        if expected > MAX_UPLOAD_BYTES:
+            # 超出上传上限的残留 body：不读（读它就是在替垃圾消耗带宽/内存），
+            # 直接断连让下一条请求开新连接
+            self.close_connection = True
             return
         try:
             self._read_exact(expected)
@@ -949,6 +992,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- GET ----
 
     def do_GET(self) -> None:
+        expected = self._expected_length()
         try:
             path = urllib.parse.urlsplit(self.path).path
             if path in ("/", "/index.html"):
@@ -960,7 +1004,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 raise ApiError(404, f"未知路径 {path}",
                                "可用：GET / 、GET /static/* 、POST /api/upload|render|export|"
-                               "matte|lidar/inspect|matte-result-as-char")
+                               "matte|prep|trim|reset|lidar/inspect|matte-result-as-char")
         except ApiError as exc:
             self._send_error(exc)
         except Exception as exc:                    # 兜底：不吐 traceback 给浏览器
@@ -969,6 +1013,8 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": False,
                 "error": f"服务器内部错误（{type(exc).__name__}）：{exc}",
                 "hint": "这是 arcam 的 bug，请把操作步骤反馈给维护者"})
+        finally:
+            self._drain_body(expected)
 
     def _serve_index(self) -> None:
         index = WEBUI_DIR / "index.html"
@@ -1130,51 +1176,64 @@ class Handler(BaseHTTPRequestHandler):
 
         steps 缺省四步全跑；结果**替换会话内的立绘**（原版修图线改
         chBase/chCanvas 的同语义），后续 render 直接用它。
+
+        四步全点走 :func:`arcam.matte_tools.auto_prepare_char`（原版整链：同参
+        同序 + 「吃过头就整条回退」兜底）；只点部分步走 :meth:`_prep_subset`
+        （同序同参，没点的步跳过）。**两条路都只跑一遍**——旧实现先算整链再把
+        子集结果覆盖上去：3000×1500 立绘 steps=["trim"] 实测 HTTP 层
+        3514ms → 57ms（整链本身 ~2.4s，全白烧）。
         """
-        from arcam.matte_tools import auto_prepare_char, is_half_body
         data = self._read_json()
-        steps = data.get("steps") or ["solid", "trim", "soften", "blur"]
-        bad = [s for s in steps if s not in ("solid", "trim", "soften", "blur")]
-        if bad:
-            raise ApiError(400, f"steps 里有不认识的步骤 {bad}",
-                           "steps 可选：solid（纯色底）/ trim（裁边）/ soften（柔边）/ blur（微糊）")
+        steps = _prep_steps_of(data)
         snap = self._store().snapshot()
         char01 = snap["char01"]
         if char01 is None:
             raise ApiError(400, "还没有上传立绘，没东西可修",
                            "先上传立绘（POST /api/upload 的 char 字段）再修图")
         started = time.perf_counter()
+        from arcam.matte_tools import auto_prepare_char
         with self.server.render_lock:                # type: ignore[attr-defined]
-            prep = auto_prepare_char(char01, enabled=True)
-            # 步进式摘除：把没点的步骤从结果里剔掉（重算比"撤销"更稳）
-            if len(steps) < 4:
+            if len(steps) == len(_PREP_STEPS):
+                prep = auto_prepare_char(char01, enabled=True)
+            else:
                 prep = self._prep_subset(char01, steps)
-            half = is_half_body(prep.rgba01)
         self._store().set_char(prep.rgba01, snap["char_name"])
         self._send_json(200, {
             "ok": True,
             "image": _data_uri(encode_png(prep.rgba01)),
             "cutRatio": None if prep.cut_ratio is None else round(float(prep.cut_ratio), 4),
             "trimmed": prep.trimmed,
-            "halfBody": half,
+            # PreparedChar.half_body 就是对返回图实算的（两个构造路径都如此），
+            # 不必再扫一遍整图
+            "halfBody": prep.half_body,
             "actions": list(prep.actions),
             "ms": round((time.perf_counter() - started) * 1000.0, 3),
         })
 
     @staticmethod
     def _prep_subset(char01: np.ndarray, steps: list[str]):
-        """按 steps 子集跑修图链（顺序与原版一致，没点的步跳过）。"""
+        """按 steps 子集跑修图链（顺序与原版一致，没点的步跳过）。
+
+        与 :func:`arcam.matte_tools.auto_prepare_char` **同参同序**，收尾两条
+        规则也逐字一致（否则单步入口会比整链更容易产出碎立绘）：
+
+        - ④ blur 只在结果真变了时记 ``note.autoBlur``（整链的判据）；
+        - ⑥ 动过手（cut 或 trim）且最终内容 bbox 任一边 < 8px → 整条回退原图
+          （index.html:2435-2439 的兜底，与整链共用 matte_tools 的门限常量）。
+        """
         from arcam.matte_tools import (
-            PreparedChar, auto_trim, lens_blur, soften_edge,
+            PreparedChar, _BLUR_K, _CUT_FEATHER, _CUT_TOL, _MIN_CONTENT_SIDE,
+            _SOFTEN_ERODE, _SOFTEN_FEATHER, _flood_solid, auto_trim,
+            content_bounds, lens_blur, soften_edge,
         )
-        from arcam.matte_tools import _flood_solid, CUT_RATIO_MAX, CUT_RATIO_MIN
+        from arcam.matte_tools import CUT_RATIO_MAX, CUT_RATIO_MIN, is_half_body
         arr = char01
         cut_ratio = None
         trimmed = False
         actions: list[str] = []
         if "solid" in steps:
             try:
-                out, ratio = _flood_solid(arr, 32.0, 1.2)
+                out, ratio = _flood_solid(arr, _CUT_TOL, _CUT_FEATHER)
                 if out is not None and CUT_RATIO_MIN <= ratio <= CUT_RATIO_MAX:
                     arr = out
                     cut_ratio = ratio
@@ -1192,7 +1251,8 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         if "soften" in steps:
             try:
-                soft, changed = soften_edge(arr, erode=1, feather=2)
+                soft, changed = soften_edge(arr, erode=_SOFTEN_ERODE,
+                                            feather=_SOFTEN_FEATHER)
                 if changed:
                     arr = soft
                     actions.append("note.autoSoft")
@@ -1200,11 +1260,18 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         if "blur" in steps:
             try:
-                arr = lens_blur(arr, 0.62)
-                actions.append("note.autoBlur")
+                blurred = lens_blur(arr, _BLUR_K)
+                if not np.array_equal(blurred, arr):
+                    arr = blurred
+                    actions.append("note.autoBlur")
             except Exception:
                 pass
-        from arcam.matte_tools import is_half_body
+        # ⑥ 兜底：动过手且最终内容只剩一条缝 → 整条回退（与整链同一门限）
+        if cut_ratio is not None or trimmed:
+            bounds = content_bounds(arr)
+            if (bounds is None or bounds[2] < _MIN_CONTENT_SIDE
+                    or bounds[3] < _MIN_CONTENT_SIDE):
+                return PreparedChar(char01, None, False, is_half_body(char01), ())
         return PreparedChar(arr, cut_ratio, trimmed, is_half_body(arr),
                             tuple(actions))
 

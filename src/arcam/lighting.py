@@ -109,15 +109,23 @@ def _box_resample(src: np.ndarray, x0: float, y0: float, w: float, h: float,
 
 
 def _to_float01(img: np.ndarray, channels: int) -> np.ndarray:
-    """uint8 → float64 [0,1]；float64 原样（clip 到 [0,1]）。"""
+    """uint8 → float64 [0,1]；float64 原样（clip 到 [0,1]）。
+
+    **总是返回新数组**（走一次 ``copy=True`` + 原地 clip，比
+    ``astype`` 再 ``clip`` 少一整幅 float64 临时缓冲）。
+    """
     arr = np.asarray(img)
     if arr.dtype == np.uint8:
         if arr.ndim != 3 or arr.shape[2] != channels:
             raise ValueError(f"expected (H,W,{channels}) image, got {arr.shape}")
-        return arr.astype(np.float64) / 255.0
+        out = arr.astype(np.float64)
+        out /= 255.0
+        return out
     if arr.ndim != 3 or arr.shape[2] != channels:
         raise ValueError(f"expected (H,W,{channels}) image, got {arr.shape}")
-    return np.clip(arr.astype(np.float64), 0.0, 1.0)
+    out = np.array(arr, dtype=np.float64, copy=True)
+    np.clip(out, 0.0, 1.0, out=out)
+    return out
 
 
 # ── 采样 ───────────────────────────────────────────────────────────────
@@ -398,9 +406,12 @@ def bake_lit(char_rgba: np.ndarray, sample: LightSample | None,
     lut_r, lut_g, lut_b, _g_l, _inv, s_k = _lit_luts(
         env_lum, mean[0], mean[2], _env_sat(mean), ch_sat, ch_r, ch_b)
     h_px, w_px = src.shape[:2]
-    lit_scale = (canvas[0] / w_px) if (canvas and canvas[0] > 0 and w_px > 0) else 1.0
-    g_amp = (clampn(GRN_MAX * (1.0 - env_lum * 1.35), GRN_MIN, GRN_MAX)
-             * clampn(1.0 / lit_scale_bucket(lit_scale), 1.0, GRN_COMP_MAX))
+    # 颗粒幅度：关掉颗粒时整段算法都不算（原版 gAmp 直接置 0）
+    g_amp = 0.0
+    if grain:
+        lit_scale = (canvas[0] / w_px) if (canvas and canvas[0] > 0 and w_px > 0) else 1.0
+        g_amp = (clampn(GRN_MAX * (1.0 - env_lum * 1.35), GRN_MIN, GRN_MAX)
+                 * clampn(1.0 / lit_scale_bucket(lit_scale), 1.0, GRN_COMP_MAX))
 
     r = lut_r[src[..., 0]].astype(np.float64)
     g = lut_g[src[..., 1]].astype(np.float64)
@@ -410,10 +421,10 @@ def bake_lit(char_rgba: np.ndarray, sample: LightSample | None,
         r = y + (r - y) * s_k
         g = y + (g - y) * s_k
         b = y + (b - y) * s_k
-    if g_amp > 0.0 and grain:
+    if g_amp > 0.0:
         tile = grain_tile()
-        yy, xx = np.meshgrid(np.arange(h_px), np.arange(w_px), indexing="ij")
-        n = tile[(yy & 255), (xx & 255)]
+        # 广播索引代替 meshgrid：两块 (h,w) int64 整网在 1509×1000 上是 24 MB 白烧
+        n = tile[(np.arange(h_px)[:, None] & 255), (np.arange(w_px)[None, :] & 255)]
         n_l = n * g_amp
         n_c = n * g_amp * 0.35
         r = r + n_l

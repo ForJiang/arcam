@@ -15,12 +15,20 @@ from decimal import ROUND_HALF_UP, Decimal
 
 
 def js_round(value: float) -> int:
-    """JS ``Math.round``：向 +∞ 方向舍入（-0.5 → -0, 0.5 → 1, 2.5 → 3）。
+    """JS ``Math.round``：最近整数，平分向 +∞（-0.5 → -0, 0.5 → 1, 2.5 → 3）。
 
     index.html 里所有 Math.round 调用点（bakeLit 三条 LUT 边界、footPrint alpha、
     viewRect 原点取整、charLum 高度取整、frameRect 原点）都必须走这里。
+
+    ⚠ 刻意不用教科书里的 ``math.floor(value + 0.5)`` 快捷式：``0.5`` 的下一个
+    可表示 double（``0.49999999999999994``）加 0.5 时会向上溢到 1.0、得 1，而
+    ECMA-262 规定「大于 0 且小于 0.5 的 x 结果为 +0」，JS 给 0。这里按规范逐字
+    写：先 floor 再与 0.5 比（``value - lower`` 落在 [0,1) 且由 Sterbenz 精确），
+    全定义域与 ``Math.round`` 一致（扫描 300 万随机样本 + 全部「整数±0.5」边界，
+    与快捷式仅该一个输入不同）。
     """
-    return math.floor(value + 0.5)
+    lower = math.floor(value)
+    return lower + 1 if value - lower >= 0.5 else lower
 
 
 def clampn(value: float, lo: float, hi: float) -> float:

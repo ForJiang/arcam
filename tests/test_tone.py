@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from arcam.numeric import js_round
+from arcam.numeric import js_round, js_to_fixed
 from arcam.tone import TONE_K, tone_matched_layer, tone_stats
 
 
@@ -178,7 +178,7 @@ def _tone_ref_js(layer_u8: np.ndarray, bg_u8: np.ndarray):
     diag = {"model": [js_round(mr), js_round(mg), js_round(mb)],
             "bg": [js_round(br), js_round(bgc), js_round(bb)], "k": TONE_K,
             "kTone": k_tone, "mLo": mLo, "mHi": mHi, "bLo": bLo, "bHi": bHi,
-            "sc": float(f"{sc:.3f}"), "n": n, "bn": bn}
+            "sc": js_to_fixed(sc, 3), "n": n, "bn": bn}
     out = np.array(a, dtype=np.uint8).reshape(h, w, 4)
     return (out, diag)
 

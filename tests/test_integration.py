@@ -182,6 +182,77 @@ def test_cli_render_and_scene(tmp_path: Path):
     assert scene['camera']['pitchDeg'] == 10.0
 
 
+# ---------- 2.5 LiDAR 闭环（L1 IO → L2 平面 → compose → scene） ----------
+
+def test_lidar_closed_loop_through_disk(tmp_path: Path):
+    """深度帧走一遍**文件**闭环：合成 → ARCD 落盘 → 读回 → ``render --depth``。
+
+    三段接缝任一环口径漂了这里都会红：synth_ground_frame 的地面几何 →
+    ``save_depth``/``load_depth`` 的字节往返（内参 fp32 精确、无效区仍是 NaN）
+    → CLI 把**测出**的相机高/俯仰写进 scene.json（显式没给 → 测出 > 标称，
+    LIDAR-SPEC §0）。
+    """
+    from arcam.depth import LiDARFrame, load_depth, save_depth
+    from arcam.lidar_sim import synth_ground_frame
+
+    h, pitch, roll = 1.55, 12.0, 8.0
+    meta, depth = synth_ground_frame(h=h, pitch_deg=pitch, roll_deg=roll,
+                                     width=256, height=192)
+    frame = LiDARFrame(depth_m=depth, fx=meta["fx"], fy=meta["fy"],
+                       cx=meta["cx"], cy=meta["cy"])
+    depth_path = tmp_path / "scan.depth"
+    save_depth(frame, depth_path)
+
+    back = load_depth(depth_path)
+    # ARCD 头里内参是 f32：往返到 f32 精度（不是 f64 逐位）
+    assert (back.fx, back.fy, back.cx, back.cy) == pytest.approx(
+        (frame.fx, frame.fy, frame.cx, frame.cy), rel=1e-6)
+    assert np.array_equal(np.isnan(back.depth_m), np.isnan(frame.depth_m))
+
+    from PIL import Image
+    photo = tmp_path / "bg.jpg"
+    char = tmp_path / "char.png"
+    Image.fromarray((_make_bg(240, 320) * 255).astype("uint8")).save(photo,
+                                                                     quality=92)
+    Image.fromarray((_make_char(200, 120) * 255).astype("uint8")).save(char)
+    out = tmp_path / "shot.png"
+    scene_path = tmp_path / "scene.json"
+    rc = main(["render", str(photo), str(char), "-o", str(out),
+               "--depth", str(depth_path), "--scene", str(scene_path)])
+    assert rc == 0 and out.is_file() and scene_path.is_file()
+    scene = json.loads(scene_path.read_text(encoding="utf-8"))
+    assert scene["camera"]["heightM"] == pytest.approx(h, abs=0.05)
+    assert scene["camera"]["pitchDeg"] == pytest.approx(pitch, abs=1.5)
+    with Image.open(out) as im:
+        assert im.size == (320, 240)
+
+
+def test_cli_lighting_gates_change_output(tmp_path: Path):
+    """光影三门端到端（v1.3）：--no-shadow / --no-grain / --no-light 各自改变出图。
+
+    「门加了但某处没透传 = 静默失效」在 v1.4 踩过两次；这里从 CLI 入口钉住
+    三个开关真的到达 compose。
+    """
+    from PIL import Image
+    photo = tmp_path / "bg.jpg"
+    char = tmp_path / "char.png"
+    Image.fromarray((_make_bg() * 255).astype("uint8")).save(photo, quality=92)
+    Image.fromarray((_make_char() * 255).astype("uint8")).save(char)
+
+    def render(name: str, *extra: str) -> np.ndarray:
+        out = tmp_path / name
+        rc = main(["render", str(photo), str(char), "-o", str(out), *extra])
+        assert rc == 0 and out.is_file(), extra
+        return np.asarray(Image.open(out).convert("RGB"))
+
+    base = render("base.png")
+    for flag, name in (("--no-shadow", "no-shadow.png"),
+                       ("--no-grain", "no-grain.png"),
+                       ("--no-light", "no-light.png")):
+        assert not np.array_equal(render(name, flag), base), \
+            f"{flag} 没改变出图（门没透传？）"
+
+
 def test_cli_char_layer_and_bundle(tmp_path: Path):
     from PIL import Image
     char_path = tmp_path / 'char.png'

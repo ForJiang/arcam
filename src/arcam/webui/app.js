@@ -132,6 +132,11 @@ async function uploadFile(kind, file) {
       else setStatus('照片已上传，请继续上传立绘', r.ms);
     } else if (kind === 'char') {
       state.char = file;
+      // charName/charW/charH 是修图三钮、HUD 读数与 autoFixX 宽高比的唯一来源
+      // （漏记 = 三钮整个点不动 + HUD 永远报「还没选立绘」）
+      state.charName = file.name;
+      state.charW = r.width || 0;
+      state.charH = r.height || 0;
       setName('char-name', file.name + dims);
       // 后端用 fg 告诉这块立绘有没有 alpha：普通图提示可点抠图（不自动烧 CPU）
       if (r.fg === false) {
@@ -470,47 +475,66 @@ function initLang() {
 
 /* ================= 7.6 修图线（纯色底/裁边/还原 + kind 弹窗 + tip） ================= */
 
+// showTip(key, ...args)：多余参数原样透传给 t()（note.chLoaded/note.trimmed
+// 这类带 {0} 占位符的文案，不传参就会在提示条上显示裸 {0}）
 function showTip(key) {
   var el = $('tip');
   if (!el) return;
-  el.textContent = window.arcamT ? window.arcamT(key) : key;
+  el.textContent = window.arcamT ? window.arcamT.apply(null, arguments) : key;
   el.hidden = false;
   clearTimeout(showTip._t);
   showTip._t = setTimeout(function () { el.hidden = true; }, 3600);   // 原版 TIP_MS
 }
 
+// dataURI → 尺寸（修图后立绘换了尺寸，本地记录的 charW/charH 要跟着更新）
+function imageDims(uri) {
+  return new Promise(function (resolve) {
+    var img = new Image();
+    img.onload = function () { resolve({ w: img.naturalWidth, h: img.naturalHeight }); };
+    img.onerror = function () { resolve(null); };
+    img.src = uri;
+  });
+}
+
 async function doCutSolid() {
-  if (!state.charName) { showTip('note.chNone'); return; }
+  if (!state.char) { showTip('note.chNone'); return; }
   setStatus('修图中…');
   try {
     var r = await apiJson('/api/prep', { steps: ['solid', 'trim', 'soften', 'blur'] });
     if (r.ok) {
-      state.charName = state.charName;          // 名字不变（还是那张立绘）
+      // 后端已把处理后的立绘替换进会话；刷新本地尺寸（提示条与 autoFixX 宽高比都用它）
+      var dims = await imageDims(r.image);
+      if (dims && dims.w && dims.h) { state.charW = dims.w; state.charH = dims.h; }
       showEditNote(r);
-      showTip('note.chLoaded');
+      showTip('note.chLoaded', state.charName, state.charW, state.charH);
       scheduleRender();
     }
   } catch (e) { showApiError(e); }
 }
 
 async function doTrim() {
-  if (!state.charName) { showTip('note.chNone'); return; }
+  if (!state.char) { showTip('note.chNone'); return; }
   setStatus('裁边中…');
+  var w0 = state.charW, h0 = state.charH;
   try {
     var r = await apiJson('/api/trim', {});
     if (r.ok) {
-      showEditNote({ trimmed: true, rect: r.rect, actions: ['note.autoTrim'] });
-      showTip('note.trimmed');
+      // rect = [x, y, w, h]（/api/trim 的返回口径）
+      if (r.rect && r.rect.length >= 4) { state.charW = r.rect[2]; state.charH = r.rect[3]; }
+      showEditNote({ actions: ['note.autoTrim'] });
+      showTip('note.trimmed', w0, h0, state.charW, state.charH);
       scheduleRender();
     }
   } catch (e) { showApiError(e); }
 }
 
 async function doReset() {
-  if (!state.charName) { showTip('note.chNone'); return; }
+  if (!state.char) { showTip('note.chNone'); return; }
   try {
     var r = await apiJson('/api/reset', {});
     if (r.ok) {
+      // /api/reset 直接带还原图的尺寸（原图的宽高比可能和修过的那张不同）
+      if (r.width && r.height) { state.charW = r.width; state.charH = r.height; }
       showEditNote({ actions: [] });
       showTip('note.chReset');
       scheduleRender();
@@ -541,11 +565,15 @@ function hideKind() {
   if (el) el.hidden = true;
 }
 
+// ⚠ 这里直接改 state.params，必须逐个 markTouched：buildParams 只发「动过的键」，
+//   漏标记 = 弹窗选完界面变了、请求体还是旧值（后端按默认 ground/全身渲）——
+//   静默失效。docs 版没有 touched 机制，那边不受影响。
 function applyCharKind(half) {
   if (half) {
     state.params.mode = 'free';
     state.params.size_pct = 60;
     state.params.edge_bar = 2;                 // 切口贴下边（原版 kind.doneHalf）
+    markTouched('mode'); markTouched('size_pct'); markTouched('edge_bar');
     $('p-mode').value = 'free';
     $('p-size-pct-rng').value = 60;
     $('p-size-pct-val').textContent = '60%';
@@ -553,6 +581,7 @@ function applyCharKind(half) {
   } else {
     state.params.mode = 'ground';
     state.params.shot = '全身';
+    markTouched('mode'); markTouched('shot');
     $('p-mode').value = 'ground';
     $('p-shot').value = '全身';
   }
@@ -583,7 +612,7 @@ function bindLive() {
     cv.toBlob(function (blob) {
       if (!blob) { showTip('note.shotFail'); return; }
       handleFile('photo', new File([blob], 'camera.png', { type: 'image/png' }));
-      showTip('note.chLoaded');
+      showTip('note.chLoaded', 'camera.png', cv.width, cv.height);
     }, 'image/png');
   });
   // 传感器 → 摆放参数（pitch/roll 实时跟上，300ms 防抖渲染不受影响：
@@ -597,6 +626,13 @@ function bindLive() {
     $('p-roll-rng').value = state.params.roll;
     markTouched('pitch'); markTouched('roll');
     scheduleRender();
+  };
+  // 相机开启后 fit() 会把预览/HUD 画布改成视频尺寸：HUD 浮层要按新尺寸重画
+  // （不包这一层，桌面端无传感器时 HUD 会停在 16×9 的初始尺寸上，docs 侧同款）
+  var origFit = window.arcamLive.fit;
+  window.arcamLive.fit = function () {
+    origFit();
+    drawHudOverlay();
   };
 }
 

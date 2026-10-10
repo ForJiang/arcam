@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from arcam.cli import CliError, main
+from arcam.cli import main
 from arcam.video import PoseKey, PoseTrack, save_track
 
 SRC = Path(__file__).resolve().parent.parent / "src"
@@ -147,6 +147,22 @@ def test_char_layer_honors_shot_and_rot_basis(tmp_path: Path, char: Path) -> Non
     rolled_frame = _char_layer(tmp_path, char, "frame",
                                ["--roll", "20", "--rot-basis", "frame"])
     assert not np.array_equal(rolled_world, rolled_frame)
+
+
+def test_char_layer_honors_lighting_gates(tmp_path: Path, char: Path) -> None:
+    """光影三门在 char-layer 上也要生效（曾整组漏传：--no-shadow 层里照画阴影）。
+
+    层里那团接触阴影是半透明像素（0<alpha<255）；--no-shadow 后它们必须消失。
+    """
+    with_shadow = _char_layer(tmp_path, char, "g_shadow", [])
+    no_shadow = _char_layer(tmp_path, char, "g_noshadow", ["--no-shadow"])
+    assert not np.array_equal(with_shadow, no_shadow)
+    semi_on = int(((with_shadow[..., 3] > 0) & (with_shadow[..., 3] < 255)).sum())
+    semi_off = int(((no_shadow[..., 3] > 0) & (no_shadow[..., 3] < 255)).sum())
+    assert semi_on > 0, "层里本该有半透明阴影"
+    assert semi_off < semi_on, "--no-shadow 没抠掉阴影"
+    # 立绘本体（不透明像素）一个都不该被 --no-shadow 动到
+    assert int((no_shadow[..., 3] == 255).sum()) == int((with_shadow[..., 3] == 255).sum())
 
 
 def test_bundle_three_files(tmp_path: Path, photo: Path, char: Path) -> None:
@@ -444,6 +460,82 @@ def test_batch_empty_dir_errors(tmp_path, char, capsys):
     assert "没有图片文件" in capsys.readouterr().err
 
 
+def _depth_frame(tmp_path, name: str, *, geom_roll: float, meta_roll: float):
+    """落一盘 .depth：几何按 geom_roll 生成、meta（ARKit）写 meta_roll。
+
+    两者不一致正是真机里"IMU 与拟合地面不一致"的情形——两条 CLI 路径必须都按
+    meta 的 roll 反旋解 pitch（LIDAR-SPEC §3）。
+    """
+    from arcam.depth import LiDARFrame, save_depth
+    from arcam.lidar_sim import synth_ground_frame
+    meta, depth = synth_ground_frame(h=1.6, pitch_deg=10.0, roll_deg=geom_roll,
+                                     width=128, height=96, index=5)
+    frame = LiDARFrame(depth_m=depth, fx=meta["fx"], fy=meta["fy"],
+                       cx=meta["cx"], cy=meta["cy"], roll_deg=meta_roll,
+                       pitch_deg=meta["pitch_deg"], height_m=meta["height_m"],
+                       source="test")
+    p = tmp_path / name
+    save_depth(frame, p)
+    return p
+
+
+def test_batch_depth_dir_drives_render(tmp_path, char, capsys):
+    """--depth-dir 必须真的驱动渲染（曾整批静默失效：load_depth 没 import，
+    NameError 被候选循环的宽 except 吞掉 → 每张都退回无深度，退出码还是 0）。"""
+    src = tmp_path / "photos"
+    src.mkdir()
+    _make_photo(src / "p0.jpg", seed=0)
+    depths = tmp_path / "depths"
+    depths.mkdir()
+    _depth_frame(depths, "p0.depth", geom_roll=8.0, meta_roll=8.0)
+    plain = tmp_path / "out_plain"
+    deep = tmp_path / "out_deep"
+    assert main(["batch", str(src), str(char), "-o", str(plain)]) == 0
+    assert main(["batch", str(src), str(char), "-o", str(deep),
+                 "--depth-dir", str(depths)]) == 0
+    out = capsys.readouterr().out
+    assert "（深度驱动）" in out, "--depth-dir 没有走深度路径"
+    a = np.asarray(Image.open(deep / "shot_p0.png").convert("RGB")).astype(int)
+    b = np.asarray(Image.open(plain / "shot_p0.png").convert("RGB")).astype(int)
+    assert int((np.abs(a - b).sum(2) > 0).sum()) > 100, "深度没有改变落位"
+
+
+def test_batch_depth_matches_render_depth(tmp_path, char, capsys):
+    """batch --depth-dir 与 render --depth 对同一帧必须逐位一致（roll 口径）。
+
+    复现过的偏差：batch 漏传 roll_deg 给 camera_env_from_plane，同一帧解出
+    roll=拟合值（20°）而不是 ARKit 上报值（8°），与 render 结论不同。
+    """
+    src = tmp_path / "photos"
+    src.mkdir()
+    _make_photo(src / "p0.jpg", seed=0)
+    depths = tmp_path / "depths"
+    depths.mkdir()
+    frame = _depth_frame(depths, "p0.depth", geom_roll=20.0, meta_roll=8.0)
+    out = tmp_path / "out"
+    assert main(["batch", str(src), str(char), "-o", str(out),
+                 "--depth-dir", str(depths)]) == 0
+    via_render = tmp_path / "render.png"
+    assert main(["render", str(src / "p0.jpg"), str(char), "-o", str(via_render),
+                 "--depth", str(frame)]) == 0
+    a = np.asarray(Image.open(out / "shot_p0.png").convert("RGB"))
+    b = np.asarray(Image.open(via_render).convert("RGB"))
+    assert np.array_equal(a, b), "batch 与 render 的深度口径不一致"
+
+
+def test_batch_reports_failure_exit_code(tmp_path, char, capsys):
+    """一张读不出来的照片：只记一条、其余照跑，退出码 1（单张失败不整批挂）。"""
+    src = tmp_path / "photos"
+    src.mkdir()
+    _make_photo(src / "ok.jpg", seed=1)
+    (src / "broken.jpg").write_bytes(b"not an image at all")
+    out = tmp_path / "out"
+    assert main(["batch", str(src), str(char), "-o", str(out)]) == 1
+    assert (out / "shot_ok.png").is_file()
+    err = capsys.readouterr().out
+    assert "1/2 成功" in err and "失败" in err
+
+
 def test_recipe_roundtrip(tmp_path, monkeypatch):
     """recipe save/list/show/apply 四动作闭环；--set 可临时覆盖。"""
     monkeypatch.setenv("ARCAM_RECIPES", str(tmp_path / "recipes"))
@@ -479,6 +571,38 @@ def test_recipe_from_scene(tmp_path, monkeypatch, photo, char):
     assert data["params"]["frame"] == "4:5"
 
 
+def test_recipe_from_scene_rot_basis(tmp_path, monkeypatch, photo, char):
+    """scene.json 不记 rotBasis：只有 roll≠0 时可判定（frame 基准下旋转恒 0）。
+
+    旧实现要求 rotationLocked（= 吸附锁 0）才认 frame，于是
+    ``--rot-basis frame --roll 25`` 存出来的配方被反推成 world —— 套回去
+    roll≠0 时旋转就变了。现在按"旋转 0 + roll≠0"判定（两种模式都成立：
+    world 基准下 rotationDeg 必等于 roll，吸附锁 0 与基准无关）。
+    """
+    monkeypatch.setenv("ARCAM_RECIPES", str(tmp_path / "recipes"))
+    import arcam.cli as cli
+    monkeypatch.setattr(cli, "RECIPE_ROOT", tmp_path / "recipes")
+
+    def saved_params(extra: list[str]) -> dict:
+        scene = tmp_path / "s.json"
+        assert main(["render", str(photo), str(char), "-o", str(tmp_path / "o.png"),
+                     "--scene", str(scene)] + extra) == 0
+        assert main(["recipe", "save", "r", "--from", str(scene)]) == 0
+        return json.loads(
+            (tmp_path / "recipes" / "r.json").read_text(encoding="utf-8"))["params"]
+
+    for mode in (["--mode", "free"], []):
+        frame_params = saved_params(mode + ["--rot-basis", "frame", "--roll", "25"])
+        assert frame_params["rot_basis"] == "frame", mode
+        world_params = saved_params(mode + ["--rot-basis", "world", "--roll", "25"])
+        assert world_params["rot_basis"] == "world", mode
+        # roll=0 时两种基准渲染逐位相同 → 只能回落 world（配方不带这一项也无歧义）
+        flat = saved_params(mode + ["--rot-basis", "frame"])
+        assert flat.get("rot_basis", "world") == "world", mode
+    # scene.json 没有 sizePct 字段可提 → 配方里就不该有 size_pct
+    assert "size_pct" not in frame_params
+
+
 def test_contact_sheet_grid(tmp_path, photo, char):
     """contact-sheet：笛卡尔积逐格渲染 + 拼图（格间互异）。"""
     out = tmp_path / "sheet.png"
@@ -504,6 +628,27 @@ def test_contact_sheet_rejects_over_wide(tmp_path, photo, char, capsys):
                  "--vary", "d=1,2,3,4,5,6", "--vary", "pitch=0,10,20,30,40"])
     assert code == 1
     assert "超过上限" in capsys.readouterr().err
+
+
+def test_contact_sheet_tone_takes_effect(tmp_path, photo, char):
+    """--tone 必须进 compose_shot（曾静默失效：基准参数另抄一份、漏了 tone 键）。"""
+    base = tmp_path / "cs_base.png"
+    toned = tmp_path / "cs_tone.png"
+    assert main(["contact-sheet", str(photo), str(char), "-o", str(base),
+                 "--vary", "d=3,4", "--cell-w", "120"]) == 0
+    assert main(["contact-sheet", str(photo), str(char), "-o", str(toned),
+                 "--vary", "d=3,4", "--cell-w", "120", "--tone"]) == 0
+    a = np.asarray(Image.open(base).convert("RGB")).astype(int)
+    b = np.asarray(Image.open(toned).convert("RGB")).astype(int)
+    assert int((np.abs(a - b).sum(2) > 0).sum()) > 100, "--tone 没生效"
+
+
+def test_contact_sheet_rejects_duplicate_axis(tmp_path, photo, char, capsys):
+    """同一参数扫两轴：后轴覆写前轴、格子成倍重复 → 人话报错退出 1。"""
+    code = main(["contact-sheet", str(photo), str(char), "-o", str(tmp_path / "s.png"),
+                 "--vary", "d=3,4", "--vary", "d=5,6"])
+    assert code == 1
+    assert "给了两次" in capsys.readouterr().err
 
 
 def test_video_gif_export(tmp_path, photo, char, capsys):
@@ -589,6 +734,57 @@ def test_multi_spec_validation(tmp_path, photo, char):
     assert "不认识" in err.getvalue()
 
 
+def test_multi_spec_size_pct_override(tmp_path, photo, char):
+    """spec 里的 size_pct 要真的传到 compose（第二张立绘的开关不能只是收下）。
+
+    ⚠ spec 也收 tone，但 --tone 与它一样只在照片路径生效（原版 TONE_ON=!!src，
+    index.html:3690；多立绘走的是立绘层路径）——这里用自由模式的 size_pct 验通路。
+    """
+    def render(spec: str, tag: str) -> np.ndarray:
+        out = tmp_path / f"m_{tag}.png"
+        assert main(["multi", str(photo), str(char), str(char), "-o", str(out),
+                     "--mode", "free", "--spec", spec]) == 0
+        return np.asarray(Image.open(out).convert("RGB")).astype(int)
+
+    big = render("x=1.2;d=3.0;mode=free;size_pct=80", "big")
+    small = render("x=1.2;d=3.0;mode=free;size_pct=30", "small")
+    assert int((np.abs(big - small).sum(2) > 0).sum()) > 100, "spec 的 size_pct 没生效"
+
+
+def test_multi_scene_records_first_char(tmp_path, photo, char):
+    """multi --scene：scene.json 记第一张立绘的落位（曾 AttributeError 崩掉）。
+
+    multi 的位置参数叫 ``chars``，_scene_dict 原来直接读 ``args.char``——
+    v1.5 审计真跑时崩出 traceback；现在 char_name 由调用方显式传入。
+    """
+    out = tmp_path / "multi.png"
+    scene = tmp_path / "multi_scene.json"
+    code = main(["multi", str(photo), str(char), str(char), "-o", str(out),
+                 "--spec", "x=1.0;d=3.2", "--scene", str(scene), "--pitch", "12"])
+    assert code == 0 and scene.is_file()
+    data = json.loads(scene.read_text(encoding="utf-8"))
+    assert data["character"]["name"] == char.name
+    assert data["camera"]["pitchDeg"] == 12.0
+
+
+def test_multi_non_full_frame(tmp_path, photo, char):
+    """非满幅画幅：每层的尺寸是**裁切后**的 off 画布，必须按 R.x/R.y 贴回整幅。
+
+    曾直接 _over(整幅照片, 裁切层) → numpy 广播报错（4:5 下 128×96 vs 77×96），
+    整个命令在非满幅下不可用；且错误信息是 numpy 内部形状，不是人话。
+    """
+    out = tmp_path / "multi_45.png"
+    assert main(["multi", str(photo), str(char), str(char), "-o", str(out),
+                 "--frame", "4:5", "--pitch", "10"]) == 0
+    with Image.open(photo) as im:
+        photo_size = im.size
+    with Image.open(out) as im:
+        assert im.size == photo_size, "输出应是整幅照片尺寸（画幅只决定取景框）"
+    a = np.asarray(Image.open(out).convert("RGB")).astype(int)
+    b = np.asarray(Image.open(photo).convert("RGB")).astype(int)
+    assert int((np.abs(a - b).sum(2) > 12).sum()) > 100, "立绘没有叠上去"
+
+
 def test_stats_reports_project(tmp_path, capsys):
     """stats：规模/子命令/语言表条数都在（子命令集合与 parser 一致）。"""
     code = main(["stats"])
@@ -604,3 +800,77 @@ def test_stats_reports_project(tmp_path, capsys):
     data = _json.loads(buf.getvalue())
     assert data["subcommands"] and "multi" in data["subcommands"]
     assert data["i18n_entries"] > 150
+
+
+def test_cli_placement_matches_compose_free_rect(tmp_path, photo, char):
+    """cli._placement 与渲染链 compose._placement 必须同参（scene.json 才记得对）。
+
+    v1.5 审计回归钉：cli free 分支曾漏传 rect=frame_rect(...)，导致 free + 非满幅
+    + edge_bar≠0 时 scene.json 记的落位与出图不一致（吸附记不吸；1:1+edge_bar=2
+    实测差 48px）。这里对四种画幅 × 四个 edge_bar 全量对拍。
+    """
+    from arcam.cli import _placement as cli_placement
+    from arcam.video import image_to_rgb01, image_to_rgba01
+    from arcam.compose import _placement as compose_placement
+    from arcam.frames import frame_rect
+    from arcam.geometry import Camera
+    from arcam.placement import Subject
+
+    src01 = image_to_rgb01(photo)
+    char01 = image_to_rgba01(char)
+    height, width = src01.shape[:2]
+    for frame in ("满幅", "1:1", "4:5", "16:9"):
+        for edge_bar in (0, 1, 2, 3, 4):
+            for rot_basis in ("world", "frame"):
+                cam = Camera(width, height, 1.6, 23.0, 10.0, -8.0)
+                subj = Subject(1.65, 4.0, 0.2)
+                rect = frame_rect(frame, width, height)
+
+                class _A:
+                    pass
+                a = _A()
+                a.mode, a.size_pct, a.edge_bar = "free", 55.0, edge_bar
+                a.rot_basis, a.frame = rot_basis, frame
+                a.char_scale, a.shot = 1.0, "全身"
+                got = cli_placement(char01, subj, cam, a)
+                want = compose_placement(char01, subj, cam, mode="free",
+                                         size_pct=55.0, char_scale=1.0,
+                                         rot_basis=rot_basis, shot="全身",
+                                         edge_bar=edge_bar, rect=rect)
+                if want is None:
+                    assert got is None, f"{frame}/bar{edge_bar}/{rot_basis}"
+                    continue
+                assert got is not None, f"{frame}/bar{edge_bar}/{rot_basis}"
+                assert (round(got.u, 9), round(got.v, 9), round(got.w, 9),
+                        round(got.h, 9), round(got.rot, 9)) == \
+                       (round(want.u, 9), round(want.v, 9), round(want.w, 9),
+                        round(want.h, 9), round(want.rot, 9)), \
+                       f"{frame}/bar{edge_bar}/{rot_basis}: cli 记的落位与渲染不符"
+
+
+def test_render_scene_free_edge_bar_roundtrip(tmp_path, photo, char):
+    """端到端：free + 非满幅 + edge_bar 的 scene.json 与出图一致（吸附真实生效）。"""
+    out = tmp_path / "s.png"
+    scene = tmp_path / "s.json"
+    code = main(["render", str(photo), str(char), "-o", str(out), "--scene", str(scene),
+                 "--mode", "free", "--frame", "1:1", "--edge-bar", "2",
+                 "--size-pct", "55", "--roll", "-8"])
+    assert code == 0
+    data = json.loads(scene.read_text(encoding="utf-8"))
+    ch = data["character"]
+    # 测试照片是 128×160：1:1 画幅 → 裁切框 128×128、y=(160-128)/2=16；
+    # edge_bar=2（下沿）吸附后图心 v 应落在框下沿附近（而非未吸附时的框中心 80）
+    crop = data["frame"]["crop"]
+    assert crop[2] == 128 and crop[3] == 128, crop
+    # 语义不变量（不复算 snap 公式）：**旋转后外接盒的底边贴住裁切框底边**。
+    # 直接用记录的 w/h/rotationDeg 反推外接盒——rect 漏传时吸附整个不生效，
+    # 底边会停在未吸附位置（差几十 px），这个断言抓得住。
+    import math
+    w, h = ch["sizePixel"]
+    rot = math.radians(ch["rotationDeg"])
+    bh = w * abs(math.sin(rot)) + h * abs(math.cos(rot))
+    v = ch["centerPixel"][1]
+    bottom = v + bh / 2
+    frame_bottom = crop[1] + crop[3]
+    assert abs(bottom - frame_bottom) < 1.0, \
+        f"外接盒底边 {bottom:.2f} 没贴住裁切框底边 {frame_bottom}（rect 漏传的症状）"

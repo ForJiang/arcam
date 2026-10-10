@@ -26,6 +26,7 @@ def main(argv: list[str] | None = None) -> int      # 'arcam web' 子命令入�
 | 方法/路径 | 作用 | 请求 | 响应 |
 |---|---|---|---|
 | `GET /` | 单页 | — | `webui/index.html`（正确 MIME） |
+| `GET /healthz` | 存活探针 | — | `{ok:true}`（200） |
 | `GET /static/*` | 静态 | — | `webui/` 下文件 |
 | `POST /api/upload` | 上传照片/立绘/深度 | multipart：字段 `photo`/`char`/`depth` | `{ok, kind, width, height, fg?}`；坏图/超大（>64MB）→ 400 `{ok:false,error}` |
 | `POST /api/render` | 预览渲染 | JSON：`{params}`（§2 schema）+ `{scale:≤1}` | `{ok, image:"data:image/png;base64,...", scene:{...}, env:{...}\|null, ms}` |
@@ -33,6 +34,9 @@ def main(argv: list[str] | None = None) -> int      # 'arcam web' 子命令入�
 | `POST /api/matte` | 抠图 | JSON：`{source:"char"\|"photo"}` | `{ok, image:dataURI, fg, ms}`；模型缺失 → `{ok:false,error:"…下载指引…"}`（不 500） |
 | `POST /api/lidar/inspect` | 深度诊断 | multipart：字段 `depth` | `{ok, env:{height_m,pitch_deg,roll_deg,coverage,inliers,rms}, frame:{width,height}}`；随后 `/api/render` 可用 `params.depth_uploaded=true` 走深度驱动 |
 | `POST /api/matte-result-as-char` | 把抠图结果设为当前立绘 | JSON：`{}` | `{ok}` |
+| `POST /api/prep` | 立绘自动修图链 | JSON：`{target:"char", steps?:["solid","trim","soften","blur"]}` | `{ok, image:dataURI, cutRatio, trimmed, halfBody, actions:[i18n key], ms}`；steps 缺省四步全跑；类型不对/步骤名不认识/空数组 → 400 带可选值清单（v1.2 上线，v1.5 补契约） |
+| `POST /api/trim` | 只裁边（修图按钮组单步入口） | JSON：`{}` | `{ok, image:dataURI, rect:[x,y,w,h], trimmed:true}`；没有透明边距或内容 <4px → 400（v1.2 上线，v1.5 补契约） |
+| `POST /api/reset` | 还原到上传时的立绘 | JSON：`{}` | `{ok, image:dataURI, width, height}`；没上传过 → 400（v1.2 上线，v1.5 补契约） |
 
 硬规则：
 - 所有异常收敛为 JSON `{ok:false,error, hint?}`，**绝不给浏览器吐 traceback**；

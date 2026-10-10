@@ -147,6 +147,20 @@ def test_is_half_body_second_last_row_30pct():
     assert is_half_body(a2) is True
 
 
+def test_is_half_body_single_row_image():
+    """h==1 时原版读 ``max(0, h-2)`` = 第 0 行（唯一那一行），不是一律 False。
+
+    行下标照抄原版的 clamp：只有 h==0（没有行可读）才返回 False。
+    """
+    a = _solid(1, 10, (0.0, 0.0, 0.0))
+    a[0, :, 3] = 1.0                         # 唯一一行整条不透明 → 1.0 > 0.3
+    assert is_half_body(a) is True
+    a[0, :6, 3] = 0.0                        # 剩 4/10 = 0.4 > 0.3
+    assert is_half_body(a) is True
+    a[0, :, 3] = 0.0
+    assert is_half_body(a) is False
+
+
 def test_lens_blur_premultiplied():
     """镜头微糊：预乘 alpha 空间往返，透明处的黑不被拉进边缘（index.html:2384-2398）。
 
@@ -172,6 +186,57 @@ def test_lens_blur_premultiplied():
     assert solidish.size > 0
     assert float(solidish[..., :3].mean()) > 0.5
     assert float(out2[..., 3].max()) < 0.3          # 单点被摊薄，不会重新变实
+
+
+def test_lens_blur_target_size_uses_js_round():
+    """降/升采样的目标尺寸取整必须走 js_round（原版 Math.round 半向 +∞）。
+
+    SPEC §1.4 红线「禁止用内置 round()」的最小复现：w=75、k=0.62 时
+    ``75*0.62`` 在 float64 里**恰好**是 46.5，内置 round=46（半数取偶）、
+    js_round=47。tw 差一档 → 往返插值的采样网格不同 → 实测 364/6000 像素变、
+    最大差 2.16/255。这条断言把两种口径的结果钉成不相交。
+    """
+    from PIL import Image
+
+    from arcam.matte_tools import lens_blur
+    from arcam.numeric import js_round
+
+    a = _solid(80, 75, (0.5, 0.5, 0.5))
+    a[10:70, 5:70, :3] = 0.9
+    got = lens_blur(a, 0.62)
+    tw, th = max(2, js_round(75 * 0.62)), max(2, js_round(80 * 0.62))
+    assert tw == 47 and th == 50                   # 内置 round 会给 46 / 50
+    assert int(round(75 * 0.62)) == 46              # 确认旧口径确实分叉
+
+    def _rs(img01: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+        im = Image.fromarray((np.clip(img01, 0.0, 1.0) * 255.0).round().astype(np.uint8))
+        return np.asarray(im.resize(size, Image.BILINEAR), dtype=np.float64) / 255.0
+
+    pm = a[..., :3] * a[..., 3:4]
+    sp, sa = _rs(pm, (tw, th)), _rs(a[..., 3], (tw, th))
+    bp, ba = _rs(sp, (75, 80)), _rs(sa, (75, 80))
+    rgb = np.where(ba[..., None] > 1e-6, bp / np.maximum(ba[..., None], 1e-6), 0.0)
+    np.testing.assert_allclose(got, np.dstack([rgb, ba]), atol=1e-12)
+    # 旧口径（内置 round）出来的图确实不一样 —— 不然这条断言锁不住任何东西
+    stale_tw = max(2, int(round(75 * 0.62)))
+    assert stale_tw != tw
+
+
+def test_flood_solid_feather_radius_uses_js_round():
+    """柔化半径取整同样走 js_round（cutout.js:81 ``Math.round(o.feather)``）。
+
+    feather=2.5：内置 round=2、js_round=3。半径差一档，羽化带宽度就不同 ——
+    块左上角 (10,10) 的窗口里不透明像素数 9/25（r=2）vs 16/49（r=3）。
+    """
+    from arcam.matte_tools import _flood_solid
+    from arcam.numeric import js_round
+
+    assert js_round(2.5) == 3 and int(round(2.5)) == 2      # 两种口径确实分叉
+    a = _solid(40, 40, (1.0, 1.0, 1.0))
+    a[10:30, 10:30, :3] = (0.9, 0.2, 0.2)
+    out, _ = _flood_solid(a, 32.0, 2.5)
+    # 原版写回 Uint8Array：(s/n)|0 字节截断 → 16/49×255=83.06 → 83
+    assert out[10, 10, 3] == pytest.approx(83.0 / 255.0)     # r=3 的 7×7 窗口
 
 
 def test_auto_prepare_char_full_chain():
@@ -252,3 +317,38 @@ def test_gate_constants_match_original():
     assert CUT_RATIO_MIN == 0.05
     assert CUT_RATIO_MAX == 0.85
     assert ALPHA_MIN_01 == 8.0 / 255.0
+
+
+def test_soften_feather_matches_original_kernel():
+    """soften 的 feather 内核 = 原版可分离 3 抽头两遍 + 每遍 Math.round（v1.5 对译）。
+
+    手算（5×5 零场、中心一个 255、erode=0、feather=2）：
+      横遍：中心行 [0,0,255,0,0] → [0,85,85,85,0]（(0+0+255)/3=85，端部 2 样本）
+      竖遍：中心列 [0,0,85,0,0] → 28（(0+85+0)/3=28.33 → Math.round=28）
+      结果：rows 1-3 × cols 1-3 = 28/255，其余 0。
+    ⚠ 与 5×5 盒式均值**不同核**（盒式会给 36/255 的软团）——原版
+    cutout.js:805-817 是两遍 3 抽头、半径硬编码 1（feather 值只当布尔）。
+    """
+    a = np.zeros((5, 5, 4))
+    a[..., :3] = 0.5
+    a[2, 2, 3] = 1.0
+    out, changed = soften_edge(a, erode=0, feather=2)
+    assert changed is True
+    got = np.rint(out[..., 3] * 255).astype(int)
+    expect = np.zeros((5, 5), dtype=int)
+    expect[1:4, 1:4] = 28
+    assert np.array_equal(got, expect), f"\n{got}"
+    # feather=0 → 不柔（布尔语义的关闭档）
+    out0, _ = soften_edge(a, erode=0, feather=0)
+    assert np.array_equal(np.rint(out0[..., 3] * 255).astype(int),
+                          np.rint(a[..., 3] * 255).astype(int))
+
+
+def test_soften_enters_byte_domain():
+    """入口量化到字节域（原版 getImageData 口径）：0.5 的 alpha 先进 128 再算。"""
+    a = np.zeros((5, 5, 4))
+    a[..., :3] = 0.5
+    a[..., 3] = 0.5                       # 全 128（0.5×255=127.5 → 128）
+    out, _ = soften_edge(a, erode=0, feather=2)
+    # 常数场均值不变；出口应是 128/255 而不是浮点 0.5 的再模糊
+    assert np.allclose(out[..., 3], 128.0 / 255.0)

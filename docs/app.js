@@ -727,9 +727,9 @@ function applyLang() {
 
 /* ================= 11. 修图线（纯色底/裁边/还原 + kind 弹窗） ================= */
 
-function showTip(key) {
+function showTip(key, ...args) {
   const el = $('tip');
-  el.textContent = t(key);
+  el.textContent = args.length ? t(key, ...args) : t(key);
   el.hidden = false;
   clearTimeout(showTip._t);
   showTip._t = setTimeout(() => { el.hidden = true; }, 3600);
@@ -752,23 +752,24 @@ function doPrep() {
   const r = MT.autoPrepareChar(state.charCanvas);
   if (r.canvas !== before && (r.cut !== null || r.trimmed)) {
     state.charCanvas = r.canvas;
-    state.charName = state.charName;   // 名字不变
   }
   const parts = [];
   if (r.cut !== null) parts.push(t('note.autoCut', (r.cut * 100).toFixed(0)));
   (r.actions || []).forEach((a) => { if (a !== 'note.autoCut') parts.push(t(a)); });
   $('edit-note').textContent = parts.join('　');
-  showTip('note.chLoaded');
+  showTip('note.chLoaded', state.charName, state.charCanvas.width, state.charCanvas.height);
   renderNow();
 }
 
 function doTrim() {
   if (!state.charCanvas) { showTip('note.chNone'); return; }
   const MT = window.arcamMatteTools;
+  if (!MT) { setStatus('修图模块未加载', null, true); return; }
+  const w0 = state.charCanvas.width, h0 = state.charCanvas.height;
   const r = MT.autoTrim(state.charCanvas);
   if (!r) { $('edit-note').textContent = t('note.noMargin'); return; }
   state.charCanvas = r.canvas;
-  $('edit-note').textContent = t('note.trimmed', r.rect.w, r.rect.h);
+  $('edit-note').textContent = t('note.trimmed', w0, h0, r.rect.w, r.rect.h);
   renderNow();
 }
 
@@ -845,6 +846,7 @@ function draw3DInto(full, rect) {
 //: scene.json 仍记 2D 落位（模型站在同一个地面点；配方与 2D 路径同构）
 function placementForScene(cam, rect) {
   // ⚠ core 是本文件顶部 import 的 arcam-core.js；window.arcamCore 从来没挂过，别用
+  //   （HUD 的取景框同理：走 window.arcamHud.frameRect —— hud.js 从 core 再导出了它）
   const p = state.params;
   const subj = { hp: p.hp, d: p.d, x: p.x };
   const ch = state.charCanvas || char3dPlaceholder();
@@ -1258,7 +1260,7 @@ function bindLive() {
     cv.toBlob((blob) => {
       if (!blob) { showTip('note.shotFail'); return; }
       setPhoto(new File([blob], 'camera.png', { type: 'image/png' }));
-      showTip('note.chLoaded');
+      showTip('note.chLoaded', 'camera.png', cv.width, cv.height);
     }, 'image/png');
   });
   window.arcamLive.onOrient = (pitch, roll) => {
@@ -1294,7 +1296,7 @@ function drawHudOverlay() {
   const p = state.params;
   const cam = { W: W, H: H, h: p.h, feq: p.feq, pitch: p.pitch, roll: p.roll };
   const subj = { hp: p.hp, d: p.d, x: p.x };
-  const R = window.arcamCore ? window.arcamCore.frameRect(p.frame, W, H) : null;
+  const R = window.arcamHud.frameRect(p.frame, W, H);
   if (R) window.arcamHud.drawFrame(ctx, R, { x: 0, y: 0, w: W, h: H }, W, H);
   if (HUD_ON.grid) window.arcamHud.drawGrid(ctx, cam);
   if (HUD_ON.horizon) window.arcamHud.drawHorizon(ctx, cam, t('horizon'));

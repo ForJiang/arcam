@@ -36,6 +36,31 @@
     return out;
   }
 
+  // 原版 softenEdge 的 feather 内核（cutout.js:805-817 逐字对译）：
+  // 可分离 3 抽头均值、横竖各一遍、每遍 Math.round、**字节域**。
+  // ⚠ 与 boxBlur 不是同一个核（等效 5×5 三角形 vs 5×5 盒式）；且 fe 只当
+  //   布尔用——半径硬编码 1，feather 值不是半径。a 为字节值 Float64Array。
+  function separable3tapMean(a, w, h) {
+    var cur = a;
+    for (var pass = 0; pass < 2; pass++) {
+      var horiz = pass === 0;
+      var out = new Float64Array(a.length);
+      for (var y = 0; y < h; y++) {
+        for (var x = 0; x < w; x++) {
+          var s = 0, n = 0;
+          for (var k = -1; k <= 1; k++) {
+            var xx = horiz ? x + k : x, yy = horiz ? y : y + k;
+            if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+            s += cur[yy * w + xx]; n++;
+          }
+          out[y * w + x] = Math.round(s / n);   // 每遍取整（原版同）
+        }
+      }
+      cur = out;
+    }
+    return cur;
+  }
+
   // ── cutSolidBg（cutout.js:16-98 / matte_tools.py:_flood_solid）──
   // 返回 { canvas, ratio }；不是纯色底 → { canvas: null, ratio: 0 }。
   function cutSolidBg(canvas, opt) {
@@ -91,7 +116,10 @@
     var a = new Float64Array(w * h);
     for (var q = 0; q < w * h; q++) a[q] = isBg[q] ? 0 : 255;
     if (o.feather > 0) {
-      a = boxBlur(a, w, h, Math.max(1, Math.round(o.feather)));
+      // 盒式均值 + (s/n)|0 字节截断（cutout.js:88，v1.5 与 Python flood 侧对齐）
+      var bl = boxBlur(a, w, h, Math.max(1, Math.round(o.feather)));
+      for (var t2 = 0; t2 < bl.length; t2++) bl[t2] = Math.floor(bl[t2]);
+      a = bl;
     }
     for (var r2 = 0; r2 < w * h; r2++) px[r2 * 4 + 3] = a[r2];
     canvas.getContext("2d").putImageData(im, 0, 0);
@@ -160,7 +188,9 @@
       }
       a = out;
     }
-    if (o.feather > 0) a = boxBlur(a, w, h, o.feather);
+    // ⚠ feather 走可分离 3 抽头两遍（v1.5 与 Python soften_edge 同内核），
+    //   不再是盒式均值；a 此时即字节值（alpha 通道 0..255），无需换算。
+    if (o.feather > 0) a = separable3tapMean(a, w, h);
     for (var i2 = 0; i2 < w * h; i2++) px[i2 * 4 + 3] = a[i2];
     canvas.getContext("2d").putImageData(im, 0, 0);
     return { canvas: canvas, changed: true };
@@ -218,9 +248,11 @@
   }
 
   // ── 半身判定（index.html:2428-2434）：倒数第二行、alpha>200、>30% ──
+  // 行位口径与 Python is_half_body 逐字同：h<1 才无行可读，h==1 退化读唯一的第 0 行
+  // （原版 Math.max(0, h-2) 同样落在第 0 行）。
   function isHalfBody(canvas) {
     var w = canvas.width, h = canvas.height;
-    if (h < 2) return false;
+    if (h < 1 || w < 1) return false;
     var row = canvas.getContext("2d", { willReadFrequently: true })
       .getImageData(0, Math.max(0, h - 2), w, 1).data;
     var solid = 0;

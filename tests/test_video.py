@@ -274,6 +274,19 @@ def test_render_bg_dir_frames_and_hold(tmp_path: Path) -> None:
             corner = tuple(np.asarray(im.convert("RGB"))[2, 2])
         assert corner == colors[1]     # 3 帧全部 hold 在唯一那帧背景上
 
+    # 目录帧数多于轨道帧数：多余的忽略（时间轴由轨道定义，不从背景借帧）
+    more_dir = tmp_path / "bg2"
+    more_dir.mkdir()
+    for i, c in enumerate(colors * 2, start=1):
+        Image.fromarray(np.full((96, 64, 3), c, dtype=np.uint8)).save(
+            more_dir / f"frame_{i:06d}.png")
+    frames = render_track(more_dir, track, make_char(), tmp_path / "out3")
+    assert len(frames) == 3
+    for p, color in zip(frames, colors):
+        with Image.open(p) as im:
+            corner = tuple(np.asarray(im.convert("RGB"))[2, 2])
+        assert corner == color         # 仍按文件名顺序取前 3 帧
+
 
 def test_render_resizes_mismatched_bg(tmp_path: Path) -> None:
     bg = np.full((48, 32, 3), 100, dtype=np.uint8)     # 与轨道画布不同尺寸

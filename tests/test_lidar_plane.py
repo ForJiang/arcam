@@ -347,11 +347,6 @@ def test_backproject_basics() -> None:
     depth[H // 2, W // 2 - 100] = 5.0    # 画面左方 → x 为负
     depth[0, 0] = -1.0                   # 负值 → 无效
     fx, fy, cx, cy = _intrinsics()
-    depth = np.full((H, W), np.nan, dtype=np.float64)
-    depth[H // 2, W // 2] = 5.0          # 正前方 5m → (0,0,5)
-    depth[H // 2 + 40, W // 2] = 5.0     # 画面下方 40px → 深度系 y 为正（向下）
-    depth[H // 2, W // 2 - 100] = 5.0    # 画面左方 → x 为负
-    depth[0, 0] = -1.0                   # 负值 → 无效
     points, valid = backproject(depth, fx, fy, cx, cy)
     assert points.shape == (3, 3)
     assert not bool(valid[0, 0])

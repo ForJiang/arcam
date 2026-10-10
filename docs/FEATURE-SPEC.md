@@ -83,7 +83,9 @@ def auto_prepare_char(rgba01: np.ndarray, *, enabled: bool = True) -> PreparedCh
 - 1:1 对译 index.html:2400-2440 `autoPrepareChar` 的顺序与门控：
   ① `cut_solid_bg(tol=32, feather=1.2)`，占比须在 **[0.05, 0.85]** 才算数；
   ② `auto_trim`（从**上一步结果**出发，不叠加在原图上——原版同款"从基准重算"）；
-  ③ 半身判定：**最底下一行**（裁完后）存在 alpha >= 8/255 的像素 → half_body；
+  ③ 半身判定（index.html:2428-2434 逐字）：**倒数第二行**（``h-2``，裁完后）里
+     ``alpha > 200/255`` 的像素数 / 宽 > **30%** → half_body；h<2 时退化读第 0 行。
+     （v1.5 修正：此处原写「最底下一行 + >= 8/255」，与实现和原版都不符。）
   ④ `soften_edge(erode=1, feather=2)`。
 - **风控**（原版逐字）：任一步抛错 → 该步静默跳过；抠+裁之后必须还剩内容
   （bbox 非 None 且 w,h >= 4）否则整体回退**原图**；`enabled=False` → 原样返回。

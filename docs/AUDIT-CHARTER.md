@@ -56,3 +56,31 @@
 - 每个 Agent 的最终回复 = 发现表（含证据）+ 删除清单 + 优化前后数字 + 未修项。
 - 编排者（我）负责：合并复审、跨分区裁决、test_integration、CHANGELOG/版本/
   打包/推送/线上验收。
+
+---
+
+# v1.5.0 审计轮次（2026-10-11）
+
+用户指令同 2026-10-09（通读/排 bug/修障碍/优化/查功能/删多余代码保留必要注释/打包），
+本轮项目已从 393 测试长到 **496 passed / 1 skipped**、15 个子命令、22 个 Python 模块、
+13 个网页 JS。分区按当前文件清单重划（互斥不变）：
+
+| Agent | 文件 |
+|---|---|
+| B1 核心数学 | src/arcam/{numeric,geometry,placement,frames,scene}.py + tests/test_{geometry,placement,frames,scene,golden_recompute}.py |
+| B2 合成修图 | src/arcam/{lighting,sprite,compose,tone,matting,matte_tools}.py + tests/test_{lighting,sprite,compose,tone,matting,matte_tools}.py |
+| B3 CLI 与文案 | src/arcam/{cli,video,__init__,__main__,hud,i18n}.py + tests/test_{cli,video,hud}.py |
+| B4 服务 LiDAR | src/arcam/{webapp,depth,plane,lidar_live,lidar_sim}.py + tests/test_{webapp,lidar_depth,lidar_plane,lidar_live,lidar_compose,integration}.py |
+| B5 前端站点 | src/arcam/webui/* + docs/{*.js,*.html,*.css,mmd.js,mmd/} + tools/ + tests/test_webui_static.py |
+
+编排者直管（Agent 不许改）：pyproject.toml、README.md、CHANGELOG.md、docs/*.md、
+docs/tests/golden.json、.ai/、启动器、src/arcam/__init__.py 的导出表（要增导出写报告）。
+
+本轮新增关注（v1.3/v1.4 新代码是重点）：
+- **multi / watch / stats / recipe / batch / contact-sheet** 六个新命令的边界与错误路径；
+- **光影三门**（shadow/grain/sample_light）在 compose/_engine/CLI/webapp/网页两侧是否真的
+  全程通畅（门加了但某处没透传 = 静默失效，v1.4 已踩过两次这类）；
+- **参数记忆 / 全屏 / 拖拽 / 自动摆正** 在 webui 与 docs 两侧是否行为一致；
+- **docs 与 webui 的重复代码**（i18n 表、HUD 绘制、live 相机、matte-tools）能否收敛到
+  单一来源（至少要有测试钉住两侧一致，已有的是 i18n 逐条比对）；
+- v1.3/v1.4 引入的注释是否与行为一致（过期注释一律修）。

@@ -406,7 +406,7 @@ def test_bake_lit_full_golden_4x4():
       sK = clamp(1+(0-0)*0.3) = 1 → 跳过饱和度混合
       lutG[128] = js_round(255*(128/255)^inv) = js_round(135.2967) = 135
       litScale = canvas[0]/charW = 4/4 = 1 → bucket = 1 → 补偿 = 1
-      gAmp = clamp(6.5*(1-0.9*1.35), 0.7, 6.5) * 1 = 0.7（上限把 -2.275 夹到 0.7）
+      gAmp = clamp(6.5*(1-0.9*1.35), 0.7, 6.5) * 1 = 0.7（上限把 -1.3975 夹到 0.7）
       out[y,x] = rint(135 + tile[y,x]*0.7)（Uint8ClampedArray 的 round-half-even）
     颗粒砖前 4 个值：0.6331870672 / -0.2485860297 / 0.9666003259 / 0.0118304142
     第二行前 4 个：  0.1726524783 /  0.2330028736 / -0.2375066653 / 0.9399389657
@@ -495,18 +495,40 @@ def test_bake_lit_grain_adds_positive_noise():
     char = _gray(32, 32, 128)
     sample = LightSample(levels=(), mean=(0.42, 0.42, 0.42))
     out = lighting.bake_lit(char, sample, (32, 32))
-    # gAmp（lum=0.42）= clamp(6.5*(1-0.42*1.35), 0.7, 6.5) = clamp(2.8025,…)=2.8025
+    # gAmp（lum=0.42）= clamp(6.5*(1-0.42*1.35), 0.7, 6.5) = clamp(2.8145,…)=2.8145
     delta = out[..., 0].astype(np.float64) - 128.0
     assert float(np.abs(delta).max()) <= 6.5 + 1e-9
     assert float(np.abs(delta).max()) > 0.0
     assert float(np.abs(delta).mean()) > 0.5
 
 
+def test_bake_lit_grain_false_skips_only_the_noise():
+    """grain=False 只门控颗粒那一段（原版 LIGHT_GRN，index.html:1142）——
+    曲线/白平衡/饱和一个字节都不动：整幅恒等于三条 LUT 取整后的值。"""
+    char = _gray(16, 16, 128)
+    sample = LightSample(levels=(), mean=(0.9, 0.9, 0.9))
+    on = lighting.bake_lit(char, sample, (16, 16))
+    off = lighting.bake_lit(char, sample, (16, 16), grain=False)
+    assert not np.array_equal(on, off)                  # 颗粒确实没了
+    # 中性灰环境：三条 LUT 相同（gRfull=gRcap=1、sK=1），LUT(128)=135
+    lut_r, lut_g, lut_b, _g_l, _inv, _s_k = lighting._lit_luts(
+        0.9, 0.9, 0.9, 0.0, 0.0, 128 / 255, 128 / 255)
+    assert int(lut_g[128]) == 135
+    for ch in range(3):
+        np.testing.assert_array_equal(off[..., ch], np.full((16, 16), 135, dtype=np.uint8))
+    # 开颗粒时同一张图只在 LUT 值 ±gAmp(=0.7) 里抖
+    delta = on[..., 0].astype(np.int64) - 135
+    assert int(np.abs(delta).max()) <= 1
+    assert int(np.abs(delta).max()) > 0
+    # sample=None（总开关关）时 grain 开关都原样返回立绘
+    np.testing.assert_array_equal(lighting.bake_lit(char, None, (16, 16), grain=False), char)
+
+
 def test_bake_lit_grain_compensation_follows_canvas_size():
     """画布目标越小 → litScale 档位越低 → 补偿越大（缩得越小颗粒越强）。
 
     环境取中性 0.42 让 gamma 曲线恒等（gL=1, inv=1），这样输出偏离只剩颗粒：
-    litScale=1 → 补偿 1（幅度 2.7985）；litScale=0.25 → 补偿 clamp(1/0.25,1,3.2)=3.2。
+    litScale=1 → 补偿 1（幅度 2.8145）；litScale=0.25 → 补偿 clamp(1/0.25,1,3.2)=3.2。
     """
     char = _gray(64, 64, 128)
     sample = LightSample(levels=(), mean=(0.42, 0.42, 0.42))

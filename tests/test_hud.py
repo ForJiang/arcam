@@ -24,7 +24,7 @@ from arcam.hud import (
     grid_paths,
 )
 from arcam.i18n import DEFAULT_LANG, LANGS, TXT, t, table
-from arcam.placement import SHOTS, SpritePlacement, Subject, current_placement
+from arcam.placement import SHOTS, SpritePlacement, Subject
 
 CAM = Camera(1920, 1080, 1.6, 23.0, 12.0, -5.0)
 SUBJ = Subject(1.65, 4.0, 0.0)
@@ -38,9 +38,14 @@ def _img(v: int = 60) -> np.ndarray:
 # ─────────────────────── i18n ───────────────────────
 
 def test_table_is_complete_and_bilingual():
-    """160 条逐条搬运（index.html:600-830），两列都非空、无孤行。"""
-    # 160 条原版搬运 + 17 条 webui 新增键（FEATURE-SPEC §3；新增只追加不重排）
-    assert len(TXT) == 186, f"表条数变了：{len(TXT)}"
+    """186 条：原版 160 条逐条搬运 + 26 条新增键（两列都非空、无孤行）。
+
+    原版 160 条里 frame.* 那 4 条（1/4/9/16）在原表里是单字符串（画幅比不翻），
+    搬到 Python 侧按代码里的画幅常量改名成 frame.1:1/frame.4:5/frame.9:16/
+    frame.16:9 并成对（中英同形，见下面的豁免）；其余 156 条逐字搬运。
+    """
+    # 156 条逐字 + 4 条改名 + 26 条新增（webui/docs 25 + CLI 1）= 186
+    assert len(TXT) == 189, f"表条数变了：{len(TXT)}"
     for k, (zh, en) in TXT.items():
         assert zh and en, f"{k} 有空白列"
         # 画幅比与"已保存"这类中英本就同形（1:1 / 4:5 / {0} {1}），不算漏翻
@@ -248,13 +253,33 @@ def test_draw_hud_text_nochar_branch():
 
 
 def test_hud_person_ratio_hand_computed():
-    """人物占画面高% 手算：px = |a.v - b.v|，a/b 是 project 的头/足。"""
-    a = project(SUBJ.lateral_m, -CAM.height_m, SUBJ.distance_m, CAM)
-    b = project(SUBJ.lateral_m, SUBJ.height_m - CAM.height_m, SUBJ.distance_m, CAM)
+    """人物占画面高%：px = |a.v - b.v|，a/b 是 project 的头/足。
+
+    手算（roll=0 时可展开，index.html:1048-1057）：
+    Zc = -y·sin p + d·cos p、Yc = -y·cos p - d·sin p、v = H/2 + F·Yc/Zc。
+    取 flat = CAM 去掉滚转：脚 y=-1.6、头 y=Hp-h=0.05、d=4、p=12°。
+    """
+    flat = Camera(1920, 1080, 1.6, 23.0, 12.0, 0.0)
+    F = focal_px(flat)
+    p = math.radians(12.0)
+
+    def hand_v(y: float) -> float:
+        """roll=0 时 v = H/2 + F·Yc/Zc，Yc/Zc 按 project 的旋转链展开。"""
+        zc = -y * math.sin(p) + 4.0 * math.cos(p)
+        yc = -y * math.cos(p) - 4.0 * math.sin(p)
+        return 1080 / 2 + F * yc / zc
+
+    a = project(0.0, -1.6, 4.0, flat)          # 足底：相机系 y = 0 - 1.6
+    b = project(0.0, 0.05, 4.0, flat)          # 头顶：相机系 y = 1.65 - 1.6
     assert a is not None and b is not None
+    assert a[1] == pytest.approx(hand_v(-1.6))
+    assert b[1] == pytest.approx(hand_v(0.05))
     px = abs(a[1] - b[1])
-    assert abs(px / 1080 * 100 - px / 1080 * 100) < 1e-12   # 公式自洽
+    assert px == pytest.approx(abs(hand_v(-1.6) - hand_v(0.05)))
     assert 0 < px < 1080
+    # HUD 第三行就是把同一个 px 换成百分比（t('hud.person', …)）
+    pct = f"{px / 1080 * 100:.1f}"
+    assert t("hud.person", pct, lang="zh") == f"人在画面高 <b>{pct}%</b>"
 
 
 def test_cover_full_constant():

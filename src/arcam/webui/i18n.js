@@ -187,6 +187,9 @@ window.ARCAM_TXT = {
   "hint.fullscreen": ["全屏后拖画面摆位、参数照旧可调（Esc 退出）", "Drag to position while fullscreen; parameters still work (Esc to exit)"],
   "note.paramsRestored": ["已恢复上次的参数", "Parameters restored from last session"],
   "btn.exitFullscreen": ["退出全屏", "Exit fullscreen"],
+  "note.batchPartial": ["批处理完成：{0}/{1} 成功，{2} 张失败", "Batch done: {0}/{1} succeeded, {2} failed"],
+  "note.batchDepth": ["（深度驱动）", "(depth-driven)"],
+  "note.batchFailed": ["失败", "failed"],
 };
 
 window.ARCAM_LANGS = ["zh", "en"];

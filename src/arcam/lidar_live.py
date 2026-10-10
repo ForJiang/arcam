@@ -161,6 +161,11 @@ def _write_depth_spec(path: str | Path, meta: dict, depth: np.ndarray) -> None:
 
         [magic 4B][W u32][H u32][fx f32][fy f32][cx f32][cy f32]
         [roll f32(NaN=无)][pitch f32][height f32][depth f32 H*W 米]
+
+    数据区无效值写 **0**（不是 NaN 位型）—— 与权威实现
+    :func:`arcam.depth.save_depth` 逐字节同口径：ARCD 的无效标记是 0，第三方
+    读者按「0=无效」解析，NaN 字节会被当成离群深度。读回时两者都归一成 NaN，
+    往返语义无损。仅 ``arcam.depth`` 不可导入（裁剪安装）时才走到这里。
     """
     height, width = depth.shape
     roll = float(meta['roll_deg']) if meta.get('roll_deg') is not None else float('nan')
@@ -172,10 +177,11 @@ def _write_depth_spec(path: str | Path, meta: dict, depth: np.ndarray) -> None:
         + struct.pack('<fffffff', float(meta['fx']), float(meta['fy']),
                       float(meta['cx']), float(meta['cy']), roll, pitch, height_m)
     )
-    body = np.ascontiguousarray(depth, dtype=_DEPTH_DTYPE).tobytes()
+    body = np.array(depth, dtype=_DEPTH_DTYPE, copy=True)
+    body[~np.isfinite(body)] = 0.0
     with open(path, 'wb') as fh:
         fh.write(header)
-        fh.write(body)
+        fh.write(body.tobytes())
 
 
 def save_depth_file(path: str | Path, meta: dict, depth: np.ndarray) -> None:

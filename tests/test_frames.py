@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from arcam import frames
-from arcam.numeric import Rect
+from arcam.numeric import Rect, js_round
 
 
 def test_view_rect_is_whole_canvas_offline():
@@ -107,3 +107,29 @@ def test_frames_table_matches_spec():
     assert frames.FRAMES == {
         "自由": 0.0, "1:1": 1.0, "4:5": 0.8, "16:9": 16 / 9, "9:16": 9 / 16, "满幅": -1.0,
     }
+
+
+# ───────────────── js_round（numeric.py，frame_rect 原点的取整入口） ─────────────────
+# B1 分区没有 test_numeric.py；js_round 的用户可见效果集中在这里（原点取整），
+# 边界语义就近钉住。数值口径本体由 test_golden_recompute 的 fixture 反向兜底。
+
+def test_js_round_matches_ecma_math_round():
+    """ECMA-262 Math.round：最近整数、平分向 +∞（负半分也向 +∞ 进）。
+
+    这条口径被 frame_rect 原点、scene crop/image 尺寸全部继承，Python 内置 round()
+    是银行家舍入（round(0.5)=0、round(2.5)=2），一律不许用。"""
+    for value, want in ((-2.5, -2), (-1.5, -1), (-0.5, 0), (-0.0, 0), (0.0, 0),
+                        (0.5, 1), (1.5, 2), (2.5, 3), (3.5, 4), (99.5, 100),
+                        (-99.5, -99), (100.49, 100), (100.51, 101)):
+        assert js_round(value) == want, value
+
+
+def test_js_round_trap_value_below_half():
+    """0.5 的下一个可表示 double 必须舍到 0，不是 1。
+
+    教科书快捷式 ``math.floor(x + 0.5)`` 在这里会炸：``0.49999999999999994 + 0.5``
+    向上溢到 1.0 → 得 1；ECMA-262 规定「大于 0 且小于 0.5 的 x 结果为 +0」，JS 给 0。
+    （300 万随机样本 + 全部「整数±0.5」边界扫描：这是两式唯一的分歧输入；再大一档
+     ulp 变粗，2.0+0.49999999999999994 直接被吸收成 2.5，仍是平分进 1 得 3。）"""
+    assert js_round(0.49999999999999994) == 0
+    assert js_round(2.0 + 0.49999999999999994) == 3   # = 2.5，平分向 +∞

@@ -60,7 +60,6 @@ window.ARCAM_MMD = (function () {
   /** PMX 单位 → 米。和 Blender 那条路（`import_model(scale=0.08)`）同一个约定，
    *  所以"浏览器直读 PMX"和"导入烘好的 GLB"两边出来的身高/落位是一致的。 */
   const PACKAGE_SCALE = 0.08;
-  let pmxMod = null;
 
   /** 骨名归一化：`腕.L` / `左腕` / `腕L` → 同一把键。
    *  ⚠ 从 `mmd/pmx.js` 挪进来的 —— 那套自写转换器已经废弃，但**这条映射还得留着**：
@@ -133,10 +132,8 @@ window.ARCAM_MMD = (function () {
         }
         const gl = await import('./mmd/loaders/GLTFLoader.js');
         GLTFLoader = gl.GLTFLoader;
-        // PMX 那条线要的构建器（顺带导出骨名归一化 boneKey —— 查姿势每次都要用）
-        pmxMod = null;   // 自写转换器已删，改用官方 @moeru/three-mmd（下面的 import 都去掉了）
-        pmxBuilder = pmxMod;
-        /* boneKey 现在是本文件里的函数，不再从 pmx.js 拿 */
+        // PMX 那条线的解析器（mmdparser.js）走 loadParser() 现拉；装配统一用
+        // 官方 @moeru/three-mmd 的 MMDLoader（见 buildFromPackage）。
       }
       buildScene();
       ready = true;
@@ -321,10 +318,14 @@ window.ARCAM_MMD = (function () {
   }
 
   // ── 浏览器直读 PMX（不用 Blender 烘 GLB）────────────────────────────
-  // 一条链：zip（或文件夹）→ 找 .pmx → mmd-parser 解 → pmx.js 装成 three 的东西。
+  // 一条链：zip（或文件夹）→ 找 .pmx → mmd-parser 解 → 官方 MMDLoader 装配。
   // ⚠ mmd-parser 是**普通 script**（UMD，挂到 window.MMDParser 上），所以用注入 <script> 拉，
   //   不能 import。它的许可 MIT（原来就是 three 官方 MMDLoader 用的那个解析器）。
-  let MMDParser = null, pmxBuilder = null, TGALoader = null, parserScriptP = null;
+  // ⚠ v1.5.0 审计备注：官方 three-mmd 捆绑包里自带完整的 PmxReader/PmdReader
+  //   （index.js:1217/413，ParseAsync 自解析），并不读 window.MMDParser ——
+  //   也就是说这次注入目前没有消费者。先留着（删它要连 mmd/libs/mmdparser.js
+  //   一起删，而那条路没有真模型 E2E 可验），记为待清理项。
+  let MMDParser = null, parserScriptP = null;
   function loadParser() {
     if (window.MMDParser) { MMDParser = window.MMDParser; return Promise.resolve(MMDParser); }
     if (parserScriptP) return parserScriptP;
@@ -338,75 +339,9 @@ window.ARCAM_MMD = (function () {
     return parserScriptP;
   }
 
-  /** 把一个图片字节变成 three 贴图，顺便**降到 ≤2048**并取 32×32 的 alpha/均色。
-   *  降采样是必须的：MMD 模型的衣贴图常见 4096×2048，手机 GPU 吃不消；
-   *  alpha/均色是给材质分档和球面近似用的（和 Blender 烘焙那条规则同源）。 */
-  async function imageToTexture(bytes, path) {
-    const lower = String(path).toLowerCase();
-    let src = null;
-    try {
-      if (lower.endsWith('.tga')) {
-        if (!TGALoader) TGALoader = (await import('./mmd/loaders/TGALoader.js')).TGALoader;
-        const t = new TGALoader().parse(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-        const im = t.image;
-        if (!im || !im.width) return null;
-        const cv0 = document.createElement('canvas'); cv0.width = im.width; cv0.height = im.height;
-        cv0.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(im.data), im.width, im.height), 0, 0);
-        src = cv0;
-      } else {
-        src = await createImageBitmap(new Blob([bytes]));
-      }
-    } catch (e) { console.warn('[MMD] 贴图解不开:', path, e && e.message); return null; }
-    const w0 = src.width, h0 = src.height;
-    const MAX = 2048;
-    const k = Math.min(1, MAX / Math.max(w0, h0));
-    const cv = document.createElement('canvas');
-    cv.width = Math.max(1, Math.round(w0 * k));
-    cv.height = Math.max(1, Math.round(h0 * k));
-    cv.getContext('2d').drawImage(src, 0, 0, cv.width, cv.height);
-    if (src.close) try { src.close(); } catch (e) {}
-    const tex = new THREE.CanvasTexture(cv);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    tex.anisotropy = 4;
-    // 32×32 探针：有没有 alpha、均色是多少
-    try {
-      const pc = document.createElement('canvas'); pc.width = pc.height = 32;
-      const pg = pc.getContext('2d', { willReadFrequently: true });
-      pg.drawImage(cv, 0, 0, 32, 32);
-      const d = pg.getImageData(0, 0, 32, 32).data;
-      let minA = 255, r = 0, g = 0, b = 0, cnt = 0;
-      for (let i = 0; i < d.length; i += 4) {
-        if (d[i + 3] < minA) minA = d[i + 3];
-        if (d[i + 3] > 8) { r += d[i]; g += d[i + 1]; b += d[i + 2]; cnt++; }
-      }
-      tex.userData.hasAlpha = minA < 250;
-      // ★★ 32×32 的探针**太粗，看不出蕾丝/纱的孔**：2048 的贴图一个格 = 64×64 源像素，
-      //    孔洞在降采样时被平均掉 → alpha≈1 → 材质被判成"不透明"（alphaTest=0、transparent=false）
-      //    → 衣服渲染成**一块块硬边白板**（用户原话："这他妈褶皱是人类吗"）。
-      //    这里在 256×256 上数**真的透明的像素占比**：>1% 就说明这张图是镂空的。
-      try {
-        const N = 256;
-        const pg2 = document.createElement('canvas');
-        pg2.width = pg2.height = N;
-        const g2 = pg2.getContext('2d');
-        g2.drawImage(cv, 0, 0, N, N);
-        const d2 = g2.getImageData(0, 0, N, N).data;
-        let clear = 0;
-        for (let i = 3; i < d2.length; i += 4) if (d2[i] < 128) clear++;
-        if (clear > N * N * 0.01) tex.userData.hasAlpha = true;
-        tex.userData.clearRatio = clear / (N * N);      // 透明像素占比：>22% = 羽毛/蕾丝/纱（走混合）
-      } catch (e) {}
-      tex.userData.avg = cnt ? [r / cnt / 255, g / cnt / 255, b / cnt / 255] : null;
-    } catch (e) { tex.userData.hasAlpha = false; tex.userData.avg = null; }
-    tex.userData.src = path;
-    return tex;
-  }
-
   /** zip（或文件夹）→ 找出主 .pmx → 解析 → 建 three 对象 */
   async function buildFromPackage(bytes, kind, onProgress, dirFiles, pmxIdx) {
     const [zipMod] = await Promise.all([import('./mmd/zipread.js'), loadParser(), init()]);
-    // 官方 MMDLoader 装配（旧的自写转换器已删 —— 见 buildFromPackage 里的说明）
     let pkg = null, pmxBytes = null, pmxName = '';
     // ★ 一个文件夹（或 zip）里常有**好几个** pmx：角色本体 + 武器 + 部件，贴图全堆在一起。
     //   以前我"挑最大的那个"是在替用户瞎猜（那个文件夹里挑中的可能正是镰刀）——
@@ -441,24 +376,15 @@ window.ARCAM_MMD = (function () {
     }
     onProgress && onProgress(0.25, 0, 0);
     const ab = pmxBytes.buffer.slice(pmxBytes.byteOffset, pmxBytes.byteOffset + pmxBytes.byteLength);
-    // ★ 记账：**真正加载成功**几张贴图。`stats.textures` 是 PMX 里"引用了多少张"，
-    //   只导 .pmx 时它照样是 18 —— 看上去一切正常，屏幕上却是一片白模（用户实际撞上的）。
-    let texOk = 0, texMiss = 0;
-    const texLoader = async (path) => {
-      if (!pkg) { texMiss++; return null; }                      // 单个 .pmx：没有贴图可找
-      const e = zipMod.findEntry(pkg, path);
-      if (!e) { texMiss++; console.warn('[MMD] 包里找不到贴图:', path); return null; }
-      const b = await zipMod.entryBytes(e);
-      const t = b ? imageToTexture(b, path) : null;
-      if (t) texOk++; else { texMiss++; console.warn('[MMD] 贴图解不开:', path); }
-      return t;
-    };
     // ★★ 用官方维护的 @moeru/three-mmd 装配（toon 材质 + 球面贴图 SPH/SPA + 描边 + SDEF
     //    全都处理过 —— 这四样正是我手搓那套做不出来、把衣服渲成白板的原因）。
     //    贴图接缝：它通过我传进去的 LoadingManager **按 URL** 取贴图，所以先把包里的图片
     //    造成 blob URL 登记好，再用 setURLModifier 把它的请求重定向过去。
-    //    ⚠ 失败就退回我自己那套（不把页面搞挂）；两条路都通了之后再删旧的那套。
+    //    ⚠ 这条路失败没有第二套装配可退（自写转换器已删）—— 直接把报错抛到界面上。
     let built = null;
+    // 贴图请求命中记录（自检窗口 window.__texHit 就是这一份）：装配完后按它算
+    // "包里缺几张贴图"，所以声明必须在 try 之外。
+    let texHit = [];
     try {
       const { MMDLoader } = await import(SELF_DIR + 'mmd/three-mmd/index.js');
       const blobs = new Map();
@@ -498,7 +424,7 @@ window.ARCAM_MMD = (function () {
       // 自检用：记下每一次贴图请求**有没有命中我造的 blob**。
       // ⚠ 没有这个记录，"toon01.bmp 到底走没走到我造的那张"就只能靠猜 —— 上一轮就是因此分不清
       //   "修复没生效" 和 "指标看不见"。真机/自检里看 window.__texHit 即可。
-      const texHit = [];
+      texHit = [];
       window.__texHit = texHit;
       mgr.setURLModifier(u => {
         const base = decodeURIComponent(String(u).split(/[\\/?#]/).pop() || '').normalize('NFC').toLowerCase();
@@ -525,7 +451,12 @@ window.ARCAM_MMD = (function () {
           stats: { tris: Math.round(nt), bones: nb, morphs: nm2, materials: 0, textures: blobs.size },
           texOk: blobs.size, texMiss: 0, official: mmd,
         };
-        built.official = true;
+        // ★ 贴图账要按**真实请求**记：texHit 里 hit=false 的就是"包里没有这张贴图"
+        //   （恒填 0 会让「贴图只找到 X/Y 张」的告警在官方路径上永远不可能触发，
+        //    白模了也没人告诉你为什么）。
+        const missCount = texHit.filter(t => !t.hit).length;
+        built.texMiss = missCount;
+        built.texOk = Math.max(0, blobs.size - missCount);
         // ⚠ 官方装配出来的网格要自己挂进我的阴影系统：不设 castShadow 就会"影子开关没差别"。
         //    frustumCulled=false：蒙皮网格的包围盒算不准，镜头一转整块消失过。
         root2.traverse(o => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
@@ -533,15 +464,13 @@ window.ARCAM_MMD = (function () {
                            try { URL.revokeObjectURL(pmxUrl); } catch (e) {} }, 60000);
       }
     } catch (err) {
-      console.warn('[MMD] 官方 MMDLoader 失败，退回自写转换器：', err);
+      console.warn('[MMD] 官方 MMDLoader 装配失败：', err);
       built = null;
     }
     if (!built) throw new Error('模型装配失败（官方 MMDLoader 没跑通）—— 把控制台里的报错发我。');
     onProgress && onProgress(1, 0, 0);
     built.pmxName = pmxName;
     built.fromPackage = !!pkg;
-    // ⚠ 别把官方路径已经记好的贴图数覆盖成 0（旧路径的计数器这时全是 0 —— 踩过）
-    if (built.texOk === undefined) { built.texOk = texOk; built.texMiss = texMiss; }
     built.pmxList = pkgPmx.map(e => e.name);      // 这个包里所有模型的名字（界面拿它排按钮）
     built.pmxIndex = pmxIndex || 0;
     return built;

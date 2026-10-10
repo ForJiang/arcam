@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from arcam.numeric import js_round
+from arcam.numeric import js_round, js_to_fixed
 
 #: index.html:3500 —— `let TONE_ON = false, TONE_K = 0.35;`（均值平移系数）
 TONE_K: float = 0.35
@@ -75,7 +75,9 @@ def tone_stats(layer_rgba01: np.ndarray, bg_rgb01: np.ndarray) -> dict | None:
     """toneMatchedLayer 的诊断量（原版 ``window.__tone``，index.html:3617-3619）。
 
     与 :func:`tone_matched_layer` 走同一套前 5 步计算，只是不改像素、只报数。
-    返回 None 的条件与原版的三个自守卫完全一致。
+    返回 None 的条件与原版的三个自守卫完全一致。``sc`` 按原版 ``+sc.toFixed(3)``
+    的口径走 :func:`arcam.numeric.js_to_fixed`（SPEC §1.4：禁止用 Python 的
+    ``round``/格式化串代替 ``toFixed``）。
     """
     layer = _to_u8(layer_rgba01)
     if layer.ndim != 3 or layer.shape[2] != 4:
@@ -132,13 +134,12 @@ def tone_stats(layer_rgba01: np.ndarray, bg_rgb01: np.ndarray) -> dict | None:
     range_b = max(8, bHi - bLo)
     k_tone = TONE_K_DARK if range_b < 90 else TONE_K_LIT
     t_range = range_m + (range_b - range_m) * k_tone
-    t_lo = mLo + (bLo - mLo) * k_tone
     sc = t_range / range_m
     return {
         "model": [js_round(mr), js_round(mg), js_round(mb)],
         "bg": [js_round(br), js_round(bgc), js_round(bb)],
         "k": TONE_K, "kTone": k_tone, "mLo": mLo, "mHi": mHi,
-        "bLo": bLo, "bHi": bHi, "sc": float(f"{sc:.3f}"), "n": n, "bn": bn,
+        "bLo": bLo, "bHi": bHi, "sc": js_to_fixed(sc, 3), "n": n, "bn": bn,
     }
 
 

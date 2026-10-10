@@ -1,13 +1,20 @@
 """arcam 命令行 —— 原版桌面端四件事（出图 / 立绘层 / 素材包 / 抠图）加离线视频、LiDAR 深度。
 
-子命令一览（每个都有中文 --help）::
+子命令一览（每个都有中文 --help；共 15 个，stats 现抓本表不硬编码）::
 
     arcam render PHOTO CHAR -o OUT.png [--scene PATH] [摆放参数] [--depth DEPTH]  # 出图
     arcam char-layer CHAR -o OUT.png [摆放参数]                    # 仅 RGBA 立绘层
     arcam bundle PHOTO CHAR -o OUT.zip [摆放参数]                   # 三件套 zip（确定性时间戳）
     arcam matte IMG -o OUT.png [--model PATH]                       # ISNet-anime 抠图
-    arcam video TRACK.json CHAR -o OUTDIR [--bg 单图或目录] [--tone] # 逐帧渲染
+    arcam prep CHAR -o OUT.png [--no-solid/--no-trim/--no-soften/--no-blur]  # 装图自动修图链
+    arcam video TRACK.json CHAR -o OUTDIR [--bg 单图或目录] [--tone] [--gif]  # 逐帧渲染
     arcam check TRACK.json                                          # 轨道自检
+    arcam recipe save|list|show|apply NAME ...                      # 摆放配方库
+    arcam watch PHOTO CHAR -o OUT.png [--once] [--interval 秒]       # 素材变了自动重出图
+    arcam multi PHOTO CHAR... -o OUT.png [--spec 'K=V;K=V']          # 多立绘叠同一照片
+    arcam contact-sheet PHOTO CHAR -o OUT.png --vary K=V,V,V        # 参数对比网格
+    arcam batch PHOTO_DIR CHAR -o OUTDIR [--depth-dir DIR] [--ext png|jpg]  # 批量出图
+    arcam stats [--json]                                            # 项目自报体检表
     arcam lidar inspect DEPTH [--json]                              # LiDAR 深度诊断（h/pitch/roll）
     arcam lidar serve --port 7707 [--out DIR]                       # 实时流接收（Ctrl-C 停止）
     arcam web [--host 127.0.0.1] [--port 8765] [--no-open]          # 本地网页界面（标准库 HTTP 服务）
@@ -37,9 +44,11 @@ from pathlib import Path
 import numpy as np
 
 from arcam.compose import _merge_env, _over, compose_char_layer, compose_shot
+from arcam.frames import frame_rect
 from arcam.geometry import Camera
 from arcam.i18n import LANGS
 from arcam.matting import anime_cut
+from arcam.numeric import js_round
 from arcam.placement import FRAMES, SHOTS, Subject, current_placement
 from arcam.scene import build_scene, save_scene
 from arcam.video import (
@@ -130,7 +139,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="arcam",
         description="让她走出屏幕（Python 离线版）—— 透视投影立绘合成管线："
-                    "出图 / 立绘层 / 素材包 / 抠图 / 轨道视频 / LiDAR 深度。",
+                    "出图 / 立绘层 / 素材包 / 抠图 / 装图修图 / 轨道视频 / 配方 /"
+                    "批量 / 多立绘 / 对比网格 / LiDAR 深度 / 本地网页。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""示例：
   arcam render photo.jpg char.png -o shot.png --scene scene.json
@@ -139,10 +149,16 @@ def build_parser() -> argparse.ArgumentParser:
   arcam bundle photo.jpg char.png -o pack.zip --pitch 12
   arcam matte photo.jpg -o cut.png --model isnet-anime-q8.onnx
   arcam prep char.png -o clean.png            # 装图自动修图链（抠底/裁边/柔边/微糊）
-    arcam video track.json char.png -o frames/ --bg bg/ --tone
-    arcam check track.json
-    arcam lidar inspect scan_0001.png [--json]
-    arcam web [--host 127.0.0.1] [--port 8765] [--no-open]   # 本地网页界面
+  arcam video track.json char.png -o frames/ --bg bg/ --tone --gif
+  arcam check track.json
+  arcam recipe save demo --pitch 15 --mode free   # 配方存/列/看/取（apply 打可粘参数）
+  arcam watch photo.jpg char.png -o shot.png --once
+  arcam multi photo.jpg a.png b.png -o two.png --spec 'x=1.2;d=3.2;scale=0.7'
+  arcam contact-sheet photo.jpg char.png -o grid.png --vary d=3,4,5 --vary pitch=0,15
+  arcam batch photos/ char.png -o out/ --depth-dir depths/ --scene
+  arcam stats                                    # 项目体检表（规模/测试/子命令）
+  arcam lidar inspect scan_0001.png [--json]
+  arcam web [--host 127.0.0.1] [--port 8765] [--no-open]   # 本地网页界面
 
 退出码：0 正常，1 运行期失败（缺文件/素材不合法/轨道有问题），2 用法错误。""")
     sub = parser.add_subparsers(dest="cmd", required=True, metavar="命令")
@@ -458,30 +474,44 @@ def _light_off(args) -> bool:
 
 
 def _placement(char01, subj: Subject, cam: Camera, args):
-    """单独算一次落位给 build_scene 用。
+    """单独算一次落位给 build_scene 用（与渲染链 :func:`arcam.compose._placement`
+    **同参**——scene.json 记的必须是本遍实际落位，否则配方和出图对不上）。
 
-    只传当前模式收得下的 kwargs：ground 分支不收 size_pct/edge_bar、
+    只传当前模式收得下的 kwargs：ground 分支不收 size_pct/edge_bar/rect、
     free 分支不收 char_scale/shot（签名见 SPEC §3.2 的两个分支）。
-    shot/edge_bar/rot_basis 必须与 _compose_kw 一致，否则 scene.json 记的参数和
-    实际渲染不符 —— 这三个历史上各漏过一次，改动本函数务必与 _compose_kw 对拍。
+    ⚠ free 分支必须收 ``rect=frame_rect(...)``：贴边吸附的目标框（原版 snapRect）。
+      漏传它 = 吸附在 scene.json 里整个失效（渲染吸了、配方记没吸）——v1.5 审计
+      由 B1/B4 两个分区各自 e2e 复现（1:1+edge_bar=2 差 48px、16:9+edge_bar=2
+      差 189px），凡 free + 非满幅 + edge_bar≠0 的 render/char-layer/bundle/
+      multi 全部中招。webapp 侧（webapp.py:723）v1.1 就已修对，这里补齐。
+    shot/edge_bar/rot_basis/rect 必须与 _compose_kw 一致，改动本函数务必与
+    _compose_kw 对拍（这四个历史上各漏过一次）。
     """
     if args.mode == "free":
         return current_placement(char01, subj, cam, mode="free",
                                  size_pct=args.size_pct, edge_bar=args.edge_bar,
-                                 rot_basis=args.rot_basis)
+                                 rot_basis=args.rot_basis,
+                                 rect=frame_rect(args.frame, cam.width, cam.height))
     return current_placement(char01, subj, cam, mode="ground",
                              char_scale=args.char_scale, rot_basis=args.rot_basis,
                              shot=args.shot)
 
 
-def _scene_dict(args, char01, subj: Subject, cam: Camera, rect, placement) -> dict:
+def _scene_dict(args, char01, subj: Subject, cam: Camera, rect, placement,
+                char_name: str | None = None) -> dict:
     """buildScene 的 1:1 同构调用（index.html:3729）。
 
     shot/char_scale 必须透传：buildScene 把它们记进配方（index.html:3756/3760），
     漏传会让 scene.json 与实际渲染参数不符。
+
+    ``char_name`` 给多立绘命令用：它的位置参数叫 ``chars``（没有 ``args.char``），
+    由调用方把第一张立绘的文件名传进来（v1.5 审计修复前 ``multi --scene`` 直接
+    AttributeError 崩掉）。
     """
     return build_scene(rect, placement, subj, cam, frame_key=args.frame,
-                       char_rgba01=char01, char_name=Path(args.char).name,
+                       char_rgba01=char01,
+                       char_name=char_name if char_name is not None
+                       else Path(args.char).name,
                        mode=args.mode, edge_bar=args.edge_bar,
                        shot=args.shot, char_scale=args.char_scale)
 
@@ -592,11 +622,23 @@ def _recipe_of_args(args) -> dict:
 
 
 def _recipe_from_scene(path: Path) -> dict:
-    """从 scene.json 提摆放段（字段名与配方一致，单位一致）。"""
+    """从 scene.json 提摆放段（字段名与配方一致，单位一致）。
+
+    ⚠ 原版配方（index.html:3729-3789 buildScene）**不记** ``sizePct`` 与
+    ``rotBasis`` 两个量，只能尽量反推：
+    - ``size_pct``：无从反推（``character.image`` 记的是立绘 PNG 的像素尺寸，
+      与"占画面高百分之几"不是一回事）→ 恒为 None，配方里就不带这一项；
+    - ``rot_basis``：frame 基准下 ``rotationDeg`` 恒 0，world 基准下它等于 roll。
+      所以**只有 roll≠0 时可判定**（roll=0 时两种基准渲染逐位相同，回落 world
+      无损）；吸附（edge_bar≠0）本身也把旋转锁成 0，与基准无关，推断成 frame
+      也不会改变渲染结果。
+    """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     cam = data.get("camera", {})
     subj = data.get("subject", {})
     ch = data.get("character", {})
+    rot_zero = ch.get("rotationDeg") == 0
+    roll_given = cam.get("rollDeg") not in (None, 0)
     out = {
         "h": cam.get("heightM"), "hp": subj.get("heightM"),
         "d": subj.get("distanceM"), "x": subj.get("lateralM"),
@@ -604,16 +646,14 @@ def _recipe_from_scene(path: Path) -> dict:
         "roll": cam.get("rollDeg"), "shot": data.get("shot"),
         "char_scale": data.get("charScale"), "frame": data.get("frame", {}).get("aspect"),
         "mode": ch.get("mode"),
-        "size_pct": ch.get("image", {}).get("height") and None,
+        "size_pct": None,
         "edge_bar": data.get("edge", {}).get("bar"),
-        "rot_basis": "frame" if ch.get("rotationDeg") == 0 and ch.get("mode") == "free"
-                     and data.get("edge", {}).get("rotationLocked") else "world",
+        "rot_basis": "frame" if (rot_zero and roll_given) else "world",
     }
     return {k: v for k, v in out.items() if v is not None}
 
 
 def cmd_recipe_save(args) -> int:
-    from arcam.i18n import t
     if args.from_file:
         p = _need(args.from_file, "scene.json")
         recipe = _recipe_from_scene(p)
@@ -690,7 +730,8 @@ _SHEET_MAX_CELLS = 24
 
 def _parse_vary(items: list[str]) -> list[tuple[str, list[str]]]:
     """--vary K=V,V,V → [(key, [values...])]；键必须在摆放参数里。"""
-    axes = []
+    axes: list[tuple[str, list[str]]] = []
+    seen: set[str] = set()
     for item in items:
         if "=" not in item:
             raise CliError(f"--vary 要 K=V,V 形式，收到 {item!r}")
@@ -701,6 +742,11 @@ def _parse_vary(items: list[str]) -> list[tuple[str, list[str]]]:
                  "rot_basis"}
         if key not in valid:
             raise CliError(f"--vary 的键 {key!r} 不是摆放参数（可用：{'/'.join(sorted(valid))}）")
+        if key in seen:
+            # 同一个参数扫两轴：笛卡尔积照算，但后一轴把前一轴的值整个覆写，
+            # 格子成倍重复而标签看不出问题——直接拦掉
+            raise CliError(f"--vary 的键 {key!r} 给了两次（同一参数只应扫一轴）")
+        seen.add(key)
         values = [v.strip() for v in raw.split(",") if v.strip()]
         if not values:
             raise CliError(f"--vary {key} 没给取值")
@@ -753,8 +799,11 @@ def _sig_of(paths: list[Path]) -> tuple:
 
 
 def cmd_watch(args) -> int:
-    """监视素材变化自动重出图（轮询式；跨平台最稳）。"""
-    from arcam.i18n import t
+    """监视素材变化自动重出图（轮询式；跨平台最稳）。
+
+    ⚠ 人话输出目前全是中文：``--lang`` 收下但语言表里没有监视循环的键
+    （加键会牵动 webui/docs 两侧同源表，见审计报告）。
+    """
     photo_p = _need(args.photo, "背景照片")
     char_p = _need(args.char, "立绘")
     out = Path(args.out)
@@ -844,6 +893,25 @@ class _SpecArgs:
         return getattr(self._base, name)
 
 
+def _paste_layer(base_rgb01: np.ndarray, layer_rgba01: np.ndarray, rect) -> np.ndarray:
+    """把裁切框里的立绘层按 ``R.x/R.y`` 贴回整幅照片（compose._crop_offset 的逆）。
+
+    compose_char_layer 出来的层尺寸是**裁切后**的 off 画布（与素材包里那张
+    character.png 一致），不是整幅。满幅时两者恰好同尺寸、偏移 (0,0)，非满幅时
+    不按偏移贴就会形状不匹配——v1.5 审计修复前 ``multi --frame 4:5`` 直接 numpy
+    广播报错（且报的是内部形状，不是人话）。
+    """
+    height, width = base_rgb01.shape[:2]
+    full = np.zeros((height, width, 4), dtype=np.float64)
+    ox, oy = js_round(rect.x), js_round(rect.y)
+    h, w = int(layer_rgba01.shape[0]), int(layer_rgba01.shape[1])
+    x0, y0 = max(0, ox), max(0, oy)
+    x1, y1 = min(width, ox + w), min(height, oy + h)
+    if x1 > x0 and y1 > y0:
+        full[y0:y1, x0:x1] = layer_rgba01[y0 - oy:y1 - oy, x0 - ox:x1 - ox]
+    return _over(base_rgb01, full)
+
+
 def cmd_multi(args) -> int:
     """多立绘合成：逐张出立绘层，按顺序 source-over 叠到照片上。
 
@@ -851,10 +919,10 @@ def cmd_multi(args) -> int:
     落位」（六步管线、char_layer 语义都建立在单一主体上）。多立绘 = 多次调用
     + 层合成，数学上与「一气画多个人」等价（source-over 对 alpha 可结合），
     且不动冻结的单主体管线。
+
+    ⚠ 本命令的人话输出目前全是中文：``--lang`` 收下但无处可用（语言表里没有
+    多立绘的键，加键会牵动 webui/docs 两侧同源表，见审计报告）。
     """
-    from arcam.i18n import t
-    if len(args.chars) < 1:
-        raise CliError("multi 至少要一张立绘")
     if len(args.spec) > max(0, len(args.chars) - 1):
         raise CliError(f"--spec 给了 {len(args.spec)} 套但只有 {len(args.chars) - 1} 张"
                        "附加立绘需要覆盖（第一张用主参数）")
@@ -863,8 +931,6 @@ def cmd_multi(args) -> int:
     height, width = src01.shape[:2]
 
     base = np.clip(np.asarray(src01, dtype=np.float64), 0.0, 1.0)
-    if base.dtype != np.uint8 and base.max() <= 1.0 and src01.dtype != np.uint8:
-        pass                                          # src01 已是 01 口径
     layers = []
     for i, char_path in enumerate(args.chars):
         char_p = _need(char_path, f"立绘 {i + 1}")
@@ -879,10 +945,11 @@ def cmd_multi(args) -> int:
         print(f"  层 {i + 1}/{len(args.chars)}：{char_p.name}"
               + (f"（spec：{args.spec[i - 1]}）" if i > 0 and args.spec else ""))
 
-    # 顺序 source-over：后画的盖先画的（与逐一合成等价）
+    # 顺序 source-over：后画的盖先画的（与逐一合成等价）。每层按自己的裁切框
+    # 偏移贴回整幅——满幅时偏移为 0，行为与逐位相同
     out_img = base
-    for layer, _rect, _name in layers:
-        out_img = _over(out_img, layer)
+    for layer, rect, _name in layers:
+        out_img = _paste_layer(out_img, layer, rect)
     img_u8 = np.clip(out_img * 255.0 + 0.5, 0, 255).astype(np.uint8) \
         if out_img.dtype != np.uint8 else np.asarray(out_img)
     out = Path(args.out)
@@ -896,7 +963,8 @@ def cmd_multi(args) -> int:
         cam, subj = _pose(args, width, height)
         shot = compose_shot(src01, char01, subj, cam, **_compose_kw(args))
         save_scene(_scene_dict(args, char01, subj, cam, shot.rect,
-                               _placement(char01, subj, cam, args)),
+                               _placement(char01, subj, cam, args),
+                               char_name=Path(args.chars[0]).name),
                    Path(args.scene))
         print(f"配方 {args.scene}（记第一张立绘的落位；多主体无原版格式）")
     return 0
@@ -945,12 +1013,15 @@ def cmd_stats(args) -> int:
 
 
 def _subcommand_names() -> list[str]:
-    """从 build_parser 现抓子命令名（不硬编码，新增命令自动进 stats）。"""
+    """从 build_parser 现抓顶层子命令名（不硬编码，新增命令自动进 stats）。
+
+    顶层 subparsers 的 ``dest`` 就是 ``"cmd"``（recipe/lidar 的二级分组是
+    ``recipe_cmd``/``lidar_cmd``，不会被误抓）。
+    """
     parser = build_parser()
     for action in parser._actions:
-        if hasattr(action, "choices") and isinstance(action.choices, dict):
-            if "cmd" in action.choices.get("metavar", "") or action.dest == "cmd":
-                return sorted(action.choices)
+        if action.dest == "cmd" and isinstance(getattr(action, "choices", None), dict):
+            return sorted(action.choices)
     return []
 
 
@@ -974,8 +1045,8 @@ def _project_version(root: Path) -> str:
 def cmd_contact_sheet(args) -> int:
     """参数对比网格（FEATURE-SPEC §7）：笛卡尔积逐格渲染 + 带标注拼图。
 
-    每格标注 = 该格**非默认**的取值（默认值来自命令行其余参数）——一眼看出
-    这一格改了什么。格内不出 HUD（对比的是构图本身）。
+    每格标注 = 该格在 ``--vary`` 各轴上的取值（没扫的轴就是命令行基准值，
+    不进标签）——一眼看出这一格改了什么。格内不出 HUD（对比的是构图本身）。
     """
     from PIL import Image, ImageDraw
     photo = _need(args.photo, "背景照片")
@@ -998,12 +1069,10 @@ def cmd_contact_sheet(args) -> int:
     for key, values in axes:
         combos = [dict(c, **{key: v}) for c in combos for v in values]
 
-    # 基准参数（命令行给的其余摆放参数）
-    base_params = dict(frame_key=args.frame, mode=args.mode, size_pct=args.size_pct,
-                       char_scale=args.char_scale, rot_basis=args.rot_basis,
-                       shot=args.shot, edge_bar=args.edge_bar,
-                       shadow=not args.no_shadow, grain=not args.no_grain,
-                       sample_light=not args.no_light)
+    # 基准参数（命令行给的其余摆放参数 + 光影三门）——直接复用 _compose_kw：
+    # 它就是 compose_shot 开关的唯一来源，另抄一份必然漏（--tone 就这样静默失效过，
+    # v1.5 审计修复）
+    base_params = _compose_kw(args)
 
     def _coerce(key: str, v: str):
         if key in ("shot", "frame", "mode", "rot_basis"):
@@ -1102,8 +1171,18 @@ def cmd_batch(args) -> int:
     char_p = _need(args.char, "立绘")
     char01 = image_to_rgba01(char_p)
     depth_dir = Path(args.depth_dir) if args.depth_dir else None
-    if depth_dir is not None and not depth_dir.is_dir():
-        raise CliError(f"深度帧目录不存在：{depth_dir}")
+    if depth_dir is not None:
+        if not depth_dir.is_dir():
+            raise CliError(f"深度帧目录不存在：{depth_dir}")
+        # 深度帧读取与 render --depth 同一条懒加载路径：模块被裁剪过时在这里就
+        # 人话报错，不进循环——循环里的宽松 except 会把 NameError/ImportError 当成
+        # "这个候选文件读不了" 吞掉，整批照片静默退回无深度渲染（v1.5 审计修复）。
+        try:
+            from arcam.depth import load_depth
+        except ImportError as exc:
+            raise CliError(
+                f"读不到 LiDAR 深度模块：{exc}（arcam.depth 应随包一起提供；"
+                "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §2）") from None
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1117,14 +1196,20 @@ def cmd_batch(args) -> int:
             depth = None
             if depth_dir is not None:
                 for cand in depth_dir.glob(photo.stem + ".*"):
+                    # 只放过"文件读不懂"（同名但不是深度帧）；NameError 之类的
+                    # 实现错误必须抛出去，不能被当成下一个候选安静跳过
                     try:
                         depth = load_depth(cand)
                         break
-                    except Exception:
+                    except (ValueError, OSError):
                         continue
             if depth is not None:
                 from arcam.plane import fit_ground_plane, camera_env_from_plane
-                env = camera_env_from_plane(fit_ground_plane(depth))
+                # roll_deg 必须透传：ARKit 给了横滚就先反旋再解 pitch，与
+                # render --depth / lidar inspect / compose._lidar_env 同一口径
+                # （漏传时同一帧会解出另一组 roll/pitch，v1.5 审计修复）
+                env = camera_env_from_plane(fit_ground_plane(depth),
+                                            roll_deg=depth.roll_deg)
                 cam, subj, _notes = _merge_env(cam, subj, _env_overrides(args), env,
                                                depth=depth, mode=args.mode,
                                                shot=args.shot)
@@ -1148,29 +1233,26 @@ def cmd_batch(args) -> int:
                            out_dir / f"{stem}.json")
             ok_count += 1
             print(f"  [{i}/{len(photos)}] {photo.name} → {out_path.name}"
-                  + ("（深度驱动）" if depth is not None else ""))
+                  + (t("note.batchDepth", lang=args.lang) if depth is not None else ""))
         except Exception as exc:
             failed.append((photo.name, f"{type(exc).__name__}: {exc}"))
-            print(f"  [{i}/{len(photos)}] {photo.name} → 失败：{exc}")
+            print(f"  [{i}/{len(photos)}] {photo.name} → "
+                  f"{t('note.batchFailed', lang=args.lang)}：{exc}")
     print(t("note.batchDone", ok_count, len(photos), lang=args.lang)
           if ok_count == len(photos)
-          else f"批处理完成：{ok_count}/{len(photos)} 成功"
-               + (f"，{len(failed)} 张失败（见上）" if failed else ""))
+          else t("note.batchPartial", ok_count, len(photos), len(failed),
+                 lang=args.lang))
     return 0 if not failed else 1
 
 def cmd_char_layer(args) -> int:
     char_p = _need(args.char, "立绘")
     char01 = image_to_rgba01(char_p)
     cam, subj = _pose(args, args.width, args.height)
-    # shot/edge_bar/rot_basis 与 _compose_kw 同一套：char-layer 收了这些开关就得生效，
-    # 否则「层盖回去严丝合缝」对不上（render 侧一直透传，这里曾整组漏掉）。
-    layer, _rect = compose_char_layer(char01, subj, cam, frame_key=args.frame,
-                                      mode=args.mode,
-                                      size_pct=args.size_pct,
-                                      char_scale=args.char_scale,
-                                      rot_basis=args.rot_basis,
-                                      shot=args.shot, edge_bar=args.edge_bar,
-                                      tone=args.tone)
+    # 与 render 同一套 _compose_kw：char-layer 收了 --shot/--edge-bar/--rot-basis
+    # 和光影三门（--no-shadow/--no-grain/--no-light）就必须生效，否则「层盖回去
+    # 严丝合缝」对不上（这几组历史上各整组漏过一次；v1.5 审计又抓到时漏的是
+    # 三门——shadow 决定层里那团接触阴影在不在，用户开了 --no-shadow 层却照画）。
+    layer, _rect = compose_char_layer(char01, subj, cam, **_compose_kw(args))
     out = Path(args.out)
     save_png(layer, out)
     print(f"立绘层 {out}（{layer.shape[1]}×{layer.shape[0]} RGBA"
@@ -1240,7 +1322,7 @@ def cmd_prep(args) -> int:
     顺序与原版一致；任一步抛错静默跳过（修图不能把"出图"搞挂）。
     """
     from arcam.i18n import t
-    from arcam.matte_tools import auto_trim, lens_blur, soften_edge
+    from arcam.matte_tools import auto_trim, is_half_body, lens_blur, soften_edge
     char_p = _need(args.char, "立绘")
     char01 = image_to_rgba01(char_p)
     lang = args.lang
@@ -1278,7 +1360,6 @@ def cmd_prep(args) -> int:
         except Exception:
             pass
 
-    from arcam.matte_tools import is_half_body
     half = is_half_body(arr)
     out = Path(args.out)
     save_png(arr, out)
@@ -1289,7 +1370,9 @@ def cmd_prep(args) -> int:
         print(f"  · {t('note.halfAuto', lang=lang)}")
         print("    （半身图建议配 --mode free 出图；贴地会把下沿钉在地面上）")
     else:
-        print("  · " + t("note.chHint", lang=lang).split("；")[0])
+        # note.chHint 是「自由模式…；贴地模式…」两句：只报第一句（与语言无关地
+        # 截到第一个分句——中文用全角分号、英文用句点空格，两种都要认）
+        print("  · " + re.split(r"[；]|\. ", t("note.chHint", lang=lang))[0])
     return 0
 
 

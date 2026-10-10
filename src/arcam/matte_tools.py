@@ -29,6 +29,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from arcam.numeric import js_round
+
 #: 原版 canvas 的 alpha 判定阈值（cutout.js contentBounds 的 alphaMin 默认 8、
 #: index.html:2365 半身判定的同款门限）——01 空间的等价值。
 ALPHA_MIN_01 = 8.0 / 255.0
@@ -171,7 +173,9 @@ def _flood_solid(rgba01: np.ndarray, tol: float,
 
     a = np.where(is_bg, 0.0, 255.0).reshape(h, w)
     if feather > 0:
-        a = _box_blur(a, max(1, int(round(feather))))
+        # 盒式均值 + **(s/n)|0 字节截断**（cutout.js:88）——原版写回的是
+        # Uint8Array，不截断会让下游 soften 的字节域入口多一分小数。
+        a = np.floor(_box_blur(a, max(1, js_round(feather))))
     out = arr.copy()
     out[..., 3] = a / 255.0
     return out, removed / float(w * h)
@@ -231,6 +235,48 @@ def auto_trim(rgba01: np.ndarray,
     return arr[y:y + h, x:x + w].copy(), (x, y, w, h)
 
 
+def _shift_valid(a: np.ndarray, k: int, axis: int) -> tuple[np.ndarray, np.ndarray]:
+    """沿 ``axis`` 平移 ``k``（越界补 0），返回 (平移结果, 有效掩码)。
+
+    有效掩码让均值只按**界内样本数**取分母——原版画布外 ``continue`` 的语义。
+    """
+    out = np.zeros_like(a)
+    valid = np.zeros(a.shape, dtype=bool)
+    n = a.shape[axis]
+    sl_src: list = [slice(None)] * a.ndim
+    sl_dst: list = [slice(None)] * a.ndim
+    if k > 0:
+        sl_src[axis], sl_dst[axis] = slice(0, n - k), slice(k, n)
+    elif k < 0:
+        sl_src[axis], sl_dst[axis] = slice(-k, n), slice(0, n + k)
+    out[tuple(sl_dst)] = a[tuple(sl_src)]
+    valid[tuple(sl_dst)] = True
+    return out, valid
+
+
+def _separable_3tap_mean(a: np.ndarray) -> np.ndarray:
+    """原版 softenEdge 的 feather 内核（cutout.js:805-817 逐字对译）。
+
+    ⚠ 与 :func:`_box_blur` **不是同一个核**：原版是**可分离 3 抽头均值、横竖
+    各一遍、每遍 ``Math.round``（等效 5×5 三角形核，比 5×5 盒式更接近高斯）；
+    且 ``fe`` 只当**布尔**用——半径硬编码 1，``feather=2`` 里的 2 不是半径。
+    实测差别：24×24 图单个 8×8 块，盒式 vs 原版最大差 153/255、96/576 像素
+    不同（盒式留下峰值 36% 的软团，原版留下硬 3×3 边）。
+    ``a`` 为**字节值**（0..255 的 float64）；返回同为字节值。
+    """
+    cur = a
+    for axis in (1, 0):                       # 先横向后纵向（原版 pass 0 = horiz）
+        acc = cur.copy()                      # k=0 恒在界内
+        cnt = np.ones_like(cur)
+        for k in (-1, 1):
+            shifted, valid = _shift_valid(cur, k, axis)
+            acc = acc + shifted
+            cnt = cnt + valid
+        # 每遍 Math.round：字节非负，floor(x+0.5) 即 ECMA Math.round
+        cur = np.floor(acc / cnt + 0.5)
+    return cur
+
+
 def soften_edge(rgba01: np.ndarray, *, erode: int = _SOFTEN_ERODE,
                 feather: int = _SOFTEN_FEATHER) -> tuple[np.ndarray, bool]:
     """柔边整理（cutout.js softenEdge）：erode 收轮廓 + feather 做软边。
@@ -242,13 +288,14 @@ def soften_edge(rgba01: np.ndarray, *, erode: int = _SOFTEN_ERODE,
     arr = _as_rgba01(rgba01)
     if erode <= 0 and feather <= 0:
         return arr.copy(), False
-    a = arr[..., 3]
+    # ⚠ 原版全程在**字节域**跑（getImageData 的 0..255）：入口量化、出口除回。
+    a = np.floor(np.clip(arr[..., 3], 0.0, 1.0) * 255.0 + 0.5)
     if erode > 0:
         a = _erode(a, int(erode))
     if feather > 0:
-        a = _box_blur(a, int(feather))
+        a = _separable_3tap_mean(a)
     out = arr.copy()
-    out[..., 3] = a
+    out[..., 3] = a / 255.0
     return out, True
 
 
@@ -262,14 +309,19 @@ def lens_blur(rgba01: np.ndarray, k: float = 0.62) -> np.ndarray:
     不会把透明像素的黑拉进边缘）；直接对 RGBA 四通道各自插值会把透明处的
     黑色渗进半透明边（亮底素材一圈发黑描边的来源）。所以 RGB 先乘 alpha、
     两路分别双线性缩放、回来再除回。
+
+    ⚠ 目标尺寸的取整走 :func:`arcam.numeric.js_round`（原版 ``Math.round``
+    半向 +∞）—— 用 Python 内置 ``round``（半数取偶）在 ``w·k`` 恰好落在
+    .5 时会小一档（实测 w=75/k=0.62 → 46.5：内置 46、JS 47），整张图糊得
+    不一样（364/6000 像素变、最大差 2.16/255）。
     """
     from PIL import Image
     arr = _as_rgba01(rgba01)
     h, w = int(arr.shape[0]), int(arr.shape[1])
     if h < 8 or w < 8:
         return arr.copy()
-    tw = max(2, int(round(w * k)))
-    th = max(2, int(round(h * k)))
+    tw = max(2, js_round(w * k))
+    th = max(2, js_round(h * k))
     a = arr[..., 3]
     premul = arr[..., :3] * a[..., None]
 
@@ -301,19 +353,24 @@ class PreparedChar:
 def is_half_body(rgba01: np.ndarray) -> bool:
     """半身判定（index.html:2428-2434 的 1:1 对译）。
 
-    原版逐字：取**倒数第二行**（``height-2``）的 alpha，数 ``> 200``（字节）的
-    像素，``solid / width > 0.3`` → 半身。三个口径都不许改：行位（-2 不是 -1，
-    避开最底行可能的压缩伪影）、阈值（200/255 不是 8/255——这是"实"与"边"的分界）、
-    比例（30% 而不是任一点——切口只要盖住三成宽就算被切断）。
+    原版逐字：取**倒数第二行**（``getImageData(0, max(0, h-2), w, 1)``）的
+    alpha，数 ``> 200``（字节）的像素，``solid / width > 0.3`` → 半身。
+    三个口径都不许改：行位（-2 不是 -1，避开最底行可能的压缩伪影）、阈值
+    （200/255 不是 8/255——这是"实"与"边"的分界）、比例（30% 而不是任一点
+    ——切口只要盖住三成宽就算被切断）。
+
+    行下标照抄原版的 ``Math.max(0, h-2)``：h>=2 时就是倒数第二行，h==1 时
+    退化到唯一的第 0 行（原版同样读它，不是一律返回 False）。没有行可读
+    （h==0）或没有列（w==0，原版 ``0/0=NaN > 0.3`` 为 false）时返回 False。
 
     这种图**不能贴地**——贴地把下沿钉在地面，等于把"腰以上"当成整个人放大
     （§4.6）。半身图应走自由模式（+ 贴下边）。
     """
     arr = _as_rgba01(rgba01)
     h = int(arr.shape[0])
-    if h < 2:
+    if h < 1 or int(arr.shape[1]) < 1:
         return False
-    row = arr[h - 2, :, 3]
+    row = arr[max(0, h - 2), :, 3]
     solid = int(np.count_nonzero(row > 200.0 / 255.0))
     return (solid / float(arr.shape[1])) > 0.3
 
@@ -334,6 +391,12 @@ def auto_prepare_char(rgba01: np.ndarray, *,
 
     风控（原版逐字）：任一步抛错 → 该步静默跳过（自动处理绝不能把"装图"这件事
     本身搞挂）；``enabled=False`` → 原样返回（只报 half_body）。
+
+    ⚠ 回退时的**上报字段**与原版有一处已记录的偏离（像素行为一致）：原版只把
+    ``out.cut/trimmed/half`` 重置、``out.soft/blur`` 留着（于是 loadChar 仍会显示
+    autoSoft/autoBlur），且 ``half`` 直接置 false；这里回退即"什么都没发生"，故
+    ``actions`` 全清、``half_body`` 按**回退后的原图**实算（比原版的 false 更能
+    反映真相，调用方拿到的图就是原图）。
     """
     arr = _as_rgba01(rgba01)
     if not enabled:

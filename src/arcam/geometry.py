@@ -9,6 +9,9 @@
   加了 FOV clip 会与桌面验证器的往返测试对不上）。
 - ``place`` 写回时 ``S.d`` 夹 [0.5, 20]（index.html:3197）、``S.x`` 夹 [-6, 6]
   （index.html:3198）两处 clamp 范围与 ``autoFix`` 的 ±20 不一致，如实保留。
+- ``place`` 在 ``focal_px(cam) == 0``（0×0 画布或 ``feq_mm=0``）时返回 None：JS 的
+  ``/0`` 得 Infinity/NaN 传播、Python 会抛 ``ZeroDivisionError``，按 focal_px 对退化
+  画布既定的「不抛」策略收口（同 :func:`focal_px` 的零维画布分流）。
 - 主点固定在画布中心 ``(W/2, H/2)``，无主点偏移（artifact §1.6）。
 """
 
@@ -91,12 +94,18 @@ def place(u: float, v: float, cam: Camera) -> tuple[float, float] | None:
 
     如实保留的原版写回语义（docs/SPEC.md §5 第 1 条）：d 夹 [0.5, 20]（3197）、
     x 夹 [-6, 6]（3198）；后者的 ±6 与 auto_fix_x 的 ±20 故意不一致，不许"顺手修"。
-    退化返回 None：|den| < 1e-6（3193，射线与地平面近平行）或 d <= 0.05（3195）。
-    SPEC §3.1 摘要只提 "x 夹 ±6"，这里连 d 的 clamp 一起按原版逐字保留。
+    退化返回 None：|den| < 1e-6（3193，射线与地平面近平行）、d <= 0.05（3195）、
+    ``focal_px(cam) == 0``（0×0 画布或 feq=0，见下）。SPEC §3.1 摘要只提 "x 夹 ±6"，
+    这里连 d 的 clamp 一起按原版逐字保留。
     """
     p = cam.pitch_deg * _DEG2RAD
     r = cam.roll_deg * _DEG2RAD
     focal = focal_px(cam)
+    if focal == 0.0:
+        # 零维画布（0×0）或 feq=0 → F=0，project 全部塌缩到主点、逆解无定义。
+        # 原版 JS 的 /0 得 Infinity/NaN 传播（不抛异常），Python 会抛
+        # ZeroDivisionError —— 按 focal_px 对退化画布既定的「不抛」策略收口为 None。
+        return None
     up = u - cam.width / 2.0
     vp = v - cam.height / 2.0
     a = (up / focal) * math.cos(r) + (vp / focal) * math.sin(r)

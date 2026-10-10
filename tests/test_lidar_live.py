@@ -131,6 +131,33 @@ def test_meta_w_h_overridden_by_send_frame():
 # 落盘：save_depth → load_depth 读回（L1 未落地则断言字节数与 magic）
 # ---------------------------------------------------------------------------
 
+def test_write_depth_spec_matches_authoritative_save_depth(tmp_path: Path):
+    """裁剪安装的兜底写盘与权威 ``arcam.depth.save_depth`` **逐字节同口径**。
+
+    回归：兜底旧实现把无效值原样写 NaN 位型，而 ARCD 的无效标记是 **0**
+    （save_depth 的口径）——第三方读者按「0=无效」解析时 NaN 字节会被当成
+    离群深度。读回时两者都归一成 NaN，故修正后往返语义无损。
+    """
+    from arcam.lidar_live import _write_depth_spec
+
+    meta, depth = lidar_sim.synth_ground_frame(h=1.55, index=0)
+    d = np.array(depth, dtype=np.float32)
+    d[0, 0] = np.nan                     # 无效三态：NaN / 0 / 负
+    d[0, 1] = 0.0
+    d[0, 2] = -1.0
+    meta = dict(meta, roll_deg=None, pitch_deg=None, height_m=None)
+
+    _write_depth_spec(tmp_path / "spec.depth", meta, d)
+    frame = arcam_depth.LiDARFrame(depth_m=d, fx=meta["fx"], fy=meta["fy"],
+                                   cx=meta["cx"], cy=meta["cy"])
+    arcam_depth.save_depth(frame, tmp_path / "auth.depth")
+    assert (tmp_path / "spec.depth").read_bytes() == (tmp_path / "auth.depth").read_bytes()
+
+    back = arcam_depth.load_depth(tmp_path / "spec.depth")
+    assert np.isnan(back.depth_m[0, 0]) and np.isnan(back.depth_m[0, 1])
+    assert np.isnan(back.depth_m[0, 2])
+
+
 def test_serve_out_dir_writes_depth_files(tmp_path: Path):
     """out_dir 非 None 时落盘 frame_%06d.depth；可被 arcam.depth.load_depth
     读回且 depth/intrinsics 一致（arcam.depth 不可用时按 spec §2.3 断言字节数与 magic）。"""

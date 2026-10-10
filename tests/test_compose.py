@@ -29,10 +29,11 @@ from arcam.compose import (
 )
 from arcam.frames import frame_rect
 from arcam.geometry import Camera
-from arcam.lighting import LightSample, bake_lit
+from arcam.lighting import LightSample, bake_lit, measure_region
 from arcam.numeric import Rect, js_round
 from arcam.placement import Subject, current_placement
 from arcam import sprite as sprite_mod
+import arcam.compose as comp
 
 W, H = 320, 240
 CAM = Camera(W, H, 1.6, 23.0, -8.0, 3.0)
@@ -289,7 +290,7 @@ def test_shadow_color_uses_measured_light(monkeypatch) -> None:
     assert spy.calls and spy.calls[0]["ambient"] == got.light.mean
 
 
-def test_bake_lit_receives_target_box() -> None:
+def test_bake_lit_receives_target_box(monkeypatch) -> None:
     """bake_lit 的 canvas 参数 = 立绘落在画布上的目标尺寸（颗粒缩放补偿用）。
 
     照片路径与立绘层路径各烘一次，两次的目标框必须相同。
@@ -299,16 +300,11 @@ def test_bake_lit_receives_target_box() -> None:
 
     def spy(char, sample, canvas, **kw):   # grain 门（默认 True）不影响本断言
         seen.append(canvas)
-        return real(char, sample, canvas)
+        return real(char, sample, canvas, **kw)
 
-    import arcam.compose as comp
-    saved = comp.bake_lit
-    comp.bake_lit = spy
-    try:
-        pc = current_placement(CHAR, SUBJ, CAM, mode="ground", char_scale=1.0, rot_basis="world")
-        compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅")
-    finally:
-        comp.bake_lit = saved
+    monkeypatch.setattr(comp, "bake_lit", spy)
+    pc = current_placement(CHAR, SUBJ, CAM, mode="ground", char_scale=1.0, rot_basis="world")
+    compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅")
     assert seen and set(seen) == {(js_round(pc.w), js_round(pc.h))}
     assert len(seen) == 2                          # 照片一遍 + 立绘层一遍
 
@@ -453,3 +449,93 @@ def test_compose_char_layer_free_mode_frame_key() -> None:
                                      size_pct=30.0, edge_bar=1)
     assert rect == frame_rect("1:1", W, H)
     assert np.array_equal(layer, shot.char_layer)
+
+
+# ───────────────────────── 光影三门透传（v1.3 新增门的回归） ─────────────────────────
+# 历史教训：门加了但某一层没透传 = 静默失效（本项目已踩过两次）。下面四条把
+# compose_shot / compose_char_layer → _engine 的 shadow / grain / sample_light
+# 逐个钉死：门必须在 _engine 里真的被读到，且在三个调用点（compose_shot 的
+# 照片一遍 + 立绘层一遍、compose_char_layer 一遍）真的透传。只断言"出图变了"
+# 不够 —— 那一横竖也可能是别处坏了，所以每条都同时记录门本身的实参。
+
+
+def _grain_spy(monkeypatch: pytest.MonkeyPatch) -> list:
+    """记录每次 bake_lit 实际拿到的 grain 实参。"""
+    seen: list = []
+    real = comp.bake_lit
+
+    def spy(char, sample, canvas, **kw):
+        seen.append(kw.get("grain", "<缺省>"))
+        return real(char, sample, canvas, **kw)
+
+    monkeypatch.setattr(comp, "bake_lit", spy)
+    return seen
+
+
+def test_grain_gate_passthrough_and_effect(monkeypatch) -> None:
+    seen = _grain_spy(monkeypatch)
+    base = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅")
+    assert seen == [True, True]                     # 照片一遍 + 立绘层一遍都透传
+    seen.clear()
+    off = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅", grain=False)
+    assert seen == [False, False]
+    assert not np.array_equal(base.shot, off.shot)
+    assert not np.array_equal(base.char_layer, off.char_layer)
+    # compose_char_layer 那一遍也透传（层路径只有一个 _engine 调用点）
+    seen.clear()
+    compose_char_layer(CHAR, SUBJ, CAM, light=base.light, grain=False)
+    assert seen == [False]
+
+
+def test_shadow_gate_passthrough_and_effect(monkeypatch) -> None:
+    spy = _Spy(monkeypatch)
+    compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅", shadow=False)
+    assert spy.calls == []                          # 阴影层根本不建
+    assert spy.sprite_calls
+    for call in spy.sprite_calls:
+        assert call["shadow"] is False
+        assert call["shadow_layer"] is None
+    # 端到端：关掉阴影出图必须真的少一层
+    base = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅")
+    off = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅", shadow=False)
+    assert not np.array_equal(base.shot, off.shot)
+    assert not np.array_equal(base.char_layer, off.char_layer)
+    # 立绘层入口同样透传
+    spy2 = _Spy(monkeypatch)
+    compose_char_layer(CHAR, SUBJ, CAM, light=base.light, shadow=False)
+    assert spy2.calls == []
+    for call in spy2.sprite_calls:
+        assert call["shadow"] is False
+
+
+def test_sample_light_gate_passthrough_and_effect(monkeypatch) -> None:
+    measured: list = []
+    baked: list = []
+    real_measure = comp.measure_region
+    real_bake = comp.bake_lit
+
+    def spy_measure(img, region, levels):
+        measured.append(levels)
+        return real_measure(img, region, levels)
+
+    def spy_bake(char, sample, canvas, **kw):
+        baked.append(sample is not None)
+        return real_bake(char, sample, canvas, **kw)
+
+    monkeypatch.setattr(comp, "measure_region", spy_measure)
+    monkeypatch.setattr(comp, "bake_lit", spy_bake)
+
+    got = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅", sample_light=False)
+    assert measured == []                           # 门在读：压根不采光
+    assert got.light is None
+    assert baked == []                              # 没光 → 原版同分支不烘
+    # 显式给的光优先于开关（原版 lightM || null 的语义）
+    base = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅")
+    again = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅",
+                         light=base.light, sample_light=False)
+    assert np.array_equal(again.shot, base.shot)
+    assert np.array_equal(again.char_layer, base.char_layer)
+    # 立绘层路径本来采不到光（opaque=False），开关在那一遍上是空操作
+    lay_a, _ = compose_char_layer(CHAR, SUBJ, CAM, light=base.light)
+    lay_b, _ = compose_char_layer(CHAR, SUBJ, CAM, light=base.light, sample_light=False)
+    assert np.array_equal(lay_a, lay_b)

@@ -24,8 +24,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from arcam.frames import frame_rect
 from arcam.geometry import Camera, focal_px, place, project
+from arcam.numeric import Rect
 from arcam.placement import Subject, current_placement
 from arcam.scene import build_scene
 
@@ -100,7 +100,7 @@ def test_placement_vectors_recompute():
                       rot_deg=v.get("rot_deg"),
                       edge_bar=v.get("edge_bar", 0))
             if v.get("rect") is not None:
-                kw["rect"] = type(frame_rect("满幅", 1, 1))(*v["rect"])
+                kw["rect"] = Rect(*v["rect"])
         p = current_placement(char, subj, cam, **kw)
         got = None if p is None else [p.u, p.v, p.w, p.h, p.rot]
         assert _close(got, v["out"]), f"placement[{i}]（{v['kind']}）"
@@ -114,7 +114,6 @@ def test_placement_vectors_recompute():
 def test_scene_vectors_recompute():
     """scene 组：buildScene dict 全字段重算比对（alpha 统计属 JS 画布侧合成，
     由浏览器差分脚本核对，这里只钉 Python 的 scene dict）。"""
-    from arcam.numeric import Rect
     for i, v in enumerate(_load()["scene"]):
         p = v["params"]
         cam = Camera(int(p["W"]), int(p["H"]), 1.6, float(p["feq"]),

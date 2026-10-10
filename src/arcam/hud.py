@@ -110,23 +110,14 @@ class GridPath:
 
 # ─────────────────────── 工具 ───────────────────────
 
-def _to_pil(img: np.ndarray) -> tuple[Image.Image, bool]:
-    """(H,W,3) uint8 → PIL RGB；返回 (图, 是否新建)。调用方负责写回。"""
+def _to_pil(img: np.ndarray) -> Image.Image:
+    """(H,W,3) uint8 → PIL RGB（带 alpha 的入参丢掉 alpha；浮点入参按 01 口径量化）。"""
     arr = np.asarray(img)
     if arr.dtype != np.uint8:
         arr = np.clip(arr * 255.0 if arr.max() <= 1.0 else arr, 0, 255).astype(np.uint8)
     if arr.shape[2] == 4:
         arr = arr[..., :3]
-    return Image.fromarray(arr, "RGB"), True
-
-
-def _blend(draw: ImageDraw.ImageDraw, xy, fill, width=1):
-    """按原版 rgba 语义画线：PIL 不支持半透明直接描边 → 先画到 overlay 再合成。
-
-    简化处理：把带 alpha 的颜色预乘合成到当前像素由调用方的 overlay 层完成，
-    这里只接受**已合成**的 RGB 元组（各 draw_* 入口统一过 _flat）。
-    """
-    draw.line(xy, fill=fill, width=width)
+    return Image.fromarray(arr, "RGB")
 
 
 def _flat(rgba: tuple[float, float, float, float],
@@ -156,7 +147,7 @@ def frame_overlay(img: np.ndarray, rect, canvas_size: tuple[int, int]) -> np.nda
     if (rect.x <= 0.5 and rect.y <= 0.5
             and rect.x + rect.w >= W - 0.5 and rect.y + rect.h >= H - 0.5):
         return img
-    pil, _ = _to_pil(img)
+    pil = _to_pil(img)
     draw = ImageDraw.Draw(pil)
     dim = _flat(_DIM)
     if rect.y > 0.5:
@@ -173,6 +164,8 @@ def frame_overlay(img: np.ndarray, rect, canvas_size: tuple[int, int]) -> np.nda
     for i in (1, 2):
         x = rect.x + rect.w * i / 3
         y = rect.y + rect.h * i / 3
+        # ⚠ 原版三分线 lineWidth=1.5：PIL 的 width 只收整数（传 float 直接
+        # TypeError），这里如实记下取整口径（向下取 1），不改渲染行为
         draw.line([(x, rect.y), (x, rect.y + rect.h)], fill=third, width=1)
         draw.line([(rect.x, y), (rect.x + rect.w, y)], fill=third, width=1)
     return np.asarray(pil)
@@ -219,9 +212,14 @@ def draw_grid(img: np.ndarray, cam: Camera, subject_x: float = 0.0) -> np.ndarra
     """地面网格两遍绘制（index.html:1796-1824）：先黑描边、再青色主线/次线。
 
     横线标签：``project(-1.4, -h, d)`` 锚点、偏移 (+8,-8)、黑描边后填青；
-    ``q.v`` 出画布不画（1816）。
+    ``q.v`` 出画布不画（1816）；字号 20（原版 ``bold 20px``，PIL 候选表没有
+    粗体分支，用 4px 描边补重量感）。
+
+    ⚠ 次线原版 lineWidth=1.8：PIL 只收整数，如实记下取整口径（向下取 1）。
+    ``subject_x`` 与原版 ``gridPaths()`` 一样不参与几何（网格锚在世界系），
+    留在签名里只为与 :func:`grid_paths` 对拍时同参。
     """
-    pil, _ = _to_pil(img)
+    pil = _to_pil(img)
     draw = ImageDraw.Draw(pil)
     paths = grid_paths(cam, subject_x)
     for pass_i in (0, 1):
@@ -267,7 +265,7 @@ def draw_horizon(img: np.ndarray, cam: Camera, label: str = "地平线") -> np.n
     ``u = W/2 + F·(t·cos r + tan p·sin r)``、``v = H/2 + F·(t·sin r − tan p·cos r)``；
     标签锚点 t = −0.22、偏移 (+10,−10)。虚线 [12,8] 自绘（PIL 无 setLineDash）。
     """
-    pil, _ = _to_pil(img)
+    pil = _to_pil(img)
     draw = ImageDraw.Draw(pil)
     F = focal_px(cam)
     p = math.radians(cam.pitch_deg)
@@ -313,7 +311,7 @@ def draw_figure(img: np.ndarray, cam: Camera, subject: Subject) -> np.ndarray:
     逐字。``P(lx, ly) = project(S.x + lx, ly - S.h, S.d)``（局部坐标 → 相机系）；
     任何关节投影被剔除（None）时相关线段跳过（原版 seg() 的 ``if(!a||!b) return``）。
     """
-    pil, _ = _to_pil(img)
+    pil = _to_pil(img)
     draw = ImageDraw.Draw(pil)
     Hp = subject.height_m
 
@@ -443,7 +441,7 @@ def draw_hud_text(img: np.ndarray, cam: Camera, subject: Subject, *,
     中点连接）。返回 (画后的图, hints 列表)。
     """
     from arcam.i18n import t
-    pil, _ = _to_pil(img)
+    pil = _to_pil(img)
     draw = ImageDraw.Draw(pil)
     W, H = canvas_size
     a = project(subject.lateral_m, -cam.height_m, subject.distance_m, cam)

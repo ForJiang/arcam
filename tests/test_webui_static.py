@@ -293,6 +293,30 @@ def test_js_dom_references_resolve():
     assert not missing, f"app.js 引用了不存在的 DOM id: {missing}"
 
 
+def test_state_fields_all_written():
+    """死状态字段守卫：app.js 里读到的 ``state.X`` 必须有真实写入点。
+
+    踩过的坑（v1.5.0 B5 审计实修）：webui/app.js 读 ``state.charName`` 决定修图三钮
+    能不能点、HUD 有没有立绘，但上传分支只写过 ``state.char`` —— ``charName`` 从来
+    没被赋值，三个按钮整个点不动、HUD 永远报「还没选立绘」，而静态检查完全看不见。
+    自赋值（``state.X = state.X``）不算写入，那种行本身就是死代码。
+    """
+    for label, js in (("webui", _files()["app.js"]), ("docs", _pages_files()["app.js"])):
+        clean = _strip_js_noise(js)
+        m = re.search(r"\bstate\s*=\s*\{(.*?)\n\};", js, flags=re.S)
+        assert m, f"{label}/app.js 里找不到 state 字面量"
+        declared = set(re.findall(r"^\s{2}(\w+):", m.group(1), flags=re.M))
+        reads = set(re.findall(r"\bstate\.(\w+)", clean))
+        # 写入点：state.X = …（排除自赋值 state.X = state.X）
+        writes = set()
+        for mm in re.finditer(r"\bstate\.(\w+)\s*=(?!=)", clean):
+            if re.search(r"\bstate\." + mm.group(1) + r"\s*=\s*state\." + mm.group(1) + r"\b", clean):
+                continue
+            writes.add(mm.group(1))
+        dead = sorted(reads - writes - declared)
+        assert not dead, f"{label}/app.js 有只读不写的 state 字段（静默失效高发区）: {dead}"
+
+
 def test_no_dead_dom_ids():
     """死代码守卫：HTML 里的 id 必须被 JS 或 CSS 引用到（未引用的一律删）。
 
@@ -628,7 +652,12 @@ def test_i18n_tables_match_between_python_and_js():
         f"仅 Python {sorted(set(PY_TXT) - set(js_txt))[:5]}"
     for key, (zh, en) in PY_TXT.items():
         assert list(js_txt[key]) == [zh, en], f"{key} 两侧文案不同"
-    assert len(PY_TXT) == 186, f"表条数变了：{len(PY_TXT)}（原版 160 + webui 17 + CLI 1；3D 五键原版就有）"
+    # 条数口径（实测，别按印象写）：原版 index.html:600-830 TXT 逐条搬来 160 条
+    # （其中 4 条改了键名，如 kind.closeTip/sec.input 这类对不上原名的）+ webui/docs
+    # 两侧新增 26 条（sec.input/preview.empty/dz.*/btn.png/btn.layer/btn.bundle/
+    # btn.copyScene/fold.fx/hint.fxWeb/btn.fullscreen/note.paramsRestored 等）
+    # = 186。改这条断言前先跑 .venv/bin/python -c "from arcam.i18n import TXT; print(len(TXT))"。
+    assert len(PY_TXT) == 189, f"表条数变了：{len(PY_TXT)}（原版 160[含 4 条改名] + 新增 26）"
 
 
 def test_mmd_3d_wired():

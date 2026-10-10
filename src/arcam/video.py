@@ -590,7 +590,6 @@ def _write_gif(frame_paths: list[Path], path: Path, fps: float) -> None:
     所以每帧独立 ``quantize``（Fast OCTree）。``duration`` 取 1000/fps 毫秒
     （GIF 以 1/100s 为单位，PIL 会自行取整）；``loop=0`` 无限循环。
     """
-    from PIL import Image
     duration_ms = max(20, int(round(1000.0 / max(fps, 0.001))))
     frames: list[Image.Image] = []
     for p in frame_paths:
@@ -697,6 +696,8 @@ def render_track(bg_source: str | Path | np.ndarray, track: PoseTrack,
     if gif and written:
         _write_gif(written, out / GIF_NAME, track.fps)
     if not (out / MP4_NAME).exists():
-        print("提示：未安装 imageio / imageio-ffmpeg，仅输出 PNG 序列；"
+        # 两种原因共用一句：没装 imageio/imageio-ffmpeg，或装了但 writer 起不来
+        # /写失败（上面已单独警告过一次）。提示只说"怎么补上 mp4"，不断言原因。
+        print("提示：没有 mp4 成片，仅输出 PNG 序列（+GIF 若开了 --gif）；"
               "pip install imageio imageio-ffmpeg 可追加 mp4", flush=True)
     return written

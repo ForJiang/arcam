@@ -9,9 +9,10 @@
   （index.html:3020）——都保留，auto_fix_x 用 ±20、place 用 ±6。
 - index.html:2911 的旧注释「吸附时锁 0」被 2912-2930 的注释明确推翻：吸附时**不**锁 0，
   立绘始终按 rotBasis 转（charRot，index.html:2930）。按代码行为实现。
-- SPEC §3.2 冻结签名之外追加的关键字参数（shot / free_p / edge_bar / rect / rot_basis）
-  全部带默认值，冻结签名调用点的行为不变；原版这些量来自全局 ``S`` / ``freeP`` /
-  ``snapRect()``，离线版只能显式传入（snapRect 的布局外壳属浏览器专属，见 SPEC §5）。
+- SPEC §3.2 冻结签名之外追加的关键字参数（ground 的 ``shot``、free 的
+  ``free_p`` / ``edge_bar`` / ``rect``）全部带默认值，冻结签名调用点的行为不变；
+  原版这些量来自全局 ``S`` / ``freeP`` / ``snapRect()``，离线版只能显式传入
+  （snapRect 的布局外壳属浏览器专属，见 SPEC §5）。
 - ``auto_fix_x`` 只回传归一化横坐标；原版 resnap 还会改 freeP.v，该信息不进返回值。
 """
 
@@ -68,6 +69,15 @@ def _char_size(char_rgba: np.ndarray | None) -> tuple[int, int] | None:
     if len(shape) < 2 or shape[0] <= 0 or shape[1] <= 0:
         return None
     return (int(shape[1]), int(shape[0]))
+
+
+def _free_p_of(value: tuple[float, float] | None) -> tuple[float, float]:
+    """freeP 归一化：None → 模块级默认（对应 arcam-core.js ``freePU`` 的 None 兜底）。
+
+    ``current_placement`` / ``auto_fix_x`` 是公开 API，调用方传 ``free_p=None``
+    表示「用默认」；不收的话会在 ``free_p[0]`` 上抛 TypeError。
+    """
+    return DEFAULT_FREE_P if value is None else value
 
 
 def _rotate_bar(bar: int, rot: float) -> int:
@@ -168,7 +178,7 @@ def current_placement(char_rgba: np.ndarray | None, subj: Subject, cam: Camera, 
             char_rgba, subj, cam,
             size_pct=float(kw.get('size_pct', 60.0)),
             rot_deg=float(rot_deg),
-            free_p=kw.get('free_p', DEFAULT_FREE_P),
+            free_p=_free_p_of(kw.get('free_p')),
             edge_bar=int(kw.get('edge_bar', 0)),
             rect=kw.get('rect'),
         )
@@ -193,7 +203,7 @@ def auto_fix_x(char_rgba: np.ndarray | None, subj: Subject, cam: Camera, *,
       （ground 为 subj.lateral_m，free 为 free_p[0]）。
     原版还有 draw()/syncSizeSliders 两个 UI 副作用，离线版无对应物，省略。
     """
-    free_p = kw.get('free_p', DEFAULT_FREE_P)
+    free_p = _free_p_of(kw.get('free_p'))
     keep_x = subj.lateral_m if mode != 'free' else float(free_p[0])
     if not cam.width or not cam.height:
         return (keep_x, 'nochar')          # 原版 !cv.width 分支（0×0 时 JS 同样落这里）

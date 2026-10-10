@@ -78,6 +78,20 @@ def test_focal_zero_short_edge_matches_js_no_crash():
     assert place(960.0, 200.0, _cam(1920, 0, 23.0)) is not None
 
 
+def test_place_zero_focal_returns_none_not_crash():
+    """F=0（0×0 画布或 feq=0）时 place 必须返回 None，不许抛 ZeroDivisionError。
+
+    原版 JS 的 ``/0`` 得 Infinity/NaN 传播（不抛异常），Python 直接除会崩 —— 按
+    focal_px 对退化画布既定的「不抛」策略收口为 None。同相机下 project 仍不崩
+    （F=0 时全部塌缩到主点）。"""
+    assert place(960.0, 200.0, _cam(0, 0, 23.0)) is None
+    assert place(960.0, 540.0, _cam(1920, 1080, 0.0)) is None
+    assert place(0.0, 0.0, _cam(0, 0, 0.0)) is None
+    # project 在同两款退化相机下照旧返回主点（与 JS 一致，不抛）
+    assert project(0.0, 0.0, 4.0, _cam(0, 0, 23.0)) == (0.0, 0.0)
+    assert project(0.0, 0.0, 4.0, _cam(1920, 1080, 0.0)) == (960.0, 540.0)
+
+
 def test_sensor_constants():
     """K_LONG = 0.8·43.266/2 = 17.3064；K_SHORT = 0.6·43.266/2 = 12.9798（index.html:1042）。"""
     assert K_LONG == pytest.approx(0.8 * 43.266 / 2, abs=0.0)
@@ -323,7 +337,7 @@ def _proj_matrix(f: float, w: int, h: int, near: float = 0.05, far: float = 120.
 def mmd_project_px(x: float, y_world: float, z_world: float, cam: Camera) -> tuple[float, float]:
     """世界点 (X, Y, Z) 经 mmd 矩阵管线得到的屏幕像素。
 
-    mmd.js:981 把人物摆到 z' = -d（three 世界 Z 与 arcam 世界 Z 朝观察者相反），故传入
+    mmd.js:979 把人物摆到 z' = -d（three 世界 Z 与 arcam 世界 Z 朝观察者相反），故传入
     -z_world；project() 的 y 参数 = Y_world - camH（相机系 y，artifact A §1.3）。
     NDC → 屏幕：u = (ndc_x+1)·W/2、v = (1-ndc_y)·H/2（three/OpenGL 约定 y 向上、屏幕 y 向下）。
     """

@@ -200,6 +200,27 @@ def char_u8(height: int = 120, width: int = 60) -> np.ndarray:
     return arr
 
 
+def prep_u8(height: int = 120, width: int = 60) -> np.ndarray:
+    """白底 + 深色块的立绘：四步修图链**全部触发**。
+
+    手算（与 matte_tools.auto_prepare_char 实测一致）：深色块离白底足够远
+    （sum|Δ| = 0.784 > tol·3/255 = 0.3765）→ 泛洪只抠白底边环，占比 28/72
+    ≈ 0.5556 ∈ [CUT_RATIO_MIN, MAX] → cut 记数；内容 bbox 仍是整幅 → trim
+    记数（裁后 82×42，>= 8px 不触发 ⑥ 回退）；柔边/微糊各记一次。
+    """
+    arr = np.zeros((height, width, 4), dtype=np.uint8)
+    arr[..., 0], arr[..., 1], arr[..., 2], arr[..., 3] = 255, 255, 255, 255
+    arr[20:100, 10:50] = (20, 40, 200, 255)
+    return arr
+
+
+def margin_char_u8(height: int = 120, width: int = 60) -> np.ndarray:
+    """四边透明留白 + 中间不透明块（内容 bbox = (10, 20, 40, 80)，供裁边用）。"""
+    arr = np.zeros((height, width, 4), dtype=np.uint8)
+    arr[20:100, 10:50] = (230, 200, 255, 255)
+    return arr
+
+
 def _png(arr: np.ndarray) -> bytes:
     buf = io.BytesIO()
     Image.fromarray(arr, "RGBA" if arr.shape[2] == 4 else "RGB").save(buf, format="PNG")
@@ -530,7 +551,7 @@ class TestKeepAliveHygiene:
 
     @pytest.mark.parametrize("path", [
         "/api/matte-result-as-char", "/api/matte", "/api/render", "/api/export",
-        "/api/lidar/inspect", "/api/nope",
+        "/api/prep", "/api/trim", "/api/reset", "/api/lidar/inspect", "/api/nope",
     ])
     def test_body_consumed_and_connection_usable(self, server, uploaded, path):
         client = Client(_port(server))
@@ -544,6 +565,24 @@ class TestKeepAliveHygiene:
             again = post_json(client, "/api/render",
                               {"params": FULL_PARAMS, "scale": 0.5})
             assert again[0] == 200, (path, again[2][:160])
+            assert json.loads(again[2])["ok"] is True
+        finally:
+            client.close()
+
+    def test_get_with_body_does_not_break_keep_alive(self, server, uploaded):
+        """GET 带 body（``curl -X GET -d``；浏览器不会）也要把请求体读掉。
+
+        回归：do_GET 旧实现不 drain，残体 ``{"pad":true}`` 会拼进同连接下一条
+        请求行（``{"pad":true}POST /api/render`` → 400/501），把连接永久搅坏。
+        """
+        client = Client(_port(server))
+        try:
+            status, _, _ = client.request("GET", "/", b'{"pad":true}',
+                                          {"Content-Type": "application/json"})
+            assert status == 200
+            again = post_json(client, "/api/render",
+                              {"params": FULL_PARAMS, "scale": 0.5})
+            assert again[0] == 200, again[2][:160]
             assert json.loads(again[2])["ok"] is True
         finally:
             client.close()
@@ -607,8 +646,192 @@ class TestExport:
         assert Image.open(io.BytesIO(raw)).size == (192, 256)
 
 
-# ---------------------------------------------------------------- 5. matte
+# ---------------------------------------------------------------- 4.5 修图三端点
 
+class TestPrepTrimReset:
+    """``/api/prep`` / ``/api/trim`` / ``/api/reset``（v1.4 网页修图按钮组）。
+
+    契约：结果**替换会话内的立绘**（原版修图线改 chBase/chCanvas 的同语义），
+    但**不刷新还原基线**——reset 永远回到上传时那张（原版 setCharset 只在装图
+    时写 chOrig，index.html:2354）。
+    """
+
+    @pytest.fixture()
+    def prepped(self, server):
+        """上传照片 + 可四步全触发的立绘，返回复用同一连接的 Client。"""
+        client = Client(_port(server))
+        status, _, raw = post_upload(client, {"photo": ("photo.png", PHOTO),
+                                              "char": ("c.png", _png(prep_u8()))})
+        assert status == 200 and json.loads(raw)["ok"] is True
+        try:
+            yield client
+        finally:
+            client.close()
+
+    def test_prep_full_chain_replaces_char(self, server, prepped):
+        status, _, raw = post_json(prepped, "/api/prep",
+                                   {"steps": ["solid", "trim", "soften", "blur"]})
+        assert status == 200
+        payload = json.loads(raw)
+        assert payload["ok"] is True
+        assert set(payload) >= {"ok", "image", "cutRatio", "trimmed",
+                                "halfBody", "actions", "ms"}
+        assert payload["cutRatio"] == pytest.approx(0.5556, abs=1e-3)
+        assert payload["trimmed"] is True
+        assert isinstance(payload["halfBody"], bool)
+        assert payload["actions"] == ["note.autoCut", "note.autoTrim",
+                                      "note.autoSoft", "note.autoBlur"]
+        assert decode_data_uri(payload["image"]).size == (42, 82)   # 裁过边
+
+        # 会话立绘真被替换：下一遍 render 的 scene 记的就是修图后的尺寸
+        status, _, raw = post_json(prepped, "/api/render",
+                                   {"params": FULL_PARAMS, "scale": 1.0})
+        assert status == 200
+        scene = json.loads(raw)["scene"]
+        assert scene["character"]["image"] == {"width": 42, "height": 82}
+        assert scene["character"]["name"] == "c.png"        # 名字不随修图改变
+
+    def test_prep_default_steps_is_full_chain(self, server, prepped):
+        """不给 steps 键 → 四步全跑（原版整链的默认行为）。"""
+        status, _, raw = post_json(prepped, "/api/prep", {})
+        assert status == 200
+        default = json.loads(raw)
+        assert default["actions"] == ["note.autoCut", "note.autoTrim",
+                                      "note.autoSoft", "note.autoBlur"]
+        post_json(prepped, "/api/reset", {})                # 还原后再显式四步
+        status, _, raw = post_json(prepped, "/api/prep",
+                                   {"steps": ["solid", "trim", "soften", "blur"]})
+        assert status == 200
+        explicit = json.loads(raw)
+        assert explicit["image"] == default["image"]
+        assert explicit["actions"] == default["actions"]
+
+    def test_prep_subset_skips_discarded_full_chain(self, server, prepped,
+                                                   monkeypatch):
+        """steps 子集只跑子集：旧实现先算整链再把结果扔掉。
+
+        3000×1500 立绘 steps=["trim"] 实测 HTTP 层 3514ms → 57ms（省下的正是
+        那条被扔掉的整链，本身 ~2.4s）。
+        """
+        import arcam.matte_tools as mt
+        calls: list[int] = []
+        real = mt.auto_prepare_char
+
+        def spy(arr, *, enabled=True):
+            calls.append(1)
+            return real(arr, enabled=enabled)
+
+        monkeypatch.setattr(mt, "auto_prepare_char", spy)
+        status, _, raw = post_json(prepped, "/api/prep", {"steps": ["trim"]})
+        assert status == 200
+        payload = json.loads(raw)
+        assert payload["ok"] is True and payload["actions"] == ["note.autoTrim"]
+        assert calls == [], "子集路径不应调用整链 auto_prepare_char"
+        # 四步全点才走整链（一次）
+        status, _, raw = post_json(prepped, "/api/prep",
+                                   {"steps": ["solid", "trim", "soften", "blur"]})
+        assert status == 200 and len(calls) == 1
+
+    def test_prep_subset_shares_full_chain_parameters(self):
+        """子集四步与整链逐位一致（同参同序 + 同一 ⑥ 回退兜底）。"""
+        from arcam.matte_tools import auto_prepare_char
+        from arcam.webapp import Handler, _to_f01
+
+        a01 = _to_f01(prep_u8())
+        full = auto_prepare_char(a01, enabled=True)
+        sub = Handler._prep_subset(a01, ["solid", "trim", "soften", "blur"])
+        assert np.array_equal(full.rgba01, sub.rgba01)
+        assert (full.actions, full.cut_ratio, full.trimmed, full.half_body) == \
+               (sub.actions, sub.cut_ratio, sub.trimmed, sub.half_body)
+
+        # ⑥ 兜底：裁后内容 5×5（< 8px）→ 整条回退原图（子集路径与整链同门限）
+        tiny = np.zeros((20, 20, 4))
+        tiny[8:13, 8:13, 3] = 1.0
+        for got in (Handler._prep_subset(tiny, ["trim"]), auto_prepare_char(tiny)):
+            assert got.rgba01.shape == (20, 20, 4)
+            assert got.actions == () and got.trimmed is False
+
+    @pytest.mark.parametrize("steps", [
+        3, True, "solid", {"solid": 1}, [], ["nope"], ["solid", 3], [None],
+    ])
+    def test_prep_bad_steps_400_not_500(self, server, prepped, steps):
+        """steps 类型/步骤名不合法 → 400 带 hint（输入问题是用户能自己修的，
+        不许掉进 500 兜底写「这是 arcam 的 bug」）。"""
+        status, _, raw = post_json(prepped, "/api/prep", {"steps": steps})
+        assert status == 400, (steps, raw[:160])
+        payload = json.loads(raw)
+        assert payload["ok"] is False and payload.get("hint")
+        assert b"Traceback" not in raw
+
+    def test_prep_without_char_400(self, server):
+        status, _, raw = post_json(_port(server), "/api/prep", {})
+        assert status == 400
+        assert "立绘" in json.loads(raw)["error"]
+
+    def test_trim_then_reset_roundtrip(self, server):
+        """裁边按内容 bbox 裁；reset 回到上传时那张（原图尺寸、可再裁）。"""
+        client = Client(_port(server))
+        status, _, raw = post_upload(client, {"char": ("m.png", _png(margin_char_u8()))})
+        assert status == 200
+        try:
+            status, _, raw = post_json(client, "/api/trim", {})
+            assert status == 200
+            payload = json.loads(raw)
+            assert payload["trimmed"] is True
+            assert payload["rect"] == [10, 20, 40, 80]      # (x, y, w, h)
+            assert decode_data_uri(payload["image"]).size == (40, 80)
+
+            status, _, raw = post_json(client, "/api/reset", {})
+            assert status == 200
+            payload = json.loads(raw)
+            assert (payload["width"], payload["height"]) == (60, 120)
+            assert decode_data_uri(payload["image"]).size == (60, 120)
+
+            # 还原把立绘真换回去了：再裁一次得到同一个 rect
+            status, _, raw = post_json(client, "/api/trim", {})
+            assert status == 200 and json.loads(raw)["rect"] == [10, 20, 40, 80]
+        finally:
+            client.close()
+
+    def test_prep_does_not_refresh_reset_baseline(self, server, prepped):
+        """修图结果不当还原基线（原版只在装图时写 chOrig）。"""
+        status, _, raw = post_json(prepped, "/api/prep", {})
+        assert status == 200
+        status, _, raw = post_json(prepped, "/api/reset", {})
+        assert status == 200
+        assert decode_data_uri(json.loads(raw)["image"]).size == (60, 120)
+
+    def test_trim_and_reset_without_char_400(self, server):
+        for path in ("/api/trim", "/api/reset"):
+            status, _, raw = post_json(_port(server), path, {})
+            assert status == 400, path
+            assert json.loads(raw)["ok"] is False and json.loads(raw).get("hint")
+
+
+# ---------------------------------------------------------------- 4.6 schema 不变量
+
+class TestParamSchema:
+    """params schema 三张表必须互斥且全覆盖（漏一个键 = 该参数校验不到）。"""
+
+    def test_every_key_covered_exactly_once(self):
+        from arcam.webapp import (_BOOL_FIELDS, _CHOICE_SPECS, _NUM_SPECS,
+                                  PARAM_DEFAULTS)
+        groups = (set(_NUM_SPECS), set(_CHOICE_SPECS), set(_BOOL_FIELDS))
+        assert set().union(*groups) == set(PARAM_DEFAULTS)
+        assert not (groups[0] & groups[1])
+        assert not (groups[0] & groups[2])
+        assert not (groups[1] & groups[2])
+
+    def test_lighting_gates_present_in_schema_and_validation(self):
+        """v1.3 光影三门：schema 默认值与校验表都要在（render 透传由
+        TestLightingSwitches 的出图差异钉住）。"""
+        from arcam.webapp import _BOOL_FIELDS, PARAM_DEFAULTS
+        for key in ("light", "grain", "shadow"):
+            assert PARAM_DEFAULTS[key] is True, key
+            assert key in _BOOL_FIELDS, key
+
+
+# ---------------------------------------------------------------- 5. matte
 class TestMatte:
     def test_missing_model_400_never_500(self, server, uploaded, monkeypatch):
         """模型缺失环境：{ok:false, error 含下载指引}，HTTP 400（绝不是 500）。"""
@@ -926,3 +1149,34 @@ class TestLightingSwitches:
                         {"params": dict(FULL_PARAMS, light=False), "scale": 0.5})
         assert on[0] == 200 and off[0] == 200
         assert json.loads(on[2])["image"] != json.loads(off[2])["image"]
+
+    def test_grain_off_changes_pixels(self, server, uploaded):
+        """关噪点 → bakeLit 不加颗粒，出图与默认不同。"""
+        port = _port(server)
+        on = post_json(Client(port), "/api/render", {"params": dict(FULL_PARAMS), "scale": 0.5})
+        off = post_json(Client(port), "/api/render",
+                        {"params": dict(FULL_PARAMS, grain=False), "scale": 0.5})
+        assert on[0] == 200 and off[0] == 200
+        assert json.loads(on[2])["image"] != json.loads(off[2])["image"]
+
+    def test_all_three_gates_reach_compose_shot(self, server, uploaded, monkeypatch):
+        """三键必须真的透传到 compose_shot（schema/校验/render 三处都在）。
+
+        历史上「门加了但某处没透传 = 静默失效」踩过两次；这里直接抓
+        compose_shot 的实收 kwargs，shadow/grain/sample_light 缺一不可。
+        """
+        import arcam.webapp as webapp
+        seen: dict = {}
+        real = webapp.compose_shot
+
+        def spy(src, char, subj, cam, **kw):
+            seen.update(kw)
+            return real(src, char, subj, cam, **kw)
+
+        monkeypatch.setattr(webapp, "compose_shot", spy)
+        params = dict(FULL_PARAMS, light=False, grain=False, shadow=False)
+        status, _, raw = post_json(uploaded, "/api/render", {"params": params})
+        assert status == 200 and json.loads(raw)["ok"] is True
+        assert seen["sample_light"] is False
+        assert seen["grain"] is False
+        assert seen["shadow"] is False

@@ -395,7 +395,7 @@ def draw_figure(img: np.ndarray, cam: Camera, subject: Subject) -> np.ndarray:
 
 def composition_hints(cam: Camera, placement: SpritePlacement | None, *,
                       canvas_size: tuple[int, int], shot: str = "全身",
-                      mode: str = "ground") -> list[str]:
+                      mode: str = "ground", lang: str = "zh") -> list[str]:
     """构图体检 11 条（index.html:1890-1937 的 1:1 对译，全部并列无优先级）。
 
     判据（逐字）：地平线位置 hr∈[0.42,0.58]；pitch>40 压扁；pitch<−35 拉长；
@@ -403,10 +403,12 @@ def composition_hints(cam: Camera, placement: SpritePlacement | None, *,
     near>0.11；fill>0.92 顶满；fill<0.10 偏小；cover≥0.95 且 ground 且
     cutV<hv−H*0.03 浮空。
 
+    ``lang`` 只选文案语言（i18n 表 hints.*），判据与返回条数不变。
     ⚠ 删掉的 4 条（反解身高 ×2 / 眼高差 ×2）**不许复活**——index.html:1939-1955
     有据：它们只是在把大小滑块读回给用户听（hp ≡ S.Hp × charScale，zc/focal/
     cos p 全约掉），与场景一点关系都没有。
     """
+    from arcam.i18n import t
     W, H = canvas_size
     if W < 8 or H < 8:
         return []
@@ -417,33 +419,33 @@ def composition_hints(cam: Camera, placement: SpritePlacement | None, *,
     out: list[str] = []
 
     if 0.42 <= hr <= 0.58:
-        out.append("地平线在正中，抬一点或压一点")
+        out.append(t("hints.horizonMid", lang=lang))
     if cam.pitch_deg > 40:
-        out.append(f"俯角 {cam.pitch_deg:.0f}°，人物会被压扁")
+        out.append(t("hints.pitchHigh", f"{cam.pitch_deg:.0f}", lang=lang))
     if cam.pitch_deg < -35:
-        out.append("仰角偏大，人物会被拉长")
+        out.append(t("hints.pitchLow", lang=lang))
 
     if placement is not None and placement.w > 0:
         hw, hh = placement.w / 2, placement.h / 2
         if (placement.u + hw < 0 or placement.u - hw > W
                 or placement.v + hh < 0 or placement.v - hh > H):
-            out.append("人物出画了 —— 抬/压一点镜头，或把距离调远")
+            out.append(t("hints.outOfFrame", lang=lang))
             return out                       # 出画时其余几条都是拿画外坐标算的
         xr = placement.u / W
         near = min(abs(xr - 1 / 3), abs(xr - 2 / 3), abs(xr - 0.5))
         if near > 0.11:
-            out.append("角色挪到三分线上更稳")
+            out.append(t("hints.thirds", lang=lang))
         fill = placement.h / H
         if fill > 0.92:
-            out.append("角色快顶满画面")
+            out.append(t("hints.tooBig", lang=lang))
         if fill < 0.10:
-            out.append("角色偏小")
+            out.append(t("hints.tooSmall", lang=lang))
         # 要景别够全（cover ≥ 0.95 = 全身）才判接地——半身景别下"脚"不在画面里
         cover = SHOTS.get(shot, 1.0)
         if cover >= _COVER_FULL and mode == "ground":
             cut_v = placement.v + placement.h / 2
             if cut_v < hv - H * 0.03:
-                out.append("脚在地平线以上，浮空了")
+                out.append(t("hints.floating", lang=lang))
     return out
 
 
@@ -484,7 +486,7 @@ def draw_hud_text(img: np.ndarray, cam: Camera, subject: Subject, *,
                   stroke_width=2, stroke_fill=(0, 0, 0))
         y += 20
     hints = composition_hints(cam, placement, canvas_size=canvas_size,
-                              shot=shot, mode=mode)
+                              shot=shot, mode=mode, lang=lang)
     return np.asarray(pil), hints
 
 

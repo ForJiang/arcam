@@ -40,9 +40,21 @@ remote = api("GET", f"/git/refs/heads/{BRANCH}")["object"]["sha"]
 local = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 parent = subprocess.run(["git", "rev-parse", "HEAD~1"], capture_output=True, text=True).stdout.strip()
 print(f"远端 {BRANCH}: {remote[:8]}  本地 HEAD: {local[:8]}  parent: {parent[:8]}", flush=True)
-assert remote == parent, f"远端不是本地父提交（{remote[:8]} != {parent[:8]}）——历史分叉，先对齐再推"
 
-changed = subprocess.run(["git", "diff", "--name-only", f"{remote}..{local}"],
+# 历史对齐：本工具每轮都经 API 重建提交（author/committer 时间戳与本地不同），
+# 于是远端 tip 与本地父提交 **SHA 不同但树相同**——第二轮起必现。内容一致就在
+# 此收口（新提交仍挂 remote 为 parent，下面照旧）；树也不同才是真分叉，拒绝。
+if remote != parent:
+    remote_tree = api("GET", f"/git/commits/{remote}")["tree"]["sha"]
+    parent_tree = subprocess.run(["git", "rev-parse", f"{parent}^{{tree}}"],
+                                 capture_output=True, text=True).stdout.strip()
+    if remote_tree != parent_tree:
+        sys.exit(f"远端与本地父提交内容也不同（{remote[:8]} vs {parent[:8]}）"
+                 f"——真分叉，先对齐再推")
+    print(f"注：远端 tip 是上一轮 API 重建的提交（树与本地父提交相同），"
+          f"新提交直接挂它", flush=True)
+
+changed = subprocess.run(["git", "diff", "--name-only", f"{parent}..{local}"],
                          capture_output=True, text=True).stdout.split()
 print(f"变更 {len(changed)} 个文件", flush=True)
 

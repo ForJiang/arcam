@@ -36,7 +36,10 @@
     var video = $("cam-video");
     if (!video) return;
     if (!window.isSecureContext) {
-      setStatus(liveT("gate.failInsecure") || "不是安全上下文：摄像头和动作传感器只在 https:// 或 http://localhost 下可用", true);
+      // ⚠ 状态条是 textContent：gate.failInsecure 带 <span>/<b> 标签，是给闸门页
+      //   innerHTML 用的 —— 直接取表值会把标签当字面内容显示出来。纯文本场景必须
+      //   走 live.* 这几个键（中文与原来的 || 兜底逐字一致）。
+      setStatus(liveT("live.insecure"), true);
       return;
     }
     try {
@@ -60,11 +63,11 @@
       setupZoom(live.track);
       window.addEventListener("deviceorientation", onOrient, true);
 
-      $("btn-live").textContent = liveT("btn.liveStop") || "关闭相机";
+      $("btn-live").textContent = liveT("btn.liveStop");
       $("live-row").hidden = false;
       video.hidden = false;
       $("preview-empty").hidden = true;
-      setStatus(liveT("gate.opening") || "相机已开启");
+      setStatus(liveT("live.opened"));
       fit();
       window.addEventListener("resize", fit);
       if (screen.orientation && screen.orientation.addEventListener) {
@@ -77,15 +80,19 @@
       window.addEventListener("focus", resumeCam);
       window.addEventListener("pageshow", resumeCam);
     } catch (err) {
+      // 同上：gate.failDenied/gate.fail 是闸门页的 innerHTML 文案（gate.fail 还带
+      // {0} {1} 占位符、原来没传参会原样显示）——状态条改走纯文本键 live.*
       var msg = (err && err.name === "NotAllowedError")
-        ? (liveT("gate.failDenied") || "权限被拒：请在浏览器地址栏允许摄像头后刷新")
-        : (liveT("gate.fail") || "打开相机失败") + "：" + ((err && err.name) || "?") + " " + ((err && err.message) || "");
+        ? liveT("live.denied")
+        : liveT("live.fail", (err && err.name) || "?", (err && err.message) || "");
       setStatus(msg, true);
     }
   }
 
+  // liveT(key, ...args)：透传全部参数给 arcamT —— live.fail 这类带 {0} {1}
+  // 占位符的键少了转发会把占位符原样显示在状态条上
   function liveT(key) {
-    return window.arcamT ? window.arcamT(key) : null;
+    return window.arcamT ? window.arcamT.apply(null, arguments) : null;
   }
 
   function stop() {
@@ -101,10 +108,10 @@
     window.removeEventListener("focus", resumeCam);
     window.removeEventListener("pageshow", resumeCam);
     window.removeEventListener("resize", fit);
-    $("btn-live").textContent = liveT("btn.live") || "开启相机";
+    $("btn-live").textContent = liveT("btn.live");
     $("live-row").hidden = true;
     $("zoom-cell").hidden = true;
-    setStatus("就绪");
+    setStatus(liveT("note.ready"));
   }
 
   // ── cover 铺满物理视口（index.html:3923-3941 的 fit）──

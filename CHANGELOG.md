@@ -2,6 +2,54 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.11.0] — 2026-10-11
+
+英文支持补全（两分区并行 + 浏览器实测）：CLI 从「只有 3 个子命令认得 --lang」
+变成全链路双语，网页侧零散硬编码中文全部接进语言表。
+
+### 新增
+
+- **CLI 全链路英文**：`--lang en` 现在挂在**每一个**子命令上（render /
+  char-layer / bundle / multi / contact-sheet / video / matte / prep / batch /
+  recipe 四子命令 / lidar 三子命令 / web / watch / stats / check，共 23 个
+  parser）——此前只有 prep/batch/watch 等 6 处有，`arcam render --lang en`
+  直接 unrecognized arguments。
+- **112 条 argparse help 全双语**（含 metavar：PATH/M/DEG/SHOT/ASPECT…）：
+  机制是模块级 `_CUR_LANG` + `_h(zh, en)` 内联双语元组，`main()` 在建 parser
+  **前**预扫 argv 的 `--lang xx` / `--lang=xx`（argparse 的 help 在建 parser
+  时就要用语言，parse 完才知道就晚了），另支持 `ARCAM_LANG` 环境变量兜底。
+  ⚠ help 文案不进 i18n.py 的 TXT——那张表与两侧 i18n.js 同源生成，CLI 帮助
+  文本混进去会污染网页语言表。
+- **41 处 CliError + 全部 print 双语**：`--feq -1` 之类中英各一句人话；
+  HUD 构图提示（composition_hints）接上 i18n 表 hints.* 八键，CLI 的
+  「构图提示：地平线在正中…」在 `--lang en` 下出英文。
+- **语言表 190 → 292 条**：live.js 两侧相机错误/状态 7 处、hud.js 两侧地平线
+  标签 + 8 条构图提示 + 4 行 HUD 读数（复用 hud.* 同键）、app.js 两侧全部
+  用户可见状态/错误文案，都接进 TXT 单一来源（两侧 i18n.js 同步手改）。
+- **拖拽区空态文案跟随语言**：「未选择 / Not selected」按 empty 类补刷——
+  不给这些 span 挂 data-t（无脑覆写会把已上传的文件名冲掉），frame-read
+  同款「非 data-t 手动刷」口径。
+
+### 修复（BUG，W2 顺手修的既有问题）
+
+- `liveT` 不转发占位符（带 {0} 的 live.* 文案渲染不出参数）。
+- `gate.fail*` 的 HTML 标签被当纯文本塞进 textContent（权限被拒那段排版全散）。
+- 兜底值与键不一致（缺 key 时回落的口径与 t() 的裸 key 行为不符）。
+
+### 备注
+
+- 设计边界（有意不译）：MMD 骨骼名（腕.L/左腕，模型数据）、SHOTS/FRAMES 作为
+  **参数值**出现的地方（recipe show 的 `--shot 全身`——值是数据键，得能回灌）；
+  --shot 的英文 help 把标签英译并注明「CLI 键保持中文」。matte.js 的内部不变量
+  错误（34 处）用户可见度低，本轮只列清单未译。
+- 全套 **691 passed / 1 skipped**（进场 659）；golden-diff 500 向量 bad=0；
+  英文 help 无 CJK 的门禁 + 每子命令收 --lang + 预扫两位 + env + CliError 语种
+  共 32 条新测试（三处变异验证全红）。
+- 浏览器实测：网页中英切换 13 字段 11 处即时变英、拖拽区空态双语、上传文件名
+  不被切换冲掉；CLI `--lang en` 出图与 scene.json 和中文版**逐位相同**
+  （--lang 只动人话，不动数值，有测试钉死）。
+
+
 ## [1.10.0] — 2026-10-11
 
 全项目审计第三轮（五分区并行 + 对抗复核 + 浏览器全链实测）：修 14 个问题，

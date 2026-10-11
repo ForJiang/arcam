@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -17,7 +18,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from arcam.cli import main
+from arcam.cli import build_parser, main
 from arcam.video import PoseKey, PoseTrack, save_track
 
 SRC = Path(__file__).resolve().parent.parent / "src"
@@ -1403,3 +1404,265 @@ def test_render_rejects_non_finite_numbers(tmp_path: Path, photo: Path, char: Pa
             cwd=str(SRC.parent), env=env, capture_output=True, text=True, timeout=120)
         assert proc.returncode == 2, f"{flag} {bad} 应报用法错误：{proc.stderr[-160:]}"
         assert "应是有限数" in proc.stderr, f"{flag} {bad} 的报错应说明口径"
+
+
+
+# ─────────────────────── --lang 全链路（CLI 人话输出双语化） ───────────────────────
+
+#: CJK 基本区判据：英文 help / 英文 stdout 里出现即算"漏翻"
+_CJK = re.compile(r"[\u4e00-\u9fa5]")
+
+
+def _all_parsers(lang: str):
+    """build_parser(lang) 的全部 parser：顶层 + 15 个子命令 + recipe/lidar 二级。
+
+    递归走 subparsers action 的 choices dict（顶层 dest=cmd，二级 recipe_cmd /
+    lidar_cmd）——新命令自动进集合，门禁不靠硬编码名单。
+    """
+    def walk(parser, path):
+        yield path or parser.prog, parser
+        for action in parser._actions:
+            choices = getattr(action, "choices", None)
+            if isinstance(choices, dict):
+                for name, sub in choices.items():
+                    yield from walk(sub, f"{path} {name}".strip())
+
+    yield from walk(build_parser(lang), "")
+
+
+def test_en_help_has_no_cjk() -> None:
+    """门禁①：英文 help 全树无 CJK（顶层 + 每个子命令 + 二级子命令）。
+
+    变异验证（把任一条 help 改回纯中文 → 本条红）：实测 bundle 的 help 忘包
+    ``_h`` 时，顶层 help 的子命令列表第一个抓到；batch/video 的 ``-o`` help
+    同样漏过。``--shot``/``--frame`` 的中文枚举键不进 help（gloss 表 + 注明
+    "keys keep the original site's Chinese labels"），choices 校验报错才列它们。
+    """
+    offenders = {}
+    for name, parser in _all_parsers("en"):
+        hits = _CJK.findall(parser.format_help())
+        if hits:
+            offenders[name] = hits[:5]
+    assert not offenders, f"英文 help 里混进中文：{offenders}"
+
+
+def test_zh_help_keeps_chinese() -> None:
+    """门禁①反向：中文版 help 必须真的有关键中文（_h 没把两半写反/写空）。"""
+    for name, parser in _all_parsers("zh"):
+        assert _CJK.findall(parser.format_help()), f"{name} 的中文 help 没有中文"
+
+
+def test_every_command_takes_lang() -> None:
+    """门禁②：每个（含二级）子命令都收 --lang，且 metavar 随语言切换。"""
+    en_parsers = dict(_all_parsers("en"))
+    for name, parser in _all_parsers("zh"):
+        langs = [a for a in parser._actions if "--lang" in a.option_strings]
+        assert langs, f"{name} 没有 --lang（v2.0.0 审计前只有 6 个命令收它）"
+        assert langs[0].choices == ["zh", "en"]
+        assert langs[0].metavar == "语言", name
+        en_langs = [a for a in en_parsers[name]._actions
+                    if "--lang" in a.option_strings]
+        assert en_langs[0].metavar == "LANG", name
+
+
+@pytest.mark.parametrize("argv", [
+    ["--lang", "en", "render", "--help"],
+    ["--lang=en", "render", "--help"],
+    ["render", "--lang", "en", "--help"],
+    ["render", "--lang=en", "--help"],
+    # 二级分组：父前子后两种书写位置都要能 parse（子 parser 的默认值会写回主
+    # namespace，父级用真默认值 + 子级 SUPPRESS 才不会被互相盖掉）
+    ["--lang", "en", "lidar", "inspect", "--help"],
+    ["lidar", "--lang", "en", "inspect", "--help"],
+    ["lidar", "inspect", "--lang", "en", "--help"],
+    ["--lang", "en", "recipe", "save", "--help"],
+    ["recipe", "--lang", "en", "save", "--help"],
+    ["recipe", "save", "--lang", "en", "--help"],
+    ["recipe", "list", "--lang", "en", "--help"],
+])
+def test_lang_prescan_both_positions(argv, capsys) -> None:
+    """门禁④：--lang 在子命令前/后都出英文 help（main() 建 parser 前预扫 argv）。
+
+    argparse 的 help 在建 parser 时就要用语言，parse 完才知道就晚了——所以
+    main() 先预扫 argv（--lang xx / --lang=xx，$ARCAM_LANG 兜底），再
+    build_parser(语言)。
+    """
+    with pytest.raises(SystemExit) as e:
+        main(argv)
+    assert e.value.code == 0, argv
+    out = capsys.readouterr().out
+    assert not _CJK.search(out), (argv, out)
+
+
+def test_arcam_lang_env_fallback(monkeypatch, tmp_path, photo, char,
+                                 capsys) -> None:
+    """门禁④：$ARCAM_LANG 兜底；显式 --lang 优先于环境变量。"""
+    monkeypatch.setenv("ARCAM_LANG", "en")
+    out = tmp_path / "o.png"
+    assert main(["render", str(photo), str(char), "-o", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "Rendered" in printed and not _CJK.search(printed), printed
+    # 显式 --lang zh 压过环境变量
+    assert main(["render", str(photo), str(char), "-o", str(out),
+                 "--lang", "zh"]) == 0
+    assert "已出图" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [
+    ["render", "--lang", "fr", "a", "b", "-o", "x"],
+    ["render", "--lang=fr", "a", "b", "-o", "x"],
+    ["--lang", "fr", "render", "a", "b", "-o", "x"],
+])
+def test_bad_lang_is_argparse_usage_error(argv, capsys) -> None:
+    """门禁④：非法 --lang 值仍走 argparse 的 choices 报错（exit 2）。
+
+    预扫对非法值"不当真"（只决定 help/文案语言），choices 校验交给 argparse——
+    不另造一套报错路径。
+    """
+    with pytest.raises(SystemExit) as e:
+        main(argv)
+    assert e.value.code == 2, argv
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_render_en_output_is_all_english(tmp_path, photo, char,
+                                         capsys) -> None:
+    """门禁③端到端：render --lang en 的 stdout 全英文（无 CJK）。"""
+    out = tmp_path / "en.png"
+    scene = tmp_path / "en.json"
+    code = main(["render", str(photo), str(char), "-o", str(out),
+                 "--scene", str(scene), "--lang", "en"])
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "Rendered" in printed and "Recipe" in printed, printed
+    assert not _CJK.search(printed), printed
+
+
+def test_render_overlay_note_follows_lang(tmp_path, photo, char,
+                                          capsys) -> None:
+    """--overlay 附注的分隔符/前缀跟 --lang 走（层名序 canonical 不变）。
+
+    ⚠ 提示**句子**本身（"角色快顶满画面" 那几条）出自 arcam/hud.py 的
+    composition_hints()，它目前不收 lang、恒返中文（i18n 表里已有同文的
+    hints.* 键）——属 B3/C3 分区，已写进交付报告交编排者，这里只钉 cli 侧
+    那一半（层序行 + 附注前缀）。
+    """
+    out = tmp_path / "hud.png"
+    assert main(["render", str(photo), str(char), "-o", str(out), "--d", "1.2",
+                 "--overlay", "hud", "--lang", "en"]) == 0
+    printed = capsys.readouterr().out
+    assert "HUD layers: hud" in printed, printed
+    assert "composition hints" in printed, printed
+
+
+def test_lang_does_not_change_output_bytes(tmp_path, photo, char) -> None:
+    """--lang 只影响人话输出：同参 en/zh 的出图与 scene.json 字节逐个相同。"""
+    zh_png, en_png = tmp_path / "zh.png", tmp_path / "en.png"
+    zh_scene, en_scene = tmp_path / "zh.json", tmp_path / "en.json"
+    extra = ["--pitch", "12", "--mode", "free", "--frame", "1:1",
+             "--edge-bar", "2", "--size-pct", "55"]
+    assert main(["render", str(photo), str(char), "-o", str(zh_png),
+                 "--scene", str(zh_scene), *extra]) == 0
+    assert main(["render", str(photo), str(char), "-o", str(en_png),
+                 "--scene", str(en_scene), "--lang", "en", *extra]) == 0
+    assert zh_png.read_bytes() == en_png.read_bytes(), "出图字节被 --lang 动了"
+    assert zh_scene.read_text(encoding="utf-8") == \
+        en_scene.read_text(encoding="utf-8"), "scene.json 被 --lang 动了"
+
+
+def test_cli_error_follows_lang(tmp_path, photo, char, capsys,
+                                monkeypatch) -> None:
+    """门禁③：CliError 在 en/zh 下各跑一次，语种正确（含 main 的 Error 前缀）。"""
+    base = ["render", str(photo), str(char), "-o", str(tmp_path / "o.png"),
+            "--feq", "-1"]
+    assert main([*base, "--lang", "en"]) == 1
+    err = capsys.readouterr().err
+    assert "Error: --feq must be a finite positive number" in err, err
+    assert main(base) == 1
+    err = capsys.readouterr().err
+    assert "错误：--feq 必须是有限正数" in err, err
+    # 另一条路径：recipe 不存在的名字
+    import arcam.cli as cli
+    monkeypatch.setattr(cli, "RECIPE_ROOT", tmp_path / "recipes")
+    assert main(["recipe", "show", "nope", "--lang", "en"]) == 1
+    assert "No recipe named nope" in capsys.readouterr().err
+    assert main(["recipe", "show", "nope"]) == 1
+    assert "没有叫 nope 的配方" in capsys.readouterr().err
+
+
+def test_missing_input_message_follows_lang(tmp_path, char, capsys) -> None:
+    """_need 的「什么」参数也是双语的（找不到文件 → 英文报错不含中文）。"""
+    assert main(["render", str(tmp_path / "nope.jpg"), str(char),
+                 "-o", str(tmp_path / "o.png"), "--lang", "en"]) == 1
+    err = capsys.readouterr().err
+    assert "Not found — background photo" in err, err
+    assert not _CJK.search(err), err
+
+
+@pytest.mark.parametrize("cmd,marker", [
+    ("char-layer", "Character layer"),
+    ("bundle", "Bundle"),
+    ("multi", "Composited"),
+    ("batch", "Batch done"),
+    ("prep", "Prepped"),
+    ("stats", "Subcommands"),
+    ("video", "Rendered"),
+    ("contact-sheet", "Contact sheet"),
+])
+def test_en_runtime_output_has_no_cjk(tmp_path, photo, char, track_file,
+                                      cmd, marker, capsys) -> None:
+    """端到端：各出图类子命令 --lang en 的 stdout 无 CJK。
+
+    覆盖 render 之外的每条人话输出路径（char-layer/bundle/multi/batch/prep/
+    stats/video/contact-sheet）——只翻 render 一条不算全链路。
+    """
+    if cmd == "char-layer":
+        args = [cmd, str(char), "-o", str(tmp_path / "layer.png")]
+    elif cmd == "bundle":
+        args = [cmd, str(photo), str(char), "-o", str(tmp_path / "pack.zip")]
+    elif cmd == "multi":
+        args = [cmd, str(photo), str(char), str(char),
+                "-o", str(tmp_path / "o.png")]
+    elif cmd == "contact-sheet":
+        args = [cmd, str(photo), str(char), "-o", str(tmp_path / "sheet.png"),
+                "--vary", "d=3,4", "--cell-w", "120"]
+    elif cmd == "video":
+        args = [cmd, str(track_file), str(char), "-o",
+                str(tmp_path / "frames"), "--bg", str(photo)]
+    elif cmd == "batch":
+        src = tmp_path / "photos"
+        src.mkdir()
+        _make_photo(src / "p0.jpg", seed=0)
+        args = [cmd, str(src), str(char), "-o", str(tmp_path / "out")]
+    elif cmd == "prep":
+        big = tmp_path / "big.png"
+        arr = np.zeros((120, 120, 4), dtype=np.uint8)
+        arr[10:110, 10:110] = (230, 60, 200, 255)
+        Image.fromarray(arr, "RGBA").save(big)
+        args = [cmd, str(big), "-o", str(tmp_path / "prep.png")]
+    else:                                   # stats
+        args = [cmd]
+    code = main([*args, "--lang", "en"])
+    assert code == 0, (cmd, capsys.readouterr())
+    printed = capsys.readouterr().out
+    assert marker in printed, (cmd, printed)
+    assert not _CJK.search(printed), (cmd, printed)
+
+
+def test_check_and_recipe_en_keep_data_keys(tmp_path, track_file,
+                                            monkeypatch, capsys) -> None:
+    """check / recipe 的**数据键**不翻：frame_key=满幅 / shot=腰上 要能粘回去。
+
+    与"数字与单位不翻"同一口径（i18n.py 模块 docstring）：景别/画幅的 key 是
+    scene.json 与 CLI 的**值**，译成就没法粘回 --shot/--frame；只翻标签。
+    """
+    assert main(["check", str(track_file), "--lang", "en"]) == 0
+    printed = capsys.readouterr().out
+    assert "Track" in printed and "Aspect" in printed and "Mode ground" in printed
+    import arcam.cli as cli
+    monkeypatch.setattr(cli, "RECIPE_ROOT", tmp_path / "recipes")
+    assert main(["recipe", "save", "t1", "--pitch", "15", "--shot", "腰上"]) == 0
+    capsys.readouterr()
+    assert main(["recipe", "show", "t1", "--lang", "en"]) == 0
+    printed = capsys.readouterr().out
+    assert "Recipe t1" in printed and "--shot" in printed and "腰上" in printed, printed

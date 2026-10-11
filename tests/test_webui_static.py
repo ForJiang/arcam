@@ -847,10 +847,11 @@ def test_i18n_tables_match_between_python_and_js():
         assert list(js_txt[key]) == [zh, en], f"{key} 两侧文案不同"
     # 条数口径（实测，别按印象写）：原版 index.html:600-830 TXT 逐条搬来 160 条
     # （其中 4 条改了键名，如 kind.closeTip/sec.input 这类对不上原名的）+ webui/docs
-    # 两侧新增 26 条（sec.input/preview.empty/dz.*/btn.png/btn.layer/btn.bundle/
-    # btn.copyScene/fold.fx/hint.fxWeb/btn.fullscreen/note.paramsRestored 等）
-    # = 186。改这条断言前先跑 .venv/bin/python -c "from arcam.i18n import TXT; print(len(TXT))"。
-    assert len(PY_TXT) == 190, f"表条数变了：{len(PY_TXT)}（原版 160[含 4 条改名] + 新增 26）"
+    # 历次新增：v1.3.0 起 26 条（sec.input/dz.*/btn.png/fold.fx/hint.fxWeb 等）
+    # → 190；v1.10.0 英文支持补全再加 102 条（live.*/hud.* 构图提示/app.js 状态
+    # 文案）→ 292。改这条断言前先跑：
+    #   .venv/bin/python -c "from arcam.i18n import TXT; print(len(TXT))"
+    assert len(PY_TXT) == 292, f"表条数变了：{len(PY_TXT)}（190 + 英文补全 102）"
 
 
 def test_mmd_3d_wired():

@@ -40,7 +40,11 @@ var RANGES = {
 var DEBOUNCE_MS = 300;        // WEB-SPEC §3：任何参数改动 300ms 防抖自动重渲
 var PREVIEW_LONG_EDGE = 1280; // 后端预览承诺长边 ≤1280 保证 <1s（export 仍全尺寸）
 
-var KIND_LABEL = { photo: '照片', char: '立绘', depth: '深度帧' };
+// 拖拽区标签（状态条拼接用）：走语言表 upload.* —— HTML 侧 dz.* 那几条已是
+// data-t，这里不再各写一份硬编码中文
+function kindLabel(kind) {
+  return t('upload.' + kind);
+}
 var EXPORT_FILES = {
   png: 'arcam-render.png',
   layer: 'arcam-char-layer.png',
@@ -67,12 +71,12 @@ function setStatus(msg, ms, isError) {
   var el = $('status-msg');
   el.textContent = msg;
   el.className = isError ? 'error' : 'ok';
-  $('status-time').textContent = typeof ms === 'number' ? '耗时 ' + Math.round(ms) + ' ms' : '';
+  $('status-time').textContent = typeof ms === 'number' ? t('note.elapsed', Math.round(ms)) : '';
 }
 
 // 错误统一进状态条：显示 error+hint；不清空用户已调参数（state 不与失败路径耦合）。
 function showApiError(e) {
-  setStatus('出错：' + e.message, null, true);
+  setStatus(t('note.error', e.message), null, true);
 }
 
 /* ================= 3. fetch 封装 ================= */
@@ -114,13 +118,13 @@ function apiJson(url, body) {
 function setName(id, text) {
   var el = $(id);
   el.textContent = text;
-  el.classList.toggle('empty', text === '未选择');
+  el.classList.toggle('empty', text === t('name.empty'));
 }
 
 async function uploadFile(kind, file) {
   var fd = new FormData();
   fd.append(kind, file); // 字段名 photo/char/depth 与 WEB-SPEC §1 对齐
-  setStatus('上传' + KIND_LABEL[kind] + '…');
+  setStatus(t('note.uploading', kindLabel(kind)));
   try {
     var r = await apiForm('/api/upload', fd);
     var dims = (r.width && r.height) ? ' · ' + r.width + '×' + r.height : '';
@@ -131,7 +135,7 @@ async function uploadFile(kind, file) {
       setName('photo-name', file.name + dims);
       $('preview-empty').hidden = true;
       if (state.char) renderNow();
-      else setStatus('照片已上传，请继续上传立绘', r.ms);
+      else setStatus(t('note.photoOk'), r.ms);
     } else if (kind === 'char') {
       state.char = file;
       // charName/charW/charH 是修图三钮、HUD 读数与 autoFixX 宽高比的唯一来源
@@ -142,19 +146,19 @@ async function uploadFile(kind, file) {
       setName('char-name', file.name + dims);
       // 后端用 fg 告诉这块立绘有没有 alpha：普通图提示可点抠图（不自动烧 CPU）
       if (r.fg === false) {
-        $('input-hint').textContent = '这是普通图立绘，可点「抠图」去除背景';
+        $('input-hint').textContent = t('note.plainChar');
       } else {
         $('input-hint').textContent = '';
       }
       if (state.photo) renderNow();
-      else setStatus('立绘已上传，请上传照片', r.ms);
+      else setStatus(t('note.charOk'), r.ms);
       // 导入后问一句全身/半身（原版 loadChar：只定默认走哪条路，不改任何状态）
       showKind();
     } else if (kind === 'depth') {
       state.depthFile = file;
       setName('depth-name', file.name + dims);
-      $('input-hint').textContent = '深度帧已上传；点「LiDAR 诊断」解析环境量';
-      setStatus('深度帧已上传', r.ms);
+      $('input-hint').textContent = t('hint.depthNext');
+      setStatus(t('note.depthUploaded'), r.ms);
     }
   } catch (e) {
     showApiError(e); // 失败保留所有已选文件与已调参数
@@ -213,7 +217,7 @@ function drawDataUri(uri) {
     c.height = img.naturalHeight;
     c.getContext('2d').drawImage(img, 0, 0);
   };
-  img.onerror = function () { setStatus('后端返回的图片解码失败', null, true); };
+  img.onerror = function () { setStatus(t('note.imgDecodeFail'), null, true); };
   img.src = uri;
 }
 
@@ -226,21 +230,21 @@ function showEnv(env, frame) {
   box.hidden = false;
   // coverage 约定是比例 0–1；后端若直接给百分数（>1）也不换算错
   var parts = [
-    '相机高 ' + Number(env.height_m).toFixed(2) + ' m',
-    '俯仰 ' + Number(env.pitch_deg).toFixed(1) + '°',
-    '横滚 ' + Number(env.roll_deg).toFixed(1) + '°'
+    t('env.camH', Number(env.height_m).toFixed(2)),
+    t('env.pitch', Number(env.pitch_deg).toFixed(1)),
+    t('env.roll', Number(env.roll_deg).toFixed(1))
   ];
   // 诊断字段缺省就不显示（render 的 env 只有三个字段，见 mergeEnv）
   if (env.coverage != null) {
     var cov = env.coverage <= 1
       ? (env.coverage * 100).toFixed(1) + '%'
       : Number(env.coverage).toFixed(1) + '%';
-    parts.push('覆盖率 ' + cov);
+    parts.push(t('env.coverage', cov));
   }
-  if (env.inliers != null) parts.push('内点 ' + env.inliers);
-  if (env.rms != null) parts.push('RMS ' + Number(env.rms).toFixed(3));
-  if (frame) parts.push('帧 ' + frame.width + '×' + frame.height);
-  box.textContent = 'LiDAR 环境量（深度测出，显式参数仍优先）：' + parts.join(' · ');
+  if (env.inliers != null) parts.push(t('env.inliers', env.inliers));
+  if (env.rms != null) parts.push('RMS ' + Number(env.rms).toFixed(3));   // 符号，不翻
+  if (frame) parts.push(t('env.frame', frame.width, frame.height));
+  box.textContent = t('env.box') + parts.join(' · ');
 }
 
 /** render 响应里只有三字段的 env 合并进完整 env，防止覆盖率/内点/RMS 被冲掉。 */
@@ -259,7 +263,7 @@ function scheduleRender() {
 async function renderNow() {
   clearTimeout(state.renderTimer);
   if (!state.photo || !state.char) {
-    setStatus('请先上传照片与立绘', null, true);
+    setStatus(t('note.needBoth'), null, true);
     return;
   }
   var seq = ++state.renderSeq;
@@ -271,7 +275,7 @@ async function renderNow() {
     if (t3dReady()) {
       var cv = $('preview-canvas');
       if (!drawMmdLayer(cv, cv.width, cv.height)) {
-        d3dNote(t('note.3dDrawFail', 'render 返回 0'), true);
+        d3dNote(t('note.3dDrawFail', t('err.renderZero')), true);
       } else {
         d3dNote('');
       }
@@ -279,7 +283,7 @@ async function renderNow() {
     $('preview-empty').hidden = true;
     showScene(attachMmdKey(r.scene, $('preview-canvas').width, $('preview-canvas').height));
     if (r.env) mergeEnv(r.env, null); // render 的 env 只有三字段，合并进完整 env
-    setStatus('渲染完成', typeof r.ms === 'number' ? r.ms : performance.now() - t0);
+    setStatus(t('note.renderDone'), typeof r.ms === 'number' ? r.ms : performance.now() - t0);
     drawHudOverlay();                   // HUD 浮层跟着预览尺寸/参数重画
   } catch (e) {
     showApiError(e);
@@ -289,15 +293,15 @@ async function renderNow() {
 /* ================= 6. 动作按钮 ================= */
 
 async function doMatte() {
-  if (!state.char) { setStatus('请先上传立绘', null, true); return; }
+  if (!state.char) { setStatus(t('note.needChar'), null, true); return; }
   try {
-    setStatus('抠图模型推理中…');
+    setStatus(t('note.matteRunning'));
     var r = await apiJson('/api/matte', { source: 'char' });
     drawDataUri(r.image); // 先把抠图结果画出来：照片没上传也能看到效果
     $('preview-empty').hidden = true;
     await apiJson('/api/matte-result-as-char', {}); // 结果设为当前立绘
-    $('input-hint').textContent = '抠图完成，结果已设为当前立绘';
-    setStatus('抠图完成', r.ms);
+    $('input-hint').textContent = t('note.matteDone');
+    setStatus(t('note.matteOk'), r.ms);
     if (state.photo) scheduleRender();
   } catch (e) {
     showApiError(e); // 模型缺失等情况：error 带下载指引，不 500
@@ -306,18 +310,18 @@ async function doMatte() {
 
 async function doLidar() {
   if (!state.depthFile) {
-    setStatus('请先在左栏选择深度帧文件', null, true);
+    setStatus(t('note.needDepth'), null, true);
     return;
   }
   try {
-    setStatus('LiDAR 深度诊断中…');
+    setStatus(t('note.lidarRunning'));
     var fd = new FormData();
     fd.append('depth', state.depthFile);
     var r = await apiForm('/api/lidar/inspect', fd);
     state.depthUploaded = true; // 之后 render 带 depth_uploaded=true 走深度驱动
     state.lidarEnv = r.env;     // 完整 env（含 coverage/inliers/rms）
     showEnv(r.env, r.frame);
-    setStatus('LiDAR 诊断完成，已启用深度驱动');
+    setStatus(t('note.lidarDone'));
     scheduleRender();
   } catch (e) {
     showApiError(e);
@@ -329,7 +333,7 @@ async function doLidar() {
 //  （alpha 画布，盖回去严丝合缝——与 2D 立绘层的契约一致）。
 async function doExport3D(target) {
   try {
-    setStatus('3D 导出中…');
+    setStatus(t('note.export3d'));
     var p = state.params;
     var r = await apiJson('/api/render', {
       params: buildParams(), scale: 1        // base_only 由 buildParams 自动带
@@ -340,13 +344,13 @@ async function doExport3D(target) {
     cv.width = W; cv.height = H;
     cv.getContext('2d').drawImage(base, 0, 0);
     if (!drawMmdLayer(cv, W, H)) {
-      throw new ApiError('3D 层渲染失败（render 返回 0）', '换张照片或检查模型是否完好');
+      throw new ApiError(t('err.3dDraw'), t('err.3dDrawHint'));
     }
     var scene = attachMmdKey(r.scene, W, H);
     if (target === 'png') {
       var blob = await canvasToBlob(cv, 'image/png');
       var how = await saveBlob(blob, 'arcam-3d-' + stamp() + '.png');
-      setStatus(how === 'cancel' ? '已取消保存' : '已开始下载 arcam-3d-*.png');
+      setStatus(how === 'cancel' ? t('note.saveCancel') : t('note.saveStart', 'arcam-3d-*.png'));
       return;
     }
     // bundle：shot.jpg + scene.json + character.png（MMD 层）
@@ -359,8 +363,8 @@ async function doExport3D(target) {
     ];
     var how = await saveBlob(buildBundleZip(parts), 'arcam-bundle-' + stamp() + '.zip');
     setStatus(how === 'cancel'
-      ? '已取消保存'
-      : '已开始下载 arcam-bundle-*.zip（shot.jpg + scene.json + character.png）');
+      ? t('note.saveCancel')
+      : t('note.bundleStart', 'arcam-bundle-*.zip'));
   } catch (e) { showApiError(e); }
 }
 
@@ -368,7 +372,7 @@ function loadImage(uri) {
   return new Promise(function (resolve, reject) {
     var img = new Image();
     img.onload = function () { resolve(img); };
-    img.onerror = function () { reject(new Error('图片解码失败')); };
+    img.onerror = function () { reject(new Error(t('err.imgDecode'))); };
     img.src = uri;
   });
 }
@@ -426,7 +430,7 @@ async function doExport(target) {
     return doExport3D(target);      // 3D 模式：客户端合成（服务端只会出 2D）
   }
   try {
-    setStatus('导出中…');
+    setStatus(t('note.exporting'));
     var res = await fetch('/api/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -442,7 +446,7 @@ async function doExport(target) {
     var name = EXPORT_FILES[target] || 'arcam-export';
     // 兜底链（share → picker → download）统一走这里；cancel = 用户主动取消
     var how = await saveBlob(blob, name);
-    setStatus(how === 'cancel' ? '已取消保存' : '已开始下载 ' + name);
+    setStatus(how === 'cancel' ? t('note.saveCancel') : t('note.saveStart', name));
   } catch (e) {
     showApiError(e);
   }
@@ -450,14 +454,14 @@ async function doExport(target) {
 
 async function doCopyScene() {
   var text = $('scene-json').textContent;
-  if (!text) { setStatus('scene.json 还是空的，先渲染一次', null, true); return; }
+  if (!text) { setStatus(t('note.sceneEmpty'), null, true); return; }
   try {
     await navigator.clipboard.writeText(text);
-    setStatus('scene.json 已复制到剪贴板');
+    setStatus(t('note.sceneCopied'));
   } catch (err) {
     // 部分浏览器/非安全上下文拒绝写剪贴板：展开面板让人手动复制
     $('scene-details').open = true;
-    setStatus('浏览器拒绝写剪贴板，已展开 scene.json 请手动复制', null, true);
+    setStatus(t('note.clipDenied'), null, true);
   }
 }
 
@@ -563,6 +567,13 @@ function applyLang() {
   }
   // 取景框读数不是 data-t 元素（内容是 t('read.frame', W, H) 拼的），切语言要手动刷
   drawHudOverlay();
+  // 拖拽区文件名：空态（setName 打的 empty 类）跟着语言走，已上传的文件名不动。
+  // ⚠ 不给这些 span 挂 data-t——上面的无脑覆写会把文件名冲成「未选择」；
+  //    frame-read 同款「非 data-t 手动刷」口径。
+  Array.prototype.forEach.call(
+    document.querySelectorAll('.dz-name.empty'), function (el) {
+      el.textContent = window.arcamT('name.empty');
+    });
 }
 
 function initLang() {
@@ -609,7 +620,7 @@ function imageDims(uri) {
 
 async function doCutSolid() {
   if (!state.char) { showTip('note.chNone'); return; }
-  setStatus('修图中…');
+  setStatus(t('note.prepRunning'));
   try {
     var r = await apiJson('/api/prep', { steps: ['solid', 'trim', 'soften', 'blur'] });
     if (r.ok) {
@@ -625,7 +636,7 @@ async function doCutSolid() {
 
 async function doTrim() {
   if (!state.char) { showTip('note.chNone'); return; }
-  setStatus('裁边中…');
+  setStatus(t('note.trimRunning'));
   var w0 = state.charW, h0 = state.charH;
   try {
     var r = await apiJson('/api/trim', {});
@@ -807,14 +818,14 @@ function frameRectJs(key, W, H) {
 //  整批（服务端跳过的原因写进 zip 里的 _errors.txt）。
 async function doBatch(files) {
   if (!files || !files.length) return;
-  if (!state.char) { setStatus('批量出图需要先上传立绘', null, true); return; }
-  if (files.length > 12) { setStatus('一次最多 12 张（分批处理）', null, true); return; }
-  setStatus('批量出图中（' + files.length + ' 张）…');
+  if (!state.char) { setStatus(t('note.batchNeedChar'), null, true); return; }
+  if (files.length > 12) { setStatus(t('note.batchTooMany'), null, true); return; }
+  setStatus(t('note.batchRunning', files.length));
   var readers = Array.prototype.map.call(files, function (f) {
     return new Promise(function (resolve, reject) {
       var r = new FileReader();
       r.onload = function () { resolve(r.result); };
-      r.onerror = function () { reject(new Error(f.name + ' 读不出来')); };
+      r.onerror = function () { reject(new Error(t('err.readFail', f.name))); };
       r.readAsDataURL(f);
     });
   });
@@ -834,7 +845,7 @@ async function doBatch(files) {
     // 走 saveBlob 兜底链（v1.9.0）：和单张导出/3D 导出同一条路，
     // navigator.share / showSaveFilePicker 优先、<a download> 兜底
     var how = await saveBlob(blob, 'arcam-batch.zip');
-    setStatus('批量完成：' + note + (how === 'cancel' ? '（已取消保存）' : ''));
+    setStatus(t('note.batchDoneWeb', note + (how === 'cancel' ? t('note.batchCancel') : '')));
   } catch (e) { showApiError(e); }
 }
 
@@ -883,18 +894,18 @@ function doAutoFix() {
   var aspect = state.charW && state.charH ? state.charW / state.charH : 0.6;
   var r = window.arcamHud.autoFixX(cam, subj, p.mode, p.size_pct,
                                    { shot: p.shot, charScale: p.char_scale, charAspect: aspect });
-  if (!r) { setStatus('摆不正：人物在相机后方或参数退化'); return; }
+  if (!r) { setStatus(t('note.autofixFail')); return; }
   if (r.freeU !== undefined) {
     // free 模式：freeP.u 由后端参数 x 承载不了——webui 的 freeP 在后端默认 (0.5,0.6)，
     // 这里把吸附结果换算成等效提示（后端不接收 freeP，保持简单：只报吸附到了哪）
-    setStatus('已吸附到 ' + Math.round(r.snapped * 100) + '% 三分线（自由模式请用拖动微调）');
+    setStatus(t('note.snapFree', Math.round(r.snapped * 100)));
     return;
   }
   state.params.x = Math.round(r.x * 100) / 100;
   $('p-x-num').value = state.params.x;
   $('p-x-rng').value = state.params.x;
   markTouched('x');
-  setStatus('已吸附到 ' + Math.round(r.snapped * 100) + '% 三分线（x=' + state.params.x + 'm）');
+  setStatus(t('note.snapGround', Math.round(r.snapped * 100), state.params.x));
   scheduleRender();
 }
 
@@ -925,8 +936,8 @@ function bindDrag() {
     if (p.mode === 'free') {
       // free：拖动 = 立绘图心跟手（归一化 freeP；后端不收 freeP，
       // 用 size_pct 高度 + 画面占比反推不出自由位置——故 free 拖动只改提示）
-      setStatus('自由模式拖动：' + Math.round(px.u / cv.width * 100) + '% , '
-                + Math.round(px.v / cv.height * 100) + '%（精细位置请用左侧参数）');
+      setStatus(t('note.dragFree', Math.round(px.u / cv.width * 100),
+                  Math.round(px.v / cv.height * 100)));
       return;
     }
     if (!window.arcamHud) return;
@@ -962,13 +973,13 @@ function bindFullscreen() {
     }
     var p = stage.requestFullscreen && stage.requestFullscreen();
     if (p && p.catch) p.catch(function () {
-      setStatus('浏览器不让全屏（需用户手势；iOS Safari 不支持元素全屏）', null, true);
+      setStatus(t('note.fsDenied'), null, true);
     });
   });
   document.addEventListener('fullscreenchange', function () {
     var on = !!document.fullscreenElement;
     $('btn-fullscreen').textContent = on ? t('btn.exitFullscreen') : t('btn.fullscreen');
-    if (on) setStatus('全屏取景中——拖画面摆位，Esc 退出');
+    if (on) setStatus(t('note.fsOn'));
   });
 }
 
@@ -1302,7 +1313,7 @@ function refresh3dRows() {
     b.addEventListener('click', function () { state.pose3D = idx; refresh3dRows(); scheduleRender(); });
     return b;
   };
-  prow.appendChild(mk('静止', -1));
+  prow.appendChild(mk(t('pose.still'), -1));
   M3D.poseNames().forEach(function (name, i) { prow.appendChild(mk(name, i)); });
   var hasPose = M3D.poseNames().length > 0;
   $('pose3dLabel').hidden = !hasPose;
@@ -1327,7 +1338,7 @@ async function do3DImport(src, pmxIdx) {
     var ok = await M3D.load(src, function (frac) {
       d3dNote(t('note.3dLoading') + ' ' + Math.round(frac * 100) + '%');
     }, pmxIdx);
-    if (!ok) { d3dNote(t('note.3dFail', M3D.error || '未知错误'), true); return; }
+    if (!ok) { d3dNote(t('note.3dFail', M3D.error || t('err.unknown')), true); return; }
     state.use3D = true;
     $('t3d').classList.add('on');
     forceGroundForMmd();
@@ -1422,7 +1433,7 @@ function init() {
   bind3D();
   bindFullscreen();
   syncModeVisibility();
-  setStatus('就绪');
+  setStatus(t('note.ready'));
   $('status-msg').className = '';
   // HUD 浮层常驻可见（画布上没有预览图时也能看到网格/读数）
   var hud = $('hud-canvas');

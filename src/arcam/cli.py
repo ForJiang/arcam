@@ -1,6 +1,6 @@
 """arcam 命令行 —— 原版桌面端四件事（出图 / 立绘层 / 素材包 / 抠图）加离线视频、LiDAR 深度。
 
-子命令一览（每个都有中文 --help；共 15 个，stats 现抓本表不硬编码）::
+子命令一览（每个都有中英 --help，--lang 切换；共 15 个，stats 现抓本表不硬编码）::
 
     arcam render PHOTO CHAR -o OUT.png [--scene PATH] [摆放参数] [--depth DEPTH]  # 出图
     arcam char-layer CHAR -o OUT.png [摆放参数]                    # 仅 RGBA 立绘层
@@ -21,6 +21,11 @@
 
 退出码：0 正常；1 运行期失败（缺文件、素材不合法、轨道有问题）；2 用法错误（argparse）。
 报错一律人话，不静默失败 —— 对齐原版 saveNote 的坏消息必提示（index.html:3370）。
+
+语言：每个子命令都收 ``--lang {zh,en}``（也认 ``$ARCAM_LANG`` 兜底，--lang 优先）——
+**只影响人话输出**（help / 报错 / 提示），数值行为与出图一个字节不变。语言在建
+parser **之前**从 argv 预扫（argparse 的 help 在建 parser 时就要用语言，parse 完
+才知道就晚了），见 :func:`_prescan_lang`；help/错误/提示的内联双语元组见 :func:`_h`。
 
 LiDAR 环境接入契约：``docs/LIDAR-SPEC.md``。``--depth`` 给深度帧时，相机高/俯仰/
 滚转/人物纵深由深度测出（LIDAR-SPEC §0），**显式**摆放参数仍然优先；显式与测出冲突
@@ -47,7 +52,7 @@ from PIL import UnidentifiedImageError as PILUnidentifiedImageError
 from arcam.compose import _merge_env, _over, compose_char_layer, compose_shot
 from arcam.frames import frame_rect
 from arcam.geometry import Camera
-from arcam.i18n import LANGS, TXT, t
+from arcam.i18n import DEFAULT_LANG, LANGS, TXT, t
 from arcam.matting import anime_cut
 from arcam.numeric import js_round, js_to_fixed
 from arcam.placement import FRAMES, SHOTS, Subject, current_placement
@@ -76,14 +81,46 @@ ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
 #: parser 默认值这里要同步（v1.8 审计：曾静默丢掉用户给的 --width/--height/--seed）。
 _SIM_PUSH_FIXED_SPEC = {"width": 256, "height": 192, "seed": 0}
 
+#: 当前人话输出语言：help / 报错 / 提示文案都按它取中英一半（:func:`_h`）。
+#: main() 在建 parser **之前**从 argv 预扫定好——argparse 的 help 在建 parser 时
+#: 就要用语言，parse 完才知道就晚了；也认 ``$ARCAM_LANG`` 兜底（--lang 优先）。
+_CUR_LANG: str = DEFAULT_LANG
+
+
+def _h(zh: str, en: str) -> str:
+    """按 :data:`_CUR_LANG` 取中英一半（help/错误/提示的内联双语元组）。
+
+    ⚠ 帮助与报错文案**不进** :data:`arcam.i18n.TXT`：那张表与 webui/docs 两侧
+    i18n.js 同源生成（tests/test_webui_static.py 逐条钉死），CLI 帮助文本混进去
+    会污染网页语言表——编排者冻结口径，一律内联 ``_h(zh, en)``。
+    """
+    return en if _CUR_LANG == "en" else zh
+
+
+def _prescan_lang(argv: list[str]) -> str:
+    """建 parser 之前从 argv 里定语言：``--lang xx`` / ``--lang=xx``，$ARCAM_LANG 兜底。
+
+    --lang 优先于环境变量；多处给时取**最后一次**（与 argparse 后者覆盖前者一致）。
+    非法值不当真——交给 argparse 的 choices 报用法错误 exit 2，这里只决定 help 与
+    人话文案的语言。都不给 → :data:`arcam.i18n.DEFAULT_LANG`（zh）。
+    """
+    lang = os.environ.get("ARCAM_LANG", "").strip().lower()
+    for i, arg in enumerate(argv):
+        if arg == "--lang" and i + 1 < len(argv):
+            lang = argv[i + 1].strip().lower()
+        elif arg.startswith("--lang="):
+            lang = arg.split("=", 1)[1].strip().lower()
+    return lang if lang in LANGS else DEFAULT_LANG
+
 
 class CliError(Exception):
     """人话错误：main() 捕获后打到 stderr，退出码 1。"""
 
 
 def _add_out(p: argparse.ArgumentParser) -> None:
-    p.add_argument("-o", "--out", required=True, metavar="路径",
-                   help="输出文件路径（-o 短横形式等价）")
+    p.add_argument("-o", "--out", required=True, metavar=_h("路径", "PATH"),
+                   help=_h("输出文件路径（-o 短横形式等价）",
+                           "Output file path (the -o shorthand is equivalent)"))
 
 
 def _add_placement(p: argparse.ArgumentParser) -> None:
@@ -95,54 +132,115 @@ def _add_placement(p: argparse.ArgumentParser) -> None:
     ``env_overrides`` 显式优先；没给时 compose 侧从测出值/原版默认补齐。未给
     ``--depth`` 的路径由 :func:`_pose` 把 None 还原成 S 默认值，行为与从前一致。
     """
-    g = p.add_argument_group("摆放参数（默认值 = 原版 S 的默认值，index.html:921–937）")
-    g.add_argument("--x", type=_finite, default=None, metavar="米",
-                   help="人物横向偏移（S.x，+右，默认 0）")
-    g.add_argument("--d", type=_finite, default=None, metavar="米",
-                   help="人物到相机的纵向距离（S.d，默认 4）")
-    g.add_argument("--h", type=_finite, default=None, metavar="米",
-                   help="相机离地高（S.h，默认 1.6）")
-    g.add_argument("--hp", type=_finite, default=1.65, metavar="米",
-                   help="人物身高（S.Hp，默认 1.65）")
+    g = p.add_argument_group(_h("摆放参数（默认值 = 原版 S 的默认值，index.html:921–937）",
+                                "Placement (defaults = the original S defaults, "
+                                "index.html:921–937)"))
+    g.add_argument("--x", type=_finite, default=None, metavar=_h("米", "M"),
+                   help=_h("人物横向偏移（S.x，+右，默认 0）",
+                           "Subject lateral offset (S.x, +right, default 0)"))
+    g.add_argument("--d", type=_finite, default=None, metavar=_h("米", "M"),
+                   help=_h("人物到相机的纵向距离（S.d，默认 4）",
+                           "Subject distance from the camera (S.d, default 4)"))
+    g.add_argument("--h", type=_finite, default=None, metavar=_h("米", "M"),
+                   help=_h("相机离地高（S.h，默认 1.6）",
+                           "Camera height above ground (S.h, default 1.6)"))
+    g.add_argument("--hp", type=_finite, default=1.65, metavar=_h("米", "M"),
+                   help=_h("人物身高（S.Hp，默认 1.65）",
+                           "Subject height (S.Hp, default 1.65)"))
     g.add_argument("--feq", type=_finite, default=23.0, metavar="mm",
-                   help="等效 35mm 焦距（S.feq，默认 23）")
-    g.add_argument("--pitch", type=_finite, default=None, metavar="度",
-                   help="俯角（S.pitch，低头为正，默认 0）")
-    g.add_argument("--roll", type=_finite, default=None, metavar="度",
-                   help="滚转角（S.roll，画面顺时针，默认 0）")
-    g.add_argument("--shot", default="全身", choices=list(SHOTS), metavar="景别",
-                   help="景别：" + "，".join(f"{k}={v}" for k, v in SHOTS.items())
-                        + "（下沿离地高度/身高，默认 全身）")
-    g.add_argument("--char-scale", type=_finite, default=1.0, metavar="倍",
-                   help="立绘倍率（S.charScale，只乘投影跨度，默认 1）")
-    g.add_argument("--frame", default="满幅", choices=list(FRAMES), metavar="画幅",
-                   help="出图画幅（FRAMES 中文 key，默认 满幅=整块画布）")
+                   help=_h("等效 35mm 焦距（S.feq，默认 23）",
+                           "Equivalent 35mm focal length (S.feq, default 23)"))
+    g.add_argument("--pitch", type=_finite, default=None, metavar=_h("度", "DEG"),
+                   help=_h("俯角（S.pitch，低头为正，默认 0）",
+                           "Pitch angle (S.pitch, looking down is positive, default 0)"))
+    g.add_argument("--roll", type=_finite, default=None, metavar=_h("度", "DEG"),
+                   help=_h("滚转角（S.roll，画面顺时针，默认 0）",
+                           "Roll angle (S.roll, clockwise on screen, default 0)"))
+    g.add_argument("--shot", default="全身", choices=list(SHOTS),
+                   metavar=_h("景别", "SHOT"),
+                   help=_h("景别：" + "，".join(f"{k}={v}" for k, v in SHOTS.items())
+                           + "（下沿离地高度/身高，默认 全身）",
+                           "Shot size (scene.json key; default full body): "
+                           + ", ".join(f"{_SHOT_GLOSS.get(k, k)}={v}"
+                                       for k, v in SHOTS.items())
+                           + " — value = bottom-edge height as a fraction of "
+                             "subject height. CLI keys keep the original site's "
+                             "Chinese labels"))
+    g.add_argument("--char-scale", type=_finite, default=1.0, metavar=_h("倍", "X"),
+                   help=_h("立绘倍率（S.charScale，只乘投影跨度，默认 1）",
+                           "Character scale (S.charScale, multiplies the projected "
+                           "span only, default 1)"))
+    g.add_argument("--frame", default="满幅", choices=list(FRAMES),
+                   metavar=_h("画幅", "ASPECT"),
+                   help=_h("出图画幅（FRAMES 中文 key，默认 满幅=整块画布）",
+                           "Output aspect (scene.json key; default full canvas): "
+                           + " / ".join(_FRAME_GLOSS.get(k, k) for k in FRAMES)
+                           + ". Keys keep the original site's Chinese labels"))
     g.add_argument("--rot-basis", default="world", choices=("world", "frame"),
-                   help="立绘对正基准：world 跟世界竖直 / frame 永远画面竖直（S.rotBasis）")
+                   help=_h("立绘对正基准：world 跟世界竖直 / frame 永远画面竖直（S.rotBasis）",
+                           "Character alignment basis: world stays world-upright / "
+                           "frame stays screen-upright (S.rotBasis)"))
     g.add_argument("--mode", default="ground", choices=("ground", "free"),
-                   help="摆放模式：ground 贴地 / free 自由半身（S.mode）")
+                   help=_h("摆放模式：ground 贴地 / free 自由半身（S.mode）",
+                           "Placement mode: ground = feet on the ground / "
+                           "free = free half-body (S.mode)"))
     g.add_argument("--size-pct", type=_finite, default=60.0, metavar="%",
-                   help="自由模式立绘占画面高度百分比（S.sizePct，默认 60）")
+                   help=_h("自由模式立绘占画面高度百分比（S.sizePct，默认 60）",
+                           "Free-mode character height as a share of frame height "
+                           "(S.sizePct, default 60)"))
     g.add_argument("--edge-bar", type=int, default=0, choices=(0, 1, 2, 3, 4),
-                   metavar="0-4", help="框条吸附（S.edgeBar，0 不吸/1 上/2 下/3 左/4 右，"
-                                       "仅自由模式，吸附时旋转锁 0）")
+                   metavar="0-4", help=_h("框条吸附（S.edgeBar，0 不吸/1 上/2 下/3 左/4 右，"
+                                          "仅自由模式，吸附时旋转锁 0）",
+                                          "Frame-edge snap (S.edgeBar, 0 none / 1 top / "
+                                          "2 bottom / 3 left / 4 right; free mode only, "
+                                          "rotation locks to 0 while snapped)"))
     g.add_argument("--tone", action="store_true",
-                   help="色调匹配（原版 TONE_ON，只有照片路径生效，index.html:3690）")
+                   help=_h("色调匹配（原版 TONE_ON，只有照片路径生效，index.html:3690）",
+                           "Tone matching (original TONE_ON; photo path only, "
+                           "index.html:3690)"))
     g.add_argument("--no-light", action="store_true",
-                   help="关掉环境光烘焙（bakeLit；只出原色立绘）。char-layer/multi 没有"
-                        "照片可采光、本来就不烘；bundle 与网页导出的立绘层跟随照片光）")
+                   help=_h("关掉环境光烘焙（bakeLit；只出原色立绘）。char-layer/multi 没有"
+                           "照片可采光、本来就不烘；bundle 与网页导出的立绘层跟随照片光）",
+                           "Disable ambient-light baking (bakeLit; emits the character "
+                           "in its original colors). char-layer/multi have no photo to "
+                           "sample light from and never bake; bundle and the web "
+                           "export's character layer follow the photo light"))
     g.add_argument("--no-grain", action="store_true",
-                   help="关掉颗粒匹配（ bakeLit 里的颗粒那一段，光仍烘）")
+                   help=_h("关掉颗粒匹配（bakeLit 里的颗粒那一段，光仍烘）",
+                           "Disable grain matching (the grain stage of bakeLit; "
+                           "light is still baked)"))
     g.add_argument("--no-shadow", action="store_true",
-                   help="关掉接触阴影（原版 LIGHT_SHD，index.html:1144）")
-    g.add_argument("--shadow-az", type=_finite, default=0.0, metavar="度",
-                   help="阴影光线方位角（默认 0 = 影子正落脚下，与原版一致；非 0 = "
-                        "斜射拖偏。原版 2D 阴影无方向，这是离线侧新增控制）")
-    g.add_argument("--shadow-opacity", type=_nonneg, default=1.0, metavar="倍",
-                   help="阴影浓度倍率（默认 1.0，乘在原版 SH_ALPHA 上；0 = 不铺阴影）")
-    g.add_argument("--grain-scale", type=_nonneg, default=1.0, metavar="倍",
-                   help="颗粒强度倍率（默认 1.0 = 原版逐位一致；乘在 bakeLit 的 gAmp 上，"
-                        "只改颗粒那段，曲线/白平衡/饱和不动；0 = 不撒颗粒）")
+                   help=_h("关掉接触阴影（原版 LIGHT_SHD，index.html:1144）",
+                           "Disable the contact shadow (original LIGHT_SHD, "
+                           "index.html:1144)"))
+    g.add_argument("--shadow-az", type=_finite, default=0.0, metavar=_h("度", "DEG"),
+                   help=_h("阴影光线方位角（默认 0 = 影子正落脚下，与原版一致；非 0 = "
+                           "斜射拖偏。原版 2D 阴影无方向，这是离线侧新增控制）",
+                           "Shadow light azimuth (default 0 = shadow straight under "
+                           "the feet, matching the original; non-zero = slanted and "
+                           "offset. The original 2D shadow has no direction; this is "
+                           "an offline-side addition)"))
+    g.add_argument("--shadow-opacity", type=_nonneg, default=1.0, metavar=_h("倍", "X"),
+                   help=_h("阴影浓度倍率（默认 1.0，乘在原版 SH_ALPHA 上；0 = 不铺阴影）",
+                           "Shadow opacity multiplier (default 1.0, scales the original "
+                           "SH_ALPHA; 0 = no shadow)"))
+    g.add_argument("--grain-scale", type=_nonneg, default=1.0, metavar=_h("倍", "X"),
+                   help=_h("颗粒强度倍率（默认 1.0 = 原版逐位一致；乘在 bakeLit 的 gAmp 上，"
+                           "只改颗粒那段，曲线/白平衡/饱和不动；0 = 不撒颗粒）",
+                           "Grain strength multiplier (default 1.0 = bit-identical to "
+                           "the original; scales gAmp in bakeLit, affecting only the "
+                           "grain stage — curve, white balance and saturation stay; "
+                           "0 = no grain)"))
+
+
+#: ``--shot`` 键的英文释义（en help 用；键序与 placement.SHOTS 一致，缺键回落原键
+#: 让「en help 无 CJK」门禁抓得到漂移）。⚠ 不放 i18n.TXT：那张表与两侧 i18n.js
+#: 同源，CLI 帮助文本混进去会污染网页语言表（见 _h）。
+_SHOT_GLOSS = {"全身": "full body", "膝上": "above knee", "腰上": "above waist",
+               "胸上": "above chest", "头肩": "head & shoulders"}
+
+#: ``--frame`` 键的英文释义（同上；比例型键 1:1/4:5/16:9/9:16 中英同形不列）。
+_FRAME_GLOSS = {"自由": "uncropped", "满幅": "full canvas"}
 
 
 def _finite(value: float) -> float:
@@ -154,7 +252,8 @@ def _finite(value: float) -> float:
     """
     v = float(value)
     if not math.isfinite(v):
-        raise argparse.ArgumentTypeError(f"应是有限数，得到 {value!r}")
+        raise argparse.ArgumentTypeError(
+            _h(f"应是有限数，得到 {value!r}", f"Expected a finite number, got {value!r}"))
     return v
 
 
@@ -168,26 +267,40 @@ def _nonneg(value: float) -> float:
     """
     v = float(value)
     if not math.isfinite(v):
-        raise argparse.ArgumentTypeError(f"应是有限数，得到 {value!r}")
+        raise argparse.ArgumentTypeError(
+            _h(f"应是有限数，得到 {value!r}", f"Expected a finite number, got {value!r}"))
     if v < 0.0:
-        raise argparse.ArgumentTypeError(f"应 >= 0，得到 {v:g}")
+        raise argparse.ArgumentTypeError(
+            _h(f"应 >= 0，得到 {v:g}", f"Must be >= 0, got {v:g}"))
     return v
 
 
-def _add_lang(p: argparse.ArgumentParser) -> None:
+def _add_lang(p: argparse.ArgumentParser, lang: str = DEFAULT_LANG,
+              *, inherit: bool = False) -> None:
     """语言开关（FEATURE-SPEC §3）：只影响人话输出，不改任何数值行为。
 
-    ⚠ 覆盖面（v2.0.0 审计实测，避免"旗标收了但没处用"的误导）：当前只有
-    ``prep`` / ``batch`` 的提示与 ``--overlay`` 的 HUD 文案（horizon 标签、
-    三行读数）真的跟它走；``multi`` / ``contact-sheet`` / ``recipe`` 收下但
-    输出里没有可翻的条目（语言表与 webui/docs 两侧 i18n.js 同源，加键要动
-    那两个文件，属编排者分区）；``render`` / ``char-layer`` / ``bundle`` /
-    ``video`` / ``matte`` 等则连这个旗标都没有。help 文本按此如实写。
+    挂到**每一个**子命令（render / char-layer / bundle / multi / contact-sheet /
+    video / matte / prep / batch / recipe 的 save/list/show/apply / lidar 的
+    inspect/serve/sim / web / watch / stats / check）——v2.0.0 审计前只有 6 个
+    命令收它，``arcam render --lang en`` 直接 unrecognized arguments。
+
+    ``lang`` 是 build_parser 收到的当前语言（main() 预扫 argv / $ARCAM_LANG
+    得到），也是本开关的默认值：没显式给 --lang 时，整条命令的人话输出都跟随它
+    （help 按 :data:`_CUR_LANG` 取中英一半，见 :func:`_h`）。
+
+    ``inherit=True`` 只用于 recipe 的四个子命令：父级 recipe 已带 --lang，子级
+    若再用真默认值，会盖住父级解析到的值（argparse 子 parser 的默认值写回主
+    namespace，Python 3.9+ 的 subnamespace 语义），``arcam recipe --lang en save x``
+    于是静默变回中文。SUPPRESS 让子级只在显式给过 --lang 时才落值，父前子后
+    两种书写位置都正确。
     """
-    p.add_argument("--lang", default="zh", choices=list(LANGS), metavar="语言",
-                   help="人话输出语言：zh 中文 / en English（默认 zh；数值行为不变。"
-                        "目前覆盖 prep/batch 的提示与 --overlay 的 HUD 文案，"
-                        "其余命令的输出暂无英文条目）")
+    p.add_argument("--lang", default=argparse.SUPPRESS if inherit else lang,
+                   choices=list(LANGS), metavar=_h("语言", "LANG"),
+                   help=_h(f"人话输出语言：zh 中文 / en English（默认 {lang}；"
+                           f"只影响人话输出，数值行为不变）",
+                           f"Language for human-readable output: zh Chinese / "
+                           f"en English (default {lang}; human-readable output "
+                           f"only, numeric behavior is unchanged)"))
 
 
 #: ``--overlay`` 的合法层名与 **canonical 叠放次序**（grid → horizon → figure →
@@ -212,23 +325,45 @@ def _overlay_layers(value) -> tuple[str, ...]:
              else [str(p).strip() for p in value])
     if any(not p for p in parts):
         raise argparse.ArgumentTypeError(
-            f"层名不能为空（--overlay 用逗号组合多层，如 grid,horizon；合法值："
-            f"{'/'.join(OVERLAY_LAYERS)}；收到 {value!r}）")
+            _h(f"层名不能为空（--overlay 用逗号组合多层，如 grid,horizon；合法值："
+               f"{'/'.join(OVERLAY_LAYERS)}；收到 {value!r}）",
+               f"Layer name cannot be empty (--overlay comma-combines layers, "
+               f"e.g. grid,horizon; valid: {'/'.join(OVERLAY_LAYERS)}; "
+               f"got {value!r})"))
     bad = [p for p in parts if p not in OVERLAY_LAYERS]
     if bad:
         raise argparse.ArgumentTypeError(
-            f"未知层名 {'/'.join(bad)}（合法值：{'/'.join(OVERLAY_LAYERS)}）")
+            _h(f"未知层名 {'/'.join(bad)}（合法值：{'/'.join(OVERLAY_LAYERS)}）",
+               f"Unknown layer name {'/'.join(bad)} "
+               f"(valid: {'/'.join(OVERLAY_LAYERS)})"))
     return tuple(layer for layer in OVERLAY_LAYERS if layer in set(parts))
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(lang: str = "zh") -> argparse.ArgumentParser:
+    """建 CLI parser；``lang`` 决定 help / metavar 的语言（缺省中文）。
+
+    ``lang`` 同时写进模块级 :data:`_CUR_LANG`——:func:`_h` 读它来取中英一半，
+    help 文案于是在**建 parser 时**就按语言出（main() 会在调本函数前预扫
+    argv / $ARCAM_LANG 定好语言，见 :func:`_prescan_lang`；argparse 的 help 在
+    建 parser 时就要用语言，parse 完才知道就晚了）。内部再调 build_parser 时
+    （stats 现抓子命令表，见 :func:`_subcommand_names`）要传 :data:`_CUR_LANG`，
+    别把语言冲掉。
+    """
+    global _CUR_LANG
+    if lang in LANGS:
+        _CUR_LANG = lang
     parser = argparse.ArgumentParser(
         prog="arcam",
-        description="让她走出屏幕（Python 离线版）—— 透视投影立绘合成管线："
-                    "出图 / 立绘层 / 素材包 / 抠图 / 装图修图 / 轨道视频 / 配方 /"
-                    "批量 / 多立绘 / 对比网格 / LiDAR 深度 / 本地网页。",
+        description=_h("让她走出屏幕（Python 离线版）—— 透视投影立绘合成管线："
+                       "出图 / 立绘层 / 素材包 / 抠图 / 装图修图 / 轨道视频 / 配方 /"
+                       "批量 / 多立绘 / 对比网格 / LiDAR 深度 / 本地网页。",
+                       "Let her step out of the screen (Python offline port) — a "
+                       "perspective-projection compositing pipeline: render / "
+                       "character layer / bundle / AI cutout / auto-prep / track "
+                       "video / recipes / batch / multi-character / contact sheet / "
+                       "LiDAR depth / local web UI."),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""示例：
+        epilog=_h("""示例：
   arcam render photo.jpg char.png -o shot.png --scene scene.json
   arcam render photo.jpg char.png -o shot.png --depth scan_0001.png
   arcam char-layer char.png -o layer.png --mode free --size-pct 70
@@ -246,271 +381,548 @@ def build_parser() -> argparse.ArgumentParser:
   arcam lidar inspect scan_0001.png [--json]
   arcam web [--host 127.0.0.1] [--port 8765] [--no-open]   # 本地网页界面
 
-退出码：0 正常，1 运行期失败（缺文件/素材不合法/轨道有问题），2 用法错误。""")
-    sub = parser.add_subparsers(dest="cmd", required=True, metavar="命令")
+退出码：0 正常，1 运行期失败（缺文件/素材不合法/轨道有问题），2 用法错误。""",
+                   """Examples:
+  arcam render photo.jpg char.png -o shot.png --scene scene.json
+  arcam render photo.jpg char.png -o shot.png --depth scan_0001.png
+  arcam char-layer char.png -o layer.png --mode free --size-pct 70
+  arcam bundle photo.jpg char.png -o pack.zip --pitch 12
+  arcam matte photo.jpg -o cut.png --model isnet-anime-q8.onnx
+  arcam prep char.png -o clean.png            # auto-prep chain (cutout/trim/soften/blur)
+  arcam video track.json char.png -o frames/ --bg bg/ --tone --gif
+  arcam check track.json
+  arcam recipe save demo --pitch 15 --mode free   # recipe save/list/show/apply
+  arcam watch photo.jpg char.png -o shot.png --once
+  arcam multi photo.jpg a.png b.png -o two.png --spec 'x=1.2;d=3.2;scale=0.7'
+  arcam contact-sheet photo.jpg char.png -o grid.png --vary d=3,4,5 --vary pitch=0,15
+  arcam batch photos/ char.png -o out/ --depth-dir depths/ --scene
+  arcam stats                                    # project checkup (size/tests/subcommands)
+  arcam lidar inspect scan_0001.png [--json]
+  arcam web [--host 127.0.0.1] [--port 8765] [--no-open]   # local web UI
 
-    p = sub.add_parser("prep", help="立绘自动修图：纯色底抠图 + 裁边 + 柔边 + 镜头微糊",
-                       description="装图后自动做的修图链（index.html:2400-2440 的 1:1 对译，"
-                                   "docs/FEATURE-SPEC §1）：① 纯色底抠底（占比 5%~85% 门控）"
-                                   "② 自动裁边 ③ 柔边 ④ 镜头微糊 ⑤ 半身判定。"
-                                   "任一步失败静默跳过；动过手且内容 <8px 整体回退原图。"
-                                   "半身结论会提示（那种图不能贴地，应走 --mode free）。")
-    p.add_argument("char", metavar="CHAR", help="立绘（带 alpha 的 PNG 最佳；纯色底 JPG 也能抠）")
+Exit codes: 0 ok, 1 runtime failure (missing file / bad input / bad track),
+2 usage error."""))
+    # 顶层也收 --lang：``arcam --lang en render …``（开关在子命令前）必须能 parse，
+    # 否则预扫定了英文、argparse 却报 invalid choice: 'en'（exit 2）。
+    # 与子命令那一份同值（都是 build_parser 收到的 lang）：子 parser 的默认值会
+    # 写回主 namespace，两边默认值一致才不会被互相覆盖（见 _add_lang）。
+    _add_lang(parser, lang)
+    sub = parser.add_subparsers(dest="cmd", required=True, metavar=_h("命令", "COMMAND"))
+
+    p = sub.add_parser("prep", help=_h("立绘自动修图：纯色底抠图 + 裁边 + 柔边 + 镜头微糊",
+                                       "Auto-prep a character: solid-bg cutout + trim "
+                                       "+ soften + lens blur"),
+                       description=_h("装图后自动做的修图链（index.html:2400-2440 的 1:1 对译，"
+                                      "docs/FEATURE-SPEC §1）：① 纯色底抠底（占比 5%~85% 门控）"
+                                      "② 自动裁边 ③ 柔边 ④ 镜头微糊 ⑤ 半身判定。"
+                                      "任一步失败静默跳过；动过手且内容 <8px 整体回退原图。"
+                                      "半身结论会提示（那种图不能贴地，应走 --mode free）。",
+                                      "The auto-prep chain run after loading art (1:1 "
+                                      "port of index.html:2400-2440, docs/FEATURE-SPEC "
+                                      "§1): ① solid-bg cutout (5%–85% ratio gate) "
+                                      "② auto-trim ③ soften edges ④ lens blur "
+                                      "⑤ half-body check. A failing step is skipped "
+                                      "silently; if the result collapses below 8px the "
+                                      "whole chain reverts to the original. The "
+                                      "half-body verdict is reported (that art cannot "
+                                      "go on the ground — use --mode free)."))
+    p.add_argument("char", metavar="CHAR",
+                   help=_h("立绘（带 alpha 的 PNG 最佳；纯色底 JPG 也能抠）",
+                           "Character (alpha PNG is best; solid-bg JPG can be cut too)"))
     _add_out(p)
-    p.add_argument("--no-solid", action="store_true", help="跳过①纯色底抠底")
-    p.add_argument("--no-trim", action="store_true", help="跳过②自动裁边")
-    p.add_argument("--no-soften", action="store_true", help="跳过③柔边整理")
-    p.add_argument("--no-blur", action="store_true", help="跳过④镜头微糊")
-    _add_lang(p)
+    p.add_argument("--no-solid", action="store_true", help=_h("跳过①纯色底抠底",
+                                                              "Skip ① solid-bg cutout"))
+    p.add_argument("--no-trim", action="store_true", help=_h("跳过②自动裁边",
+                                                             "Skip ② auto-trim"))
+    p.add_argument("--no-soften", action="store_true", help=_h("跳过③柔边整理",
+                                                               "Skip ③ edge softening"))
+    p.add_argument("--no-blur", action="store_true", help=_h("跳过④镜头微糊",
+                                                             "Skip ④ lens blur"))
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_prep)
 
-    p = sub.add_parser("render", help="单张出图（可选顺带写 scene.json 配方）",
-                       description="把立绘合成进照片，单张出图。"
-                                   "--scene 给的路径会顺带写 scene.json（1:1 同构原版配方）。"
-                                   "--depth 给 LiDAR 深度帧：相机高/俯仰/滚转/人物纵深改为"
-                                   "深度测出，显式摆放参数仍优先（docs/LIDAR-SPEC §0/§4）。")
-    p.add_argument("photo", metavar="PHOTO", help="背景/照片（JPEG/PNG/…）")
-    p.add_argument("char", metavar="CHAR", help="立绘（带 alpha 的 PNG 最佳）")
+    p = sub.add_parser("render", help=_h("单张出图（可选顺带写 scene.json 配方）",
+                                         "Render one shot (optionally write a scene.json "
+                                         "recipe)"),
+                       description=_h("把立绘合成进照片，单张出图。"
+                                      "--scene 给的路径会顺带写 scene.json（1:1 同构原版配方）。"
+                                      "--depth 给 LiDAR 深度帧：相机高/俯仰/滚转/人物纵深改为"
+                                      "深度测出，显式摆放参数仍优先（docs/LIDAR-SPEC §0/§4）。",
+                                      "Composite the character into the photo and write "
+                                      "one image. --scene also writes scene.json (1:1 "
+                                      "with the original recipe format). --depth takes "
+                                      "a LiDAR depth frame: camera height / pitch / roll "
+                                      "and subject depth come from the depth fit, "
+                                      "explicit placement flags still win "
+                                      "(docs/LIDAR-SPEC §0/§4)."))
+    p.add_argument("photo", metavar="PHOTO", help=_h("背景/照片（JPEG/PNG/…）",
+                                                     "Background photo (JPEG/PNG/…)"))
+    p.add_argument("char", metavar="CHAR", help=_h("立绘（带 alpha 的 PNG 最佳）",
+                                                   "Character (alpha PNG is best)"))
     _add_out(p)
-    p.add_argument("--scene", metavar="PATH", help="同时写 scene.json 到该路径")
+    p.add_argument("--scene", metavar="PATH", help=_h("同时写 scene.json 到该路径",
+                                                      "Also write scene.json to this path"))
     p.add_argument("--depth", metavar="DEPTH", default=None,
-                   help="LiDAR 深度帧：16-bit PNG/TIF（毫米）/ .npy（米）/ .depth（magic "
-                        "ARCD）/ 人像 HEIC；E1-E4 全开，显式参数仍优先")
+                   help=_h("LiDAR 深度帧：16-bit PNG/TIF（毫米）/ .npy（米）/ .depth（magic "
+                           "ARCD）/ 人像 HEIC；E1-E4 全开，显式参数仍优先",
+                           "LiDAR depth frame: 16-bit PNG/TIF (mm) / .npy (m) / "
+                           ".depth (ARCD magic) / portrait HEIC; E1–E4 all on, "
+                           "explicit flags still win"))
     p.add_argument("--overlay", default=None, type=_overlay_layers,
-                   metavar="层[,层...]",
-                   help="出图后叠 HUD 取景装饰层，可用逗号组合多层（如 grid,horizon,figure；"
-                        "合法值 grid/horizon/figure/hud，重复名只算一次）。实际叠放次序"
-                        "恒为 grid→horizon→figure→hud（与原版取景四开关排列一致），"
-                        "与书写顺序无关。默认不叠；原版那些只在实时预览里画，出图不带"
-                        "——要排查构图时才开")
+                   metavar=_h("层[,层...]", "LAYER[,LAYER...]"),
+                   help=_h("出图后叠 HUD 取景装饰层，可用逗号组合多层（如 grid,horizon,figure；"
+                           "合法值 grid/horizon/figure/hud，重复名只算一次）。实际叠放次序"
+                           "恒为 grid→horizon→figure→hud（与原版取景四开关排列一致），"
+                           "与书写顺序无关。默认不叠；原版那些只在实时预览里画，出图不带"
+                           "——要排查构图时才开",
+                           "Stack HUD framing guides on the output after rendering; "
+                           "comma-combine layers (e.g. grid,horizon,figure; valid "
+                           "grid/horizon/figure/hud, duplicates count once). Stacking "
+                           "order is always grid→horizon→figure→hud (matches the "
+                           "original framing switches), regardless of write order. Off "
+                           "by default — the original draws these only in live "
+                           "preview, never on exports; enable to debug composition"))
     _add_placement(p)
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_render)
 
-    p = sub.add_parser("recipe", help="摆放配方：存 / 列 / 看 / 取（参数预设库）",
-                       description="把一组摆放参数存成命名配方，之后任意照片/立绘都能套。"
-                                   "配方就是 scene.json 的摆放段（同字段同单位），存到 "
-                                   "~/.arcam/recipes/NAME.json（$ARCAM_RECIPES 可改根目录）。"
-                                   "apply 子命令打印可直接粘的 CLI 参数，也能 --set 临时改单项。")
-    rsub = p.add_subparsers(dest="recipe_cmd", required=True, metavar="动作")
-    rp = rsub.add_parser("save", help="存一个配方（当前 CLI 参数或 --from scene.json）")
-    rp.add_argument("name", metavar="NAME", help="配方名（文件名安全字符）")
+    p = sub.add_parser("recipe", help=_h("摆放配方：存 / 列 / 看 / 取（参数预设库）",
+                                         "Placement recipes: save / list / show / apply "
+                                         "(parameter presets)"),
+                       description=_h("把一组摆放参数存成命名配方，之后任意照片/立绘都能套。"
+                                      "配方就是 scene.json 的摆放段（同字段同单位），存到 "
+                                      "~/.arcam/recipes/NAME.json（$ARCAM_RECIPES 可改根目录）。"
+                                      "apply 子命令打印可直接粘的 CLI 参数，也能 --set 临时改单项。",
+                                      "Save a set of placement parameters as a named "
+                                      "recipe, then apply it to any photo/character. A "
+                                      "recipe is the placement section of scene.json "
+                                      "(same fields, same units), stored at "
+                                      "~/.arcam/recipes/NAME.json ($ARCAM_RECIPES "
+                                      "overrides the root). The apply action prints "
+                                      "paste-ready CLI flags, and --set can tweak one "
+                                      "item."))
+    rsub = p.add_subparsers(dest="recipe_cmd", required=True, metavar=_h("动作", "ACTION"))
+    rp = rsub.add_parser("save", help=_h("存一个配方（当前 CLI 参数或 --from scene.json）",
+                                         "Save a recipe (from the current CLI flags or "
+                                         "--from scene.json)"))
+    rp.add_argument("name", metavar="NAME", help=_h("配方名（文件名安全字符）",
+                                                    "Recipe name (filename-safe characters)"))
     rp.add_argument("--from", dest="from_file", metavar="SCENE", default=None,
-                    help="从 scene.json 提取摆放段（不给则用当前命令行参数）")
+                    help=_h("从 scene.json 提取摆放段（不给则用当前命令行参数）",
+                            "Extract the placement section from scene.json "
+                            "(default: current CLI flags)"))
     _add_placement(rp)
+    _add_lang(rp, lang, inherit=True)
     rp.set_defaults(func=cmd_recipe_save)
-    rsub.add_parser("list", help="列出所有配方").set_defaults(func=cmd_recipe_list)
-    rp = rsub.add_parser("show", help="看一个配方的内容")
+    rp = rsub.add_parser("list", help=_h("列出所有配方", "List all recipes"))
+    _add_lang(rp, lang, inherit=True)
+    rp.set_defaults(func=cmd_recipe_list)
+    rp = rsub.add_parser("show", help=_h("看一个配方的内容", "Show one recipe"))
     rp.add_argument("name", metavar="NAME")
-    rp.add_argument("--json", action="store_true", help="原样输出 JSON")
+    rp.add_argument("--json", action="store_true", help=_h("原样输出 JSON",
+                                                           "Print raw JSON"))
+    _add_lang(rp, lang, inherit=True)
     rp.set_defaults(func=cmd_recipe_show)
-    rp = rsub.add_parser("apply", help="生成可粘的 CLI 参数（或 --set 改单项后输出）")
+    rp = rsub.add_parser("apply", help=_h("生成可粘的 CLI 参数（或 --set 改单项后输出）",
+                                          "Print paste-ready CLI flags (after optional "
+                                          "--set tweaks)"))
     rp.add_argument("name", metavar="NAME")
     rp.add_argument("--set", action="append", default=[], metavar="K=V",
-                    help="临时改一项（可多次）：--set pitch=15 --set mode=free")
+                    help=_h("临时改一项（可多次）：--set pitch=15 --set mode=free",
+                            "Tweak one item (repeatable): --set pitch=15 --set mode=free"))
+    _add_lang(rp, lang, inherit=True)
     rp.set_defaults(func=cmd_recipe_apply)
-    _add_lang(p)
+    _add_lang(p, lang)
 
-    p = sub.add_parser("watch", help="监视文件夹：素材变了就自动重出图",
-                       description="盯着 PHOTO 与 CHAR，改动落地后自动重跑出图——"
-                                   "调参时不用反复敲命令。Ctrl-C 退出；--once 只跑一遍"
-                                   "（等于带日志的 render）。")
-    p.add_argument("photo", metavar="PHOTO", help="要监视的照片（改了它就重渲）")
-    p.add_argument("char", metavar="CHAR", help="立绘（改了它也重渲）")
+    p = sub.add_parser("watch", help=_h("监视文件夹：素材变了就自动重出图",
+                                        "Watch inputs and re-render on change"),
+                       description=_h("盯着 PHOTO 与 CHAR，改动落地后自动重跑出图——"
+                                      "调参时不用反复敲命令。Ctrl-C 退出；--once 只跑一遍"
+                                      "（等于带日志的 render）。",
+                                      "Watch PHOTO and CHAR and re-render whenever "
+                                      "either lands a change — no retyping the command "
+                                      "while tuning. Ctrl-C quits; --once renders a "
+                                      "single pass (a render with logging)."))
+    p.add_argument("photo", metavar="PHOTO", help=_h("要监视的照片（改了它就重渲）",
+                                                     "Photo to watch (re-renders when "
+                                                     "it changes)"))
+    p.add_argument("char", metavar="CHAR", help=_h("立绘（改了它也重渲）",
+                                                   "Character (re-renders when it "
+                                                   "changes)"))
     _add_out(p)
-    p.add_argument("--interval", type=_finite, default=1.0, metavar="秒",
-                   help="轮询间隔（默认 1.0；文件系统事件在各平台可靠性不一，轮询最稳）")
-    p.add_argument("--once", action="store_true", help="只跑一遍就退出（不进入监视循环）")
+    p.add_argument("--interval", type=_finite, default=1.0, metavar=_h("秒", "SEC"),
+                   help=_h("轮询间隔（默认 1.0；文件系统事件在各平台可靠性不一，轮询最稳）",
+                           "Poll interval (default 1.0; filesystem events are unreliable "
+                           "across platforms, polling is safest)"))
+    p.add_argument("--once", action="store_true", help=_h("只跑一遍就退出（不进入监视循环）",
+                                                          "Render once and exit (no watch "
+                                                          "loop)"))
     p.add_argument("--overlay", default=None, type=_overlay_layers,
-                   metavar="层[,层...]",
-                   help="出图后叠 HUD 取景装饰层，可用逗号组合多层（如 grid,horizon；"
-                        "合法值 grid/horizon/figure/hud，重复名只算一次）。实际叠放次序"
-                        "恒为 grid→horizon→figure→hud（与原版取景四开关排列一致），"
-                        "与书写顺序无关（默认不叠）")
+                   metavar=_h("层[,层...]", "LAYER[,LAYER...]"),
+                   help=_h("出图后叠 HUD 取景装饰层，可用逗号组合多层（如 grid,horizon；"
+                           "合法值 grid/horizon/figure/hud，重复名只算一次）。实际叠放次序"
+                           "恒为 grid→horizon→figure→hud（与原版取景四开关排列一致），"
+                           "与书写顺序无关（默认不叠）",
+                           "Stack HUD framing guides on the output after rendering; "
+                           "comma-combine layers (e.g. grid,horizon; valid "
+                           "grid/horizon/figure/hud, duplicates count once). Stacking "
+                           "order is always grid→horizon→figure→hud (matches the "
+                           "original framing switches), regardless of write order "
+                           "(off by default)"))
     _add_placement(p)
-    _add_lang(p)
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_watch)
 
-    p = sub.add_parser("multi", help="多立绘合成：一张照片里站多个人（各带各的站位）",
-                       description="按顺序把多张立绘叠进同一照片。每张立绘用 --spec 给一套"
-                                   "站位覆盖（x/d/scale/shot/mode/size_pct/edge_bar/rot_basis），"
-                                   "不给就用主参数。层与层之间 source-over 顺序合成，"
-                                   "后画的盖先画的（和手工逐一合成等价）。")
-    p.add_argument("photo", metavar="PHOTO", help="背景照片")
-    p.add_argument("chars", metavar="CHAR", nargs="+", help="立绘（至少一张；多张按顺序叠）")
+    p = sub.add_parser("multi", help=_h("多立绘合成：一张照片里站多个人（各带各的站位）",
+                                        "Multi-character composite: several characters "
+                                        "in one photo (each with its own placement)"),
+                       description=_h("按顺序把多张立绘叠进同一照片。每张立绘用 --spec 给一套"
+                                      "站位覆盖（x/d/scale/shot/mode/size_pct/edge_bar/rot_basis），"
+                                      "不给就用主参数。层与层之间 source-over 顺序合成，"
+                                      "后画的盖先画的（和手工逐一合成等价）。",
+                                      "Stack several characters into one photo in order. "
+                                      "Each character takes a --spec placement override "
+                                      "(x/d/scale/shot/mode/size_pct/edge_bar/rot_basis); "
+                                      "without one it uses the main flags. Layers "
+                                      "composite source-over in order, later over "
+                                      "earlier (equivalent to compositing by hand one "
+                                      "at a time)."))
+    p.add_argument("photo", metavar="PHOTO", help=_h("背景照片", "Background photo"))
+    p.add_argument("chars", metavar="CHAR", nargs="+",
+                   help=_h("立绘（至少一张；多张按顺序叠）",
+                           "Characters (at least one; stacked in order)"))
     _add_out(p)
     p.add_argument("--spec", action="append", default=[], metavar="K=V;K=V",
-                   help="第 N 张立绘的站位覆盖（按 --spec 出现顺序对应第 2、3… 张；"
-                        "第一张用主参数）。例：--spec 'x=0.6;d=3.2;scale=0.8'")
-    p.add_argument("--scene", metavar="PATH", help="同时写 scene.json（记第一张的落位）")
+                   help=_h("第 N 张立绘的站位覆盖（按 --spec 出现顺序对应第 2、3… 张；"
+                           "第一张用主参数）。例：--spec 'x=0.6;d=3.2;scale=0.8'",
+                           "Placement override for the Nth character (--spec order maps "
+                           "to the 2nd, 3rd… character; the first uses the main flags). "
+                           "Example: --spec 'x=0.6;d=3.2;scale=0.8'"))
+    p.add_argument("--scene", metavar="PATH", help=_h("同时写 scene.json（记第一张的落位）",
+                                                      "Also write scene.json (records the "
+                                                      "first character's placement)"))
     _add_placement(p)
-    _add_lang(p)
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_multi)
 
-    p = sub.add_parser("stats", help="项目自报：规模/测试/功能矩阵一句话",
-                       description="数一数源码行数、测试条数、子命令与模块，打印项目体检表。"
-                                   "给 README 和发布说明用，免手工维护。")
-    p.add_argument("--json", action="store_true", help="输出 JSON（脚本好用）")
+    p = sub.add_parser("stats", help=_h("项目自报：规模/测试/功能矩阵一句话",
+                                        "Project self-report: size / tests / feature "
+                                        "matrix in one table"),
+                       description=_h("数一数源码行数、测试条数、子命令与模块，打印项目体检表。"
+                                      "给 README 和发布说明用，免手工维护。",
+                                      "Count source lines, tests, subcommands and "
+                                      "modules, then print a project checkup table. For "
+                                      "README and release notes, no manual upkeep."))
+    p.add_argument("--json", action="store_true", help=_h("输出 JSON（脚本好用）",
+                                                          "Print JSON (script-friendly)"))
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_stats)
 
-    p = sub.add_parser("contact-sheet", help="参数对比网格：同一构图扫一组参数出一张总览图",
-                       description="把同一照片/立绘在一组参数取值下各渲一张，拼成带标注的"
-                                   "对比网格——调参时肉眼挑最满意的那一档，比逐张出图快。"
-                                   "--vary 可给多次（笛卡尔积，上限 24 格防止手滑）。")
-    p.add_argument("photo", metavar="PHOTO", help="背景照片")
-    p.add_argument("char", metavar="CHAR", help="立绘")
+    p = sub.add_parser("contact-sheet",
+                       help=_h("参数对比网格：同一构图扫一组参数出一张总览图",
+                               "Parameter contact sheet: one composition swept over a "
+                               "set of values"),
+                       description=_h("把同一照片/立绘在一组参数取值下各渲一张，拼成带标注的"
+                                      "对比网格——调参时肉眼挑最满意的那一档，比逐张出图快。"
+                                      "--vary 可给多次（笛卡尔积，上限 24 格防止手滑）。",
+                                      "Render the same photo/character at several "
+                                      "parameter values and tile them into a labeled "
+                                      "contact sheet — pick the best take by eye while "
+                                      "tuning, faster than rendering one by one. "
+                                      "--vary is repeatable (cartesian product, capped "
+                                      "at 24 cells to prevent slips)."))
+    p.add_argument("photo", metavar="PHOTO", help=_h("背景照片", "Background photo"))
+    p.add_argument("char", metavar="CHAR", help=_h("立绘", "Character"))
     _add_out(p)
     p.add_argument("--vary", action="append", required=True, metavar="K=V,V,V",
-                   help="要扫的参数与取值：--vary d=3,4,5 --vary pitch=0,15,30")
+                   help=_h("要扫的参数与取值：--vary d=3,4,5 --vary pitch=0,15,30",
+                           "Parameter and values to sweep: --vary d=3,4,5 "
+                           "--vary pitch=0,15,30"))
     p.add_argument("--cols", type=int, default=0, metavar="N",
-                   help="每行几格（默认按格数自动开方）")
+                   help=_h("每行几格（默认按格数自动开方）",
+                           "Cells per row (default: sqrt of the cell count)"))
     p.add_argument("--cell-w", type=int, default=480, metavar="PX",
-                   help="单格宽（默认 480；高按画幅等比）")
+                   help=_h("单格宽（默认 480；高按画幅等比）",
+                           "Cell width (default 480; height follows the aspect)"))
     _add_placement(p)
-    _add_lang(p)
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_contact_sheet)
 
-    p = sub.add_parser("batch", help="批量出图：一个文件夹的照片 × 同一立绘同一组参数",
-                       description="把 PHOTO_DIR 里每张照片按同一组摆放参数各出一张图。"
-                                   "适用于「同一机位拍一批、要一致合成」的场合：参数只调一遍，"
-                                   "批量套用。--depth-dir 给同名深度帧时逐张匹配（可选）。"
-                                   "输出 OUTDIR/shot_<照片名>.<ext>，每张顺带写 scene.json。")
-    p.add_argument("photo_dir", metavar="PHOTO_DIR", help="照片目录（jpg/png/webp…）")
-    p.add_argument("char", metavar="CHAR", help="立绘（带 alpha 的 PNG 最佳）")
-    p.add_argument("-o", "--out", required=True, metavar="OUTDIR", help="输出目录")
+    p = sub.add_parser("batch", help=_h("批量出图：一个文件夹的照片 × 同一立绘同一组参数",
+                                        "Batch render: a folder of photos × one "
+                                        "character, one parameter set"),
+                       description=_h("把 PHOTO_DIR 里每张照片按同一组摆放参数各出一张图。"
+                                      "适用于「同一机位拍一批、要一致合成」的场合：参数只调一遍，"
+                                      "批量套用。--depth-dir 给同名深度帧时逐张匹配（可选）。"
+                                      "输出 OUTDIR/shot_<照片名>.<ext>，--scene 时每张顺带写 "
+                                      "scene.json。",
+                                      "Render every photo in PHOTO_DIR with the same "
+                                      "placement parameters. For shooting a batch from "
+                                      "one position with consistent compositing: tune "
+                                      "once, apply to all. --depth-dir matches "
+                                      "same-named depth frames per photo (optional). "
+                                      "Writes OUTDIR/shot_<name>.<ext>, plus scene.json "
+                                      "per photo when --scene is given."))
+    p.add_argument("photo_dir", metavar="PHOTO_DIR",
+                   help=_h("照片目录（jpg/png/webp…）", "Photo directory (jpg/png/webp…)"))
+    p.add_argument("char", metavar="CHAR", help=_h("立绘（带 alpha 的 PNG 最佳）",
+                                                   "Character (alpha PNG is best)"))
+    p.add_argument("-o", "--out", required=True, metavar="OUTDIR",
+                   help=_h("输出目录", "Output directory"))
     p.add_argument("--depth-dir", metavar="DIR", default=None,
-                   help="深度帧目录（与照片同名不同后缀时按 stem 匹配；可选）")
-    p.add_argument("--ext", default="png", choices=("png", "jpg"), metavar="格式",
-                   help="输出格式：png（默认，无损）/ jpg（q95，文件小）")
+                   help=_h("深度帧目录（与照片同名不同后缀时按 stem 匹配；可选）",
+                           "Depth frame directory (matched by stem when the suffix "
+                           "differs; optional)"))
+    p.add_argument("--ext", default="png", choices=("png", "jpg"),
+                   metavar=_h("格式", "FMT"),
+                   help=_h("输出格式：png（默认，无损）/ jpg（q95，文件小）",
+                           "Output format: png (default, lossless) / jpg (q95, smaller)"))
     p.add_argument("--scene", action="store_true",
-                   help="每张顺带写 scene.json（默认不写；批量时配方意义不大）")
+                   help=_h("每张顺带写 scene.json（默认不写；批量时配方意义不大）",
+                           "Also write scene.json per photo (off by default; recipes "
+                           "matter little in batch)"))
     _add_placement(p)
-    _add_lang(p)
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_batch)
 
-    p = sub.add_parser("char-layer", help="仅输出 RGBA 立绘层（和照片逐像素对应）",
-                       description="不铺背景、只出摆好位的透明立绘层，"
-                                   "直接盖在对应 shot.jpg 上严丝合缝（index.html:3709）。")
-    p.add_argument("char", metavar="CHAR", help="立绘（带 alpha 的 PNG 最佳）")
+    p = sub.add_parser("char-layer", help=_h("仅输出 RGBA 立绘层（和照片逐像素对应）",
+                                             "Output only the RGBA character layer "
+                                             "(pixel-aligned with the photo)"),
+                       description=_h("不铺背景、只出摆好位的透明立绘层，"
+                                      "直接盖在对应 shot.jpg 上严丝合缝（index.html:3709）。",
+                                      "No background — just the placed transparent "
+                                      "character layer, ready to drop onto the matching "
+                                      "shot.jpg pixel-for-pixel (index.html:3709)."))
+    p.add_argument("char", metavar="CHAR", help=_h("立绘（带 alpha 的 PNG 最佳）",
+                                                   "Character (alpha PNG is best)"))
     _add_out(p)
-    p.add_argument("--width", type=int, default=1080, metavar="px", help="层画布宽（默认 1080）")
-    p.add_argument("--height", type=int, default=1920, metavar="px", help="层画布高（默认 1920）")
+    p.add_argument("--width", type=int, default=1080, metavar="px",
+                   help=_h("层画布宽（默认 1080）", "Layer canvas width (default 1080)"))
+    p.add_argument("--height", type=int, default=1920, metavar="px",
+                   help=_h("层画布高（默认 1920）", "Layer canvas height (default 1920)"))
     _add_placement(p)
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_char_layer)
 
-    p = sub.add_parser("bundle", help="素材包 zip：shot.jpg(q0.95) + scene.json + character.png",
-                       description="三件套打包（原版导出素材包同款，index.html:3820）。"
-                                   "zip 内时间戳固定 1980-01-01，确定性复现。")
-    p.add_argument("photo", metavar="PHOTO", help="背景/照片（JPEG/PNG/…）")
-    p.add_argument("char", metavar="CHAR", help="立绘（带 alpha 的 PNG 最佳）")
+    p = sub.add_parser("bundle", help=_h("素材包 zip：shot.jpg(q0.95) + scene.json + "
+                                         "character.png",
+                                         "Bundle zip: shot.jpg(q0.95) + scene.json + "
+                                         "character.png"),
+                       description=_h("三件套打包（原版导出素材包同款，index.html:3820）。"
+                                      "zip 内时间戳固定 1980-01-01，确定性复现。",
+                                      "Bundle the three files (same as the original "
+                                      "export, index.html:3820). Zip timestamps are "
+                                      "pinned to 1980-01-01 for reproducible output."))
+    p.add_argument("photo", metavar="PHOTO", help=_h("背景/照片（JPEG/PNG/…）",
+                                                     "Background photo (JPEG/PNG/…)"))
+    p.add_argument("char", metavar="CHAR", help=_h("立绘（带 alpha 的 PNG 最佳）",
+                                                   "Character (alpha PNG is best)"))
     _add_out(p)
     _add_placement(p)
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_bundle)
 
-    p = sub.add_parser("matte", help="ISNet-anime 抠图（MODEL 可透传）",
-                       description="纯前端同款抠图（cutout.js:670–747 animeCut）。"
-                                   "模型缺失时错误信息会带下载指引。")
-    p.add_argument("image", metavar="IMG", help="输入图片")
+    p = sub.add_parser("matte", help=_h("ISNet-anime 抠图（MODEL 可透传）",
+                                        "ISNet-anime AI cutout (MODEL can be passed "
+                                        "through)"),
+                       description=_h("纯前端同款抠图（cutout.js:670–747 animeCut）。"
+                                      "模型缺失时错误信息会带下载指引。",
+                                      "The same AI cutout as the web front end "
+                                      "(cutout.js:670–747 animeCut). A missing model "
+                                      "reports download instructions."))
+    p.add_argument("image", metavar="IMG", help=_h("输入图片", "Input image"))
     _add_out(p)
     p.add_argument("--model", metavar="PATH", default=None,
-                   help="isnet-anime-q8.onnx 路径；缺省按 参数→$ARCAM_ISNET_MODEL→"
-                        "仓库 anime/→~/.cache/arcam/ 顺序解析")
+                   help=_h("isnet-anime-q8.onnx 路径；缺省按 参数→$ARCAM_ISNET_MODEL→"
+                           "仓库 anime/→~/.cache/arcam/ 顺序解析",
+                           "Path to isnet-anime-q8.onnx; resolved in order: flag → "
+                           "$ARCAM_ISNET_MODEL → repo anime/ → ~/.cache/arcam/"))
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_matte)
 
-    p = sub.add_parser("video", help="按位姿轨道逐帧渲染出帧序列",
-                       description="track.json 定义时间轴与关键帧，逐帧走同一条 composeShot 管线；"
-                                   "--bg 给单图（静止背景）或帧目录（按文件名排序）。")
-    p.add_argument("track", metavar="TRACK.json", help="轨道文件")
-    p.add_argument("char", metavar="CHAR", help="立绘（带 alpha 的 PNG 最佳）")
-    p.add_argument("-o", "--out", required=True, metavar="OUTDIR", help="输出目录")
+    p = sub.add_parser("video", help=_h("按位姿轨道逐帧渲染出帧序列",
+                                        "Render a frame sequence along a pose track"),
+                       description=_h("track.json 定义时间轴与关键帧，逐帧走同一条 composeShot "
+                                      "管线；--bg 给单图（静止背景）或帧目录（按文件名排序）。",
+                                      "track.json defines the timeline and keyframes; "
+                                      "every frame runs the same composeShot pipeline. "
+                                      "--bg takes a single image (still background) or a "
+                                      "frame directory (sorted by filename)."))
+    p.add_argument("track", metavar="TRACK.json", help=_h("轨道文件", "Track file"))
+    p.add_argument("char", metavar="CHAR", help=_h("立绘（带 alpha 的 PNG 最佳）",
+                                                   "Character (alpha PNG is best)"))
+    p.add_argument("-o", "--out", required=True, metavar="OUTDIR",
+                   help=_h("输出目录", "Output directory"))
     p.add_argument("--bg", metavar="IMG_OR_DIR", default=None,
-                   help="背景：单张图片（每帧复用）或帧目录（frame_000001.png…顺序）；必填")
-    p.add_argument("--tone", action="store_true", help="色调匹配开关")
+                   help=_h("背景：单张图片（每帧复用）或帧目录（frame_000001.png…顺序）；必填",
+                           "Background: a single image (reused every frame) or a frame "
+                           "directory (frame_000001.png… order); required"))
+    p.add_argument("--tone", action="store_true", help=_h("色调匹配开关",
+                                                          "Enable tone matching"))
     p.add_argument("--gif", action="store_true",
-                   help="追加写动画 GIF（video.gif，纯 PIL 零依赖；256 色逐帧自适应）")
+                   help=_h("追加写动画 GIF（video.gif，纯 PIL 零依赖；256 色逐帧自适应）",
+                           "Also write an animated GIF (video.gif, pure PIL, no "
+                           "dependencies; 256 colors, per-frame adaptive)"))
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_video)
 
-    p = sub.add_parser("check", help="轨道合法性自检",
-                       description="读轨道并自检（时间戳单调、参数范围），打印摘要；"
-                                   "合法退出 0，发现任一问题退出 1。")
-    p.add_argument("track", metavar="TRACK.json", help="轨道文件")
+    p = sub.add_parser("check", help=_h("轨道合法性自检", "Validate a pose track"),
+                       description=_h("读轨道并自检（时间戳单调、参数范围），打印摘要；"
+                                      "合法退出 0，发现任一问题退出 1。",
+                                      "Read the track and self-check (monotonic "
+                                      "timestamps, parameter ranges), then print a "
+                                      "summary; exit 0 when valid, 1 on any problem."))
+    p.add_argument("track", metavar="TRACK.json", help=_h("轨道文件", "Track file"))
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_check)
 
-    p = sub.add_parser("lidar", help="LiDAR 深度：环境量诊断 / 实时流接收",
-                       description="iPhone 激光雷达深度接入的离线工具（契约见 "
-                                   "docs/LIDAR-SPEC.md）：inspect 读一帧深度、拟合地面平面、"
-                                   "报告相机环境量；serve 收实时流帧（协议见 spec §6）。")
-    lidar_sub = p.add_subparsers(dest="lidar_cmd", required=True, metavar="子命令")
+    p = sub.add_parser("lidar", help=_h("LiDAR 深度：环境量诊断 / 实时流接收",
+                                        "LiDAR depth: environment diagnostics / live "
+                                        "stream receive"),
+                       description=_h("iPhone 激光雷达深度接入的离线工具（契约见 "
+                                      "docs/LIDAR-SPEC.md）：inspect 读一帧深度、拟合地面平面、"
+                                      "报告相机环境量；serve 收实时流帧（协议见 spec §6）。",
+                                      "Offline tools for iPhone LiDAR depth (contract: "
+                                      "docs/LIDAR-SPEC.md): inspect reads one depth "
+                                      "frame, fits the ground plane and reports camera "
+                                      "environment; serve receives live stream frames "
+                                      "(protocol in spec §6)."))
+    # 与 recipe 同构：分组父级带真默认值的 --lang，三个子级用 inherit（SUPPRESS）
+    # 只在显式给过时才落值——``arcam lidar --lang en inspect x`` 与
+    # ``arcam lidar inspect x --lang en`` 两种书写位置都正确
+    _add_lang(p, lang)
+    lidar_sub = p.add_subparsers(dest="lidar_cmd", required=True,
+                                 metavar=_h("子命令", "SUBCOMMAND"))
 
     pi = lidar_sub.add_parser(
-        "inspect", help="读深度帧并拟合地面平面，报告相机环境量",
-        description="load_depth → fit_ground_plane → camera_env_from_plane；"
-                    "打印 h/pitch/roll、平面 inliers/rms、有效覆盖率。"
-                    "--json 输出同构 dict（同一组字段，便于脚本消费）。")
+        "inspect", help=_h("读深度帧并拟合地面平面，报告相机环境量",
+                           "Read a depth frame, fit the ground plane, report camera "
+                           "environment"),
+        description=_h("load_depth → fit_ground_plane → camera_env_from_plane；"
+                       "打印 h/pitch/roll、平面 inliers/rms、有效覆盖率。"
+                       "--json 输出同构 dict（同一组字段，便于脚本消费）。",
+                       "load_depth → fit_ground_plane → camera_env_from_plane; prints "
+                       "h/pitch/roll, plane inliers/rms and valid coverage. --json "
+                       "prints the same fields as a dict for scripts."))
     pi.add_argument("depth", metavar="DEPTH",
-                    help="深度文件：16-bit PNG/TIF（毫米）/ .npy（米）/ .depth（ARCD）/ 人像 HEIC")
+                    help=_h("深度文件：16-bit PNG/TIF（毫米）/ .npy（米）/ .depth（ARCD）/ 人像 HEIC",
+                            "Depth file: 16-bit PNG/TIF (mm) / .npy (m) / .depth (ARCD) "
+                            "/ portrait HEIC"))
     pi.add_argument("--json", action="store_true",
-                    help="输出 JSON（与文本同一组字段）而不是人话文本")
+                    help=_h("输出 JSON（与文本同一组字段）而不是人话文本",
+                            "Print JSON (same fields as the text) instead of "
+                            "human-readable text"))
+    _add_lang(pi, lang, inherit=True)
     pi.set_defaults(func=cmd_lidar_inspect)
 
     ps = lidar_sub.add_parser(
-        "serve", help="实时流接收（TCP，协议见 docs/LIDAR-SPEC §6）",
-        description="实时接收 iPhone 端推来的深度帧（arcam.lidar_live.serve，"
-                    "LIDAR-SPEC §6 协议）：逐帧打印一行摘要，Ctrl-C 停止；"
-                    "--out 给目录时同步落盘 frame_%%06d.depth。模块缺失才提示退出 0。")
-    ps.add_argument("--port", type=int, default=7707, metavar="端口",
-                    help="监听端口（默认 7707）")
+        "serve", help=_h("实时流接收（TCP，协议见 docs/LIDAR-SPEC §6）",
+                         "Receive the live stream (TCP, protocol in docs/LIDAR-SPEC §6)"),
+        description=_h("实时接收 iPhone 端推来的深度帧（arcam.lidar_live.serve，"
+                       "LIDAR-SPEC §6 协议）：逐帧打印一行摘要，Ctrl-C 停止；"
+                       "--out 给目录时同步落盘 frame_%06d.depth。模块缺失才提示退出 0。",
+                       "Receive depth frames pushed from the iPhone side "
+                       "(arcam.lidar_live.serve, LIDAR-SPEC §6 protocol): prints one "
+                       "summary line per frame, Ctrl-C stops; --out also writes "
+                       "frame_%06d.depth to a directory. Only a missing module "
+                       "reports and exits 0."))
+    ps.add_argument("--port", type=int, default=7707, metavar=_h("端口", "PORT"),
+                    help=_h("监听端口（默认 7707）", "Listen port (default 7707)"))
     ps.add_argument("--out", metavar="DIR", default=None,
-                   help="帧序列输出目录（默认不落盘）")
+                    help=_h("帧序列输出目录（默认不落盘）",
+                            "Frame output directory (no disk writes by default)"))
+    _add_lang(ps, lang, inherit=True)
     ps.set_defaults(func=cmd_lidar_serve)
 
     pg = lidar_sub.add_parser(
-        "sim", help="合成深度帧：落盘 .depth 序列，或推给正在监听的 serve",
-        description="按已知真值（相机高/俯角/滚转）合成深度相机坐标的地面点云——"
-                    "没有真机时验证整条 LiDAR 链路（sim → serve → inspect → "
-                    "render --depth）。默认把帧写进 --out 目录（frame_%%06d.depth，"
-                    "ARCD 格式，内参外参齐备）；--push 给端口时改为推给正在跑的 "
-                    "arcam lidar serve。噪声由 (seed, index) 播种 → 同参同帧可复现。")
-    pg.add_argument("--h", type=_finite, default=1.6, metavar="米",
-                    help="相机离地高（真值，默认 1.6）")
-    pg.add_argument("--pitch", type=_finite, default=12.0, metavar="度",
-                    help="俯角（真值，默认 12）")
-    pg.add_argument("--roll", type=_finite, default=8.0, metavar="度",
-                    help="滚转角（真值，默认 8）")
+        "sim", help=_h("合成深度帧：落盘 .depth 序列，或推给正在监听的 serve",
+                       "Synthesize depth frames: write a .depth sequence, or push to a "
+                       "listening serve"),
+        description=_h("按已知真值（相机高/俯角/滚转）合成深度相机坐标的地面点云——"
+                       "没有真机时验证整条 LiDAR 链路（sim → serve → inspect → "
+                       "render --depth）。默认把帧写进 --out 目录（frame_%06d.depth，"
+                       "ARCD 格式，内参外参齐备）；--push 给端口时改为推给正在跑的 "
+                       "arcam lidar serve。噪声由 (seed, index) 播种 → 同参同帧可复现。",
+                       "Synthesize a ground point cloud in depth-camera coordinates "
+                       "from known truth (camera height / pitch / roll) — validates "
+                       "the whole LiDAR chain without a device (sim → serve → inspect "
+                       "→ render --depth). By default frames go to --out "
+                       "(frame_%06d.depth, ARCD format, full intrinsics/extrinsics); "
+                       "--push sends them to a running arcam lidar serve instead. "
+                       "Noise is seeded by (seed, index), so the same parameters "
+                       "reproduce the same frames."))
+    pg.add_argument("--h", type=_finite, default=1.6, metavar=_h("米", "M"),
+                    help=_h("相机离地高（真值，默认 1.6）",
+                            "Camera height above ground (truth, default 1.6)"))
+    pg.add_argument("--pitch", type=_finite, default=12.0, metavar=_h("度", "DEG"),
+                    help=_h("俯角（真值，默认 12）", "Pitch angle (truth, default 12)"))
+    pg.add_argument("--roll", type=_finite, default=8.0, metavar=_h("度", "DEG"),
+                    help=_h("滚转角（真值，默认 8）", "Roll angle (truth, default 8)"))
     pg.add_argument("--width", type=int, default=256, metavar="PX",
-                    help="深度帧宽（默认 256）")
+                    help=_h("深度帧宽（默认 256）", "Depth frame width (default 256)"))
     pg.add_argument("--height", type=int, default=192, metavar="PX",
-                    help="深度帧高（默认 192）")
+                    help=_h("深度帧高（默认 192）", "Depth frame height (default 192)"))
     pg.add_argument("--frames", type=int, default=5, metavar="N",
-                    help="合成几帧（默认 5）")
+                    help=_h("合成几帧（默认 5）",
+                            "How many frames to synthesize (default 5)"))
     pg.add_argument("--seed", type=int, default=0, metavar="N",
-                    help="随机种子（默认 0；同参同种子同帧可复现）")
+                    help=_h("随机种子（默认 0；同参同种子同帧可复现）",
+                            "Random seed (default 0; same seed and parameters reproduce "
+                            "the same frames)"))
     pg.add_argument("--out", metavar="DIR", default=None,
-                    help="帧序列输出目录（frame_%%06d.depth）；与 --push 二选一")
-    pg.add_argument("--push", type=int, default=None, metavar="端口",
-                    help="推给 127.0.0.1:端口 上正在监听的 arcam lidar serve（不落盘）")
+                    # ⚠ help 里的 % 必须写成 %%：argparse 会按 % 格式展开 help
+                    # （Python 3.14 在 add_argument 时就校验，单 % 直接 TypeError）
+                    help=_h("帧序列输出目录（frame_%%06d.depth）；与 --push 二选一",
+                            "Frame output directory (frame_%%06d.depth); mutually "
+                            "exclusive with --push"))
+    pg.add_argument("--push", type=int, default=None, metavar=_h("端口", "PORT"),
+                    help=_h("推给 127.0.0.1:端口 上正在监听的 arcam lidar serve（不落盘）",
+                            "Push to an arcam lidar serve listening on 127.0.0.1:port "
+                            "(no disk writes)"))
     pg.add_argument("--json", action="store_true",
-                    help="只打印第一帧的 meta（JSON），不写盘不推流")
+                    help=_h("只打印第一帧的 meta（JSON），不写盘不推流",
+                            "Print only the first frame's meta (JSON); no disk writes, "
+                            "no push"))
+    _add_lang(pg, lang, inherit=True)
     pg.set_defaults(func=cmd_lidar_sim)
 
-    p = sub.add_parser("web", help="本地网页界面（标准库 HTTP 服务，仅本机回环）",
-                       description="起本机回环（默认 127.0.0.1:8765）网页服务：照片/立绘上传、"
-                                   "预览渲染（摆放参数全部可调）、抠图、LiDAR 深度诊断与深度"
-                                   "驱动渲染、成品下载（PNG / 立绘层 / 素材包 zip）。"
-                                   "零第三方 web 框架，数据只在内存、进程退出即清空；"
-                                   "契约见 docs/WEB-SPEC.md。")
-    p.add_argument("--host", default="127.0.0.1", metavar="地址",
-                   help="监听地址（默认 127.0.0.1，只绑本机回环，不做网络暴露）")
-    p.add_argument("--port", type=int, default=8765, metavar="端口",
-                   help="监听端口（默认 8765；被占用时换个端口）")
+    p = sub.add_parser("web", help=_h("本地网页界面（标准库 HTTP 服务，仅本机回环）",
+                                      "Local web UI (standard-library HTTP server, "
+                                      "loopback only)"),
+                       description=_h("起本机回环（默认 127.0.0.1:8765）网页服务：照片/立绘上传、"
+                                      "预览渲染（摆放参数全部可调）、抠图、LiDAR 深度诊断与深度"
+                                      "驱动渲染、成品下载（PNG / 立绘层 / 素材包 zip）。"
+                                      "零第三方 web 框架，数据只在内存、进程退出即清空；"
+                                      "契约见 docs/WEB-SPEC.md。",
+                                      "Start a loopback web service (default "
+                                      "127.0.0.1:8765): photo/character upload, live "
+                                      "preview render (all placement flags adjustable), "
+                                      "AI cutout, LiDAR depth diagnostics and "
+                                      "depth-driven rendering, and downloads (PNG / "
+                                      "character layer / bundle zip). Zero third-party "
+                                      "web frameworks; data lives in memory only and is "
+                                      "cleared on exit. Contract: docs/WEB-SPEC.md."))
+    p.add_argument("--host", default="127.0.0.1", metavar=_h("地址", "HOST"),
+                   help=_h("监听地址（默认 127.0.0.1，只绑本机回环，不做网络暴露）",
+                           "Listen address (default 127.0.0.1, loopback only, never "
+                           "network-exposed)"))
+    p.add_argument("--port", type=int, default=8765, metavar=_h("端口", "PORT"),
+                   help=_h("监听端口（默认 8765；被占用时换个端口）",
+                           "Listen port (default 8765; pick another if taken)"))
     # --open 与 --no-open 互斥：--open 是"默认行为"的显式写法（启动器
     # 启动AR取景器.command 固定传 `arcam web --open --port`，见 WEB-SPEC §4），
     # 两个一起给没有可执行语义。放进互斥组后它才真正被 parser 读到——否则
     # 就是"解析了但没人读"的摆设旗标（v2.0.0 审计：61 个参数里唯一一个）。
     open_group = p.add_mutually_exclusive_group()
     open_group.add_argument("--open", action="store_true",
-                            help="自动打开浏览器（默认行为；启动器显式传入）")
+                            help=_h("自动打开浏览器（默认行为；启动器显式传入）",
+                                    "Open the browser automatically (default behavior; "
+                                    "the launcher passes it explicitly)"))
     open_group.add_argument("--no-open", action="store_true",
-                            help="不自动打开浏览器（自己贴地址）")
+                            help=_h("不自动打开浏览器（自己贴地址）",
+                                    "Do not open the browser (paste the address "
+                                    "yourself)"))
+    _add_lang(p, lang)
     p.set_defaults(func=cmd_web)
     return parser
 
@@ -520,7 +932,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _need(path, what: str) -> Path:
     p = Path(path)
     if not p.is_file():
-        raise CliError(f"找不到{what}：{p}")
+        raise CliError(_h(f"找不到{what}：{p}", f"Not found — {what}: {p}"))
     return p
 
 
@@ -536,7 +948,6 @@ def _to_u8(arr) -> np.ndarray:
         return a
     return np.clip(a.astype(np.float64) * 255.0 + 0.5, 0, 255).astype(np.uint8)
 
-
 #: 原版 S 的默认值（index.html:921-937）—— 这些开关 argparse 默认 None，
 #: 在 _pose 里还原成原版默认，"is None" 才是显式判定口径（见 _add_placement）。
 _POSE_DEFAULTS = {'h': 1.6, 'd': 4.0, 'x': 0.0, 'pitch': 0.0, 'roll': 0.0}
@@ -551,7 +962,9 @@ def _pose(args, width: int, height: int) -> tuple[Camera, Subject]:
     # feq<=0 会让 focal=0，place 里 up/focal 直接 ZeroDivisionError（A1 X2）；
     # NaN/Inf 则静默污染整条投影链。在这里一次性挡成人话错误。
     if not math.isfinite(args.feq) or args.feq <= 0:
-        raise CliError(f"--feq 必须是有限正数（等效焦距 mm，收到 {args.feq!r}）")
+        raise CliError(_h(f"--feq 必须是有限正数（等效焦距 mm，收到 {args.feq!r}）",
+                          f"--feq must be a finite positive number (equivalent focal "
+                          f"length in mm, got {args.feq!r})"))
     cam = Camera(width, height, h, args.feq, pitch, roll)
     subj = Subject(args.hp, d, x)
     return cam, subj
@@ -578,8 +991,11 @@ def _load_depth_arg(path, what: str):
         from arcam.depth import load_depth
     except ImportError as exc:
         raise CliError(
-            f"读不到 LiDAR 深度模块：{exc}（arcam.depth 应随包一起提供；"
-            "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §2）") from None
+            _h(f"读不到 LiDAR 深度模块：{exc}（arcam.depth 应随包一起提供；"
+               "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §2）",
+               f"Cannot import the LiDAR depth module: {exc} (arcam.depth ships with "
+               "the package; if the install was trimmed, see the contract in "
+               "docs/LIDAR-SPEC.md §2)")) from None
     try:
         return load_depth(p)
     except ValueError as e:
@@ -595,8 +1011,11 @@ def _lidar_env_of(depth):
         from arcam.plane import camera_env_from_plane, fit_ground_plane
     except ImportError as exc:
         raise CliError(
-            f"读不到 LiDAR 平面拟合模块：{exc}（arcam.plane 应随包一起提供；"
-            "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §3）") from None
+            _h(f"读不到 LiDAR 平面拟合模块：{exc}（arcam.plane 应随包一起提供；"
+               "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §3）",
+               f"Cannot import the LiDAR plane-fitting module: {exc} (arcam.plane "
+               "ships with the package; if the install was trimmed, see the contract "
+               "in docs/LIDAR-SPEC.md §3)")) from None
     plane = fit_ground_plane(depth)
     return camera_env_from_plane(plane, roll_deg=depth.roll_deg)
 
@@ -664,13 +1083,13 @@ def _scene_dict(args, char01, subj: Subject, cam: Camera, rect, placement,
 # ---------- 子命令 ----------
 
 def cmd_render(args) -> int:
-    photo = _need(args.photo, "背景照片")
-    char_p = _need(args.char, "立绘")
+    photo = _need(args.photo, _h("背景照片", "background photo"))
+    char_p = _need(args.char, _h("立绘", "character"))
     src01 = image_to_rgb01(photo)
     char01 = image_to_rgba01(char_p)
     height, width = src01.shape[:2]
     cam, subj = _pose(args, width, height)
-    depth = _load_depth_arg(args.depth, "深度文件") if args.depth else None
+    depth = _load_depth_arg(args.depth, _h("深度文件", "depth file")) if args.depth else None
     kw = _compose_kw(args)
     if depth is not None:
         env = _lidar_env_of(depth)
@@ -686,9 +1105,11 @@ def cmd_render(args) -> int:
             'x': subj_eff.lateral_m})
         conflicts = [k for k in ('h', 'pitch', 'roll', 'd')
                      if notes[k]['source'] == 'explicit']
-        suffix = (f"（显式值优先：{'、'.join(conflicts)}）" if conflicts
-                  else "（已用于摆位）")
-        print(f"深度测得 h={env.height_m:.3f}m pitch={env.pitch_deg:.2f}° "
+        suffix = (_h(f"（显式值优先：{'、'.join(conflicts)}）",
+                     f"(explicit values win: {', '.join(conflicts)})") if conflicts
+                  else _h("（已用于摆位）", "(applied to placement)"))
+        print(f"{_h('深度测得', 'Depth measured')} "
+              f"h={env.height_m:.3f}m pitch={env.pitch_deg:.2f}° "
               f"roll={env.roll_deg:.2f}°{suffix}")
     else:
         cam_eff, subj_eff = cam, subj
@@ -707,8 +1128,10 @@ def cmd_render(args) -> int:
             img_u8, args, cam_eff, subj_eff, width, height, placement=placement)
     save_png(img_u8, out)
     # 提示里列**实际叠的层序**（canonical 序，不是用户书写序）；单层时与从前逐字相同
-    print(f"已出图 {out}（{width}×{height}）"
-          + (f"｜已叠 HUD 层：{'+'.join(overlay_layers)}{overlay_note}"
+    print(_h(f"已出图 {out}（{width}×{height}）",
+             f"Rendered {out} ({width}×{height})")
+          + (_h(f"｜已叠 HUD 层：{'+'.join(overlay_layers)}{overlay_note}",
+                f" | HUD layers: {'+'.join(overlay_layers)}{overlay_note}")
              if overlay_layers else ""))
     if args.scene:
         scene_path = Path(args.scene)
@@ -716,7 +1139,9 @@ def cmd_render(args) -> int:
             scene_path.parent.mkdir(parents=True, exist_ok=True)
         save_scene(_scene_dict(args, char01, subj_eff, cam_eff, shot.rect,
                                placement), scene_path)
-        print(f"配方 {scene_path}（version 1，与原版 scene.json 同构）")
+        print(_h(f"配方 {scene_path}（version 1，与原版 scene.json 同构）",
+                 f"Recipe {scene_path} (version 1, same structure as the original "
+                 f"scene.json)"))
     return 0
 
 
@@ -743,7 +1168,9 @@ _RECIPE_FLAGS = {k: "--" + k.replace("_", "-") for k in _PLACEMENT_KEYS}
 def _recipe_path(name: str) -> Path:
     safe = "".join(c for c in name if c.isalnum() or c in "-_")
     if not safe:
-        raise CliError(f"配方名 {name!r} 不含可用字符（字母数字/-/_）")
+        raise CliError(_h(f"配方名 {name!r} 不含可用字符（字母数字/-/_）",
+                          f"Recipe name {name!r} has no usable characters "
+                          f"(alphanumeric/-/_)"))
     return RECIPE_ROOT / f"{safe}.json"
 
 
@@ -796,12 +1223,15 @@ def cmd_recipe_save(args) -> int:
     else:
         recipe = _recipe_of_args(args)
     if not recipe:
-        raise CliError("配方是空的：给摆放参数（--pitch 12 等）或用 --from scene.json")
+        raise CliError(_h("配方是空的：给摆放参数（--pitch 12 等）或用 --from scene.json",
+                          "The recipe is empty: pass placement flags (e.g. --pitch 12) "
+                          "or --from scene.json"))
     path = _recipe_path(args.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"name": args.name, "params": recipe},
                                ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"配方已存 {path}（{len(recipe)} 项）")
+    print(_h(f"配方已存 {path}（{len(recipe)} 项）",
+             f"Recipe saved to {path} ({len(recipe)} items)"))
     print("  " + " ".join(f"{_RECIPE_FLAGS[k]}={v}" for k, v in recipe.items()
                           if k in _RECIPE_FLAGS))
     return 0
@@ -810,29 +1240,34 @@ def cmd_recipe_save(args) -> int:
 def cmd_recipe_list(args) -> int:
     root = RECIPE_ROOT
     if not root.is_dir() or not any(root.glob("*.json")):
-        print("（还没有配方——用 arcam recipe save NAME --pitch 12 存一个）")
+        print(_h("（还没有配方——用 arcam recipe save NAME --pitch 12 存一个）",
+                 "(No recipes yet — save one with arcam recipe save NAME --pitch 12)"))
         return 0
     for p in sorted(root.glob("*.json")):
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
             params = data.get("params", {})
         except Exception:
-            print(f"  {p.stem}（读不出来：{p.name}）")
+            print(_h(f"  {p.stem}（读不出来：{p.name}）",
+                     f"  {p.stem} (unreadable: {p.name})"))
             continue
         brief = " ".join(f"{k}={v}" for k, v in list(params.items())[:5])
-        print(f"  {p.stem:<20} {len(params):>2} 项  {brief}")
+        print(_h(f"  {p.stem:<20} {len(params):>2} 项  {brief}",
+                 f"  {p.stem:<20} {len(params):>2} items  {brief}"))
     return 0
 
 
 def cmd_recipe_show(args) -> int:
     path = _recipe_path(args.name)
     if not path.is_file():
-        raise CliError(f"没有叫 {args.name} 的配方（arcam recipe list 看现有）")
+        raise CliError(_h(f"没有叫 {args.name} 的配方（arcam recipe list 看现有）",
+                          f"No recipe named {args.name} (run arcam recipe list to see "
+                          f"what exists)"))
     data = json.loads(path.read_text(encoding="utf-8"))
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
         return 0
-    print(f"配方 {args.name}（{path}）")
+    print(_h(f"配方 {args.name}（{path}）", f"Recipe {args.name} ({path})"))
     for k, v in data.get("params", {}).items():
         flag = _RECIPE_FLAGS.get(k, k)
         print(f"  {flag:<16} {v}")
@@ -842,14 +1277,19 @@ def cmd_recipe_show(args) -> int:
 def cmd_recipe_apply(args) -> int:
     path = _recipe_path(args.name)
     if not path.is_file():
-        raise CliError(f"没有叫 {args.name} 的配方（arcam recipe list 看现有）")
+        raise CliError(_h(f"没有叫 {args.name} 的配方（arcam recipe list 看现有）",
+                          f"No recipe named {args.name} (run arcam recipe list to see "
+                          f"what exists)"))
     params = dict(json.loads(path.read_text(encoding="utf-8")).get("params", {}))
     for item in args.set:
         if "=" not in item:
-            raise CliError(f"--set 要 K=V 形式，收到 {item!r}")
+            raise CliError(_h(f"--set 要 K=V 形式，收到 {item!r}",
+                              f"--set expects K=V form, got {item!r}"))
         k, v = item.split("=", 1)
         if k not in _RECIPE_FLAGS:
-            raise CliError(f"配方里没有 {k!r} 这一项（可用：{'/'.join(_RECIPE_FLAGS)}）")
+            raise CliError(_h(f"配方里没有 {k!r} 这一项（可用：{'/'.join(_RECIPE_FLAGS)}）",
+                              f"The recipe has no {k!r} field (available: "
+                              f"{'/'.join(_RECIPE_FLAGS)})"))
         params[k] = v
     flags = []
     for k, v in params.items():
@@ -891,17 +1331,22 @@ def _coerce_placement_value(key: str, raw: str, where: str):
     """
     if key in _VARY_ENUMS:
         if raw not in _VARY_ENUMS[key]:
-            raise CliError(f"{where} {key} 取值 {raw!r} 不合法"
-                           f"（可用：{'/'.join(_VARY_ENUMS[key])}）")
+            raise CliError(_h(f"{where} {key} 取值 {raw!r} 不合法"
+                              f"（可用：{'/'.join(_VARY_ENUMS[key])}）",
+                              f"{where}: {raw!r} is not a valid {key} value "
+                              f"(available: {'/'.join(_VARY_ENUMS[key])})"))
         return raw
     try:
         value = int(raw) if key == "edge_bar" else float(raw)
     except ValueError:
-        kind = "整数" if key == "edge_bar" else "数字"
-        raise CliError(f"{where} {key} 取值 {raw!r} 不是{kind}") from None
+        kind = _h("整数", "an integer") if key == "edge_bar" else _h("数字", "a number")
+        raise CliError(_h(f"{where} {key} 取值 {raw!r} 不是{kind}",
+                          f"{where}: {key} value {raw!r} is not {kind}")) from None
     if key == "edge_bar" and value not in _VARY_EDGE_BARS:
-        raise CliError(f"{where} edge_bar 取值 {raw!r} 不合法"
-                       f"（可用：{'/'.join(str(b) for b in _VARY_EDGE_BARS)}）")
+        raise CliError(_h(f"{where} edge_bar 取值 {raw!r} 不合法"
+                          f"（可用：{'/'.join(str(b) for b in _VARY_EDGE_BARS)}）",
+                          f"{where}: edge_bar value {raw!r} is not valid "
+                          f"(available: {'/'.join(str(b) for b in _VARY_EDGE_BARS)})"))
     return value
 
 
@@ -916,20 +1361,26 @@ def _parse_vary(items: list[str]) -> list[tuple[str, list[str]]]:
     seen: set[str] = set()
     for item in items:
         if "=" not in item:
-            raise CliError(f"--vary 要 K=V,V 形式，收到 {item!r}")
+            raise CliError(_h(f"--vary 要 K=V,V 形式，收到 {item!r}",
+                              f"--vary expects K=V,V form, got {item!r}"))
         key, raw = item.split("=", 1)
         key = key.strip()
         if key not in _PLACEMENT_KEYS:
-            raise CliError(f"--vary 的键 {key!r} 不是摆放参数"
-                           f"（可用：{'/'.join(_PLACEMENT_KEYS)}）")
+            raise CliError(_h(f"--vary 的键 {key!r} 不是摆放参数"
+                              f"（可用：{'/'.join(_PLACEMENT_KEYS)}）",
+                              f"--vary key {key!r} is not a placement parameter "
+                              f"(available: {'/'.join(_PLACEMENT_KEYS)})"))
         if key in seen:
             # 同一个参数扫两轴：笛卡尔积照算，但后一轴把前一轴的值整个覆写，
             # 格子成倍重复而标签看不出问题——直接拦掉
-            raise CliError(f"--vary 的键 {key!r} 给了两次（同一参数只应扫一轴）")
+            raise CliError(_h(f"--vary 的键 {key!r} 给了两次（同一参数只应扫一轴）",
+                              f"--vary key {key!r} given twice (sweep one axis per "
+                              f"parameter)"))
         seen.add(key)
         values = [v.strip() for v in raw.split(",") if v.strip()]
         if not values:
-            raise CliError(f"--vary {key} 没给取值")
+            raise CliError(_h(f"--vary {key} 没给取值",
+                              f"--vary {key} has no values"))
         for v in values:                       # 现在就校验，别等渲染到一半才炸
             _coerce_placement_value(key, v, "--vary")
         axes.append((key, values))
@@ -953,10 +1404,11 @@ def _apply_overlay(img_u8: np.ndarray, args, cam: Camera, subj: Subject,
     ``hud`` 层的构图提示必须喂**本遍实际落位**（placement）与 ``--shot/--mode``：
     不喂的话三分线/顶满/偏小/浮空那几条永远不触发（原版 compositionHints 读的
     就是当前摆位）。``--lang`` 同时决定 HUD 文案语言（地平线标签走 i18n 的
-    ``horizon`` 键，中文下与原来的硬编码字符串逐字相同）。
+    ``horizon`` 键、构图提示走 ``hints.*`` 键，中文下与原来的硬编码字符串逐字
+    相同）；附注的分隔符也跟着语言走（中文「；」/ 英文 "; "）。
     """
     from arcam.hud import draw_figure, draw_grid, draw_horizon, draw_hud_text
-    lang = getattr(args, "lang", "zh")
+    lang = args.lang
     canvas = img_u8.copy()
     note = ""
     for layer in _overlay_layers(args.overlay):
@@ -972,7 +1424,8 @@ def _apply_overlay(img_u8: np.ndarray, args, cam: Camera, subj: Subject,
                                           shot=args.shot, mode=args.mode,
                                           placement=placement)
             if hints:
-                note = "；构图提示：" + "；".join(hints)
+                note = _h("；构图提示：", "; composition hints: ") \
+                    + _h("；", "; ").join(hints)
     return canvas, note
 
 
@@ -1010,11 +1463,10 @@ def _sig_of(paths: list[Path]) -> tuple:
 def cmd_watch(args) -> int:
     """监视素材变化自动重出图（轮询式；跨平台最稳）。
 
-    ⚠ 人话输出目前全是中文：``--lang`` 收下但语言表里没有监视循环的键
-    （加键会牵动 webui/docs 两侧同源表，见审计报告）。
+    人话输出跟随 ``--lang``（中英双语，见 :func:`_h`）。
     """
-    photo_p = _need(args.photo, "背景照片")
-    char_p = _need(args.char, "立绘")
+    photo_p = _need(args.photo, _h("背景照片", "background photo"))
+    char_p = _need(args.char, _h("立绘", "character"))
     out = Path(args.out)
     watched = [photo_p, char_p]
     note: list = []
@@ -1026,15 +1478,22 @@ def cmd_watch(args) -> int:
             note.clear()
             _render_one(args, photo_p, char01, out, note)
             ms = (time.perf_counter() - t0) * 1000.0
-            tail = ("｜" + note[0]) if note else ""
-            print(f"[{_stamp()}] {reason} → {out.name}（{ms:.0f} ms{tail}）", flush=True)
+            # 附注自带分隔符（中文「；」/ 英文 "; "），英文不再加「｜」前缀
+            tail = ((_h("｜", "") + note[0]) if note else "")
+            print(_h(f"[{_stamp()}] {reason} → {out.name}（{ms:.0f} ms{tail}）",
+                     f"[{_stamp()}] {reason} → {out.name} ({ms:.0f} ms{tail})"),
+                  flush=True)
         except Exception as exc:
-            print(f"[{_stamp()}] {reason} → 失败：{exc}", flush=True)
+            print(_h(f"[{_stamp()}] {reason} → 失败：{exc}",
+                     f"[{_stamp()}] {reason} → failed: {exc}"), flush=True)
 
-    run_once("首次")
+    run_once(_h("首次", "first run"))
     if args.once:
         return 0
-    print(f"监视中（{photo_p.name} / {char_p.name}，每 {args.interval:g}s 轮询）—— Ctrl-C 退出",
+    print(_h(f"监视中（{photo_p.name} / {char_p.name}，每 {args.interval:g}s 轮询）"
+             f"—— Ctrl-C 退出",
+             f"Watching ({photo_p.name} / {char_p.name}, polling every "
+             f"{args.interval:g}s) — Ctrl-C quits"),
           flush=True)
     last = _sig_of(watched)
     try:
@@ -1043,16 +1502,16 @@ def cmd_watch(args) -> int:
             now = _sig_of(watched)
             if now != last:
                 changed = [Path(a[0]).name for a, b in zip(now, last) if a != b]
-                run_once("变了：" + "、".join(changed))
+                run_once(_h("变了：" + "、".join(changed),
+                            "changed: " + ", ".join(changed)))
                 last = _sig_of(watched)
     except KeyboardInterrupt:
-        print("\n已停止监视。")
+        print(_h("\n已停止监视。", "\nStopped watching."))
     return 0
 
 
 def _stamp() -> str:
     return datetime.now().strftime("%H:%M:%S")
-
 
 #: multi 的 spec 键 → 参数名（与摆放参数同名；scale 是 char_scale 的简写）
 _MULTI_SPEC_KEYS = {
@@ -1072,11 +1531,14 @@ def _parse_spec(text: str) -> dict:
         if not item:
             continue
         if "=" not in item:
-            raise CliError(f"spec 段 {item!r} 不是 K=V 形式")
+            raise CliError(_h(f"spec 段 {item!r} 不是 K=V 形式",
+                              f"spec segment {item!r} is not in K=V form"))
         k, v = item.split("=", 1)
         k = k.strip()
         if k not in _MULTI_SPEC_KEYS:
-            raise CliError(f"spec 键 {k!r} 不认识（可用：{'/'.join(sorted(_MULTI_SPEC_KEYS))}）")
+            raise CliError(_h(f"spec 键 {k!r} 不认识（可用：{'/'.join(sorted(_MULTI_SPEC_KEYS))}）",
+                              f"Unknown spec key {k!r} (available: "
+                              f"{'/'.join(sorted(_MULTI_SPEC_KEYS))})"))
         key = _MULTI_SPEC_KEYS[k]
         if key == "tone":
             out[key] = v.strip().lower() in ("1", "true", "yes", "on")
@@ -1136,20 +1598,22 @@ def cmd_multi(args) -> int:
     + 层合成，数学上与「一气画多个人」等价（source-over 对 alpha 可结合），
     且不动冻结的单主体管线。
 
-    ⚠ 本命令的人话输出目前全是中文：``--lang`` 收下但无处可用（语言表里没有
-    多立绘的键，加键会牵动 webui/docs 两侧同源表，见审计报告）。
+    人话输出跟随 ``--lang``（中英双语，见 :func:`_h`）。
     """
     if len(args.spec) > max(0, len(args.chars) - 1):
-        raise CliError(f"--spec 给了 {len(args.spec)} 套但只有 {len(args.chars) - 1} 张"
-                       "附加立绘需要覆盖（第一张用主参数）")
-    photo_p = _need(args.photo, "背景照片")
+        raise CliError(_h(f"--spec 给了 {len(args.spec)} 套但只有 "
+                          f"{len(args.chars) - 1} 张附加立绘需要覆盖（第一张用主参数）",
+                          f"--spec gives {len(args.spec)} overrides but there are "
+                          f"only {len(args.chars) - 1} extra characters to cover "
+                          f"(the first uses the main flags)"))
+    photo_p = _need(args.photo, _h("背景照片", "background photo"))
     src01 = image_to_rgb01(photo_p)
     height, width = src01.shape[:2]
 
     base = np.clip(np.asarray(src01, dtype=np.float64), 0.0, 1.0)
     layers = []
     for i, char_path in enumerate(args.chars):
-        char_p = _need(char_path, f"立绘 {i + 1}")
+        char_p = _need(char_path, _h(f"立绘 {i + 1}", f"character {i + 1}"))
         char01 = image_to_rgba01(char_p)
         # 第一张用主参数；第 i 张用第 i-1 个 spec 覆盖
         eff_args = args if i == 0 or not args.spec else _SpecArgs(args, _parse_spec(args.spec[i - 1]))
@@ -1158,8 +1622,10 @@ def cmd_multi(args) -> int:
         # 立绘层路径：src=None → 只出立绘+阴影的透明层（同裁切框）
         layer, rect = compose_char_layer(char01, subj, cam, **kw)
         layers.append((layer, rect, char_p.name))
-        print(f"  层 {i + 1}/{len(args.chars)}：{char_p.name}"
-              + (f"（spec：{args.spec[i - 1]}）" if i > 0 and args.spec else ""))
+        print(_h(f"  层 {i + 1}/{len(args.chars)}：{char_p.name}"
+                 + (f"（spec：{args.spec[i - 1]}）" if i > 0 and args.spec else ""),
+                 f"  Layer {i + 1}/{len(args.chars)}: {char_p.name}"
+                 + (f" (spec: {args.spec[i - 1]})" if i > 0 and args.spec else "")))
 
     # 顺序 source-over：后画的盖先画的（与逐一合成等价）。每层按自己的裁切框
     # 偏移贴回整幅——满幅时偏移为 0，行为与逐位相同
@@ -1171,10 +1637,11 @@ def cmd_multi(args) -> int:
     if out.parent and not out.parent.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
     save_png(img_u8, out)
-    print(f"已合成 {len(layers)} 层 → {out}（{width}×{height}）")
+    print(_h(f"已合成 {len(layers)} 层 → {out}（{width}×{height}）",
+             f"Composited {len(layers)} layers → {out} ({width}×{height})"))
     if args.scene:
         # scene.json 记第一张的落位（多主体的配方格式原版没有，如实记主体一）
-        char01 = image_to_rgba01(_need(args.chars[0], "立绘 1"))
+        char01 = image_to_rgba01(_need(args.chars[0], _h("立绘 1", "character 1")))
         cam, subj = _pose(args, width, height)
         shot = compose_shot(src01, char01, subj, cam, with_char_layer=False,
                              **_compose_kw(args))
@@ -1182,7 +1649,9 @@ def cmd_multi(args) -> int:
                                _placement(char01, subj, cam, args),
                                char_name=Path(args.chars[0]).name),
                    Path(args.scene))
-        print(f"配方 {args.scene}（记第一张立绘的落位；多主体无原版格式）")
+        print(_h(f"配方 {args.scene}（记第一张立绘的落位；多主体无原版格式）",
+                 f"Recipe {args.scene} (records the first character's placement; "
+                 f"multi-subject has no original format)"))
     return 0
 
 
@@ -1220,11 +1689,18 @@ def cmd_stats(args) -> int:
         print(json.dumps(info, ensure_ascii=False, indent=2))
         return 0
     print(f"arcam {info['version']}")
-    print(f"  Python  {info['python_modules']:>3} 个模块 / {info['python_loc']:>5} 行")
-    print(f"  测试    {info['test_files']:>3} 个文件 / {info['test_loc']:>5} 行")
-    print(f"  网页    {info['js_files']:>3} 个 JS   / {info['js_loc']:>5} 行")
-    print(f"  公开 API {info['public_api']} 个导出 · 语言表 {info['i18n_entries']} 条")
-    print(f"  子命令  {len(subs)} 个：{' '.join(subs)}")
+    print(_h(f"  Python  {info['python_modules']:>3} 个模块 / {info['python_loc']:>5} 行",
+             f"  Python  {info['python_modules']:>3} modules / "
+             f"{info['python_loc']:>5} lines"))
+    print(_h(f"  测试    {info['test_files']:>3} 个文件 / {info['test_loc']:>5} 行",
+             f"  Tests    {info['test_files']:>3} files / {info['test_loc']:>5} lines"))
+    print(_h(f"  网页    {info['js_files']:>3} 个 JS   / {info['js_loc']:>5} 行",
+             f"  Web      {info['js_files']:>3} JS    / {info['js_loc']:>5} lines"))
+    print(_h(f"  公开 API {info['public_api']} 个导出 · 语言表 {info['i18n_entries']} 条",
+             f"  Public API {info['public_api']} exports · language table "
+             f"{info['i18n_entries']} entries"))
+    print(_h(f"  子命令  {len(subs)} 个：{' '.join(subs)}",
+             f"  Subcommands {len(subs)}: {' '.join(subs)}"))
     return 0
 
 
@@ -1232,9 +1708,11 @@ def _subcommand_names() -> list[str]:
     """从 build_parser 现抓顶层子命令名（不硬编码，新增命令自动进 stats）。
 
     顶层 subparsers 的 ``dest`` 就是 ``"cmd"``（recipe/lidar 的二级分组是
-    ``recipe_cmd``/``lidar_cmd``，不会被误抓）。
+    ``recipe_cmd``/``lidar_cmd``，不会被误抓）。⚠ 必须传 :data:`_CUR_LANG`：
+    build_parser 会按参数设 :data:`_CUR_LANG`，用缺省 zh 会把当前语言冲掉
+    （stats 自己的人话输出会变回中文）。
     """
-    parser = build_parser()
+    parser = build_parser(_CUR_LANG)
     for action in parser._actions:
         if action.dest == "cmd" and isinstance(getattr(action, "choices", None), dict):
             return sorted(action.choices)
@@ -1248,7 +1726,7 @@ def _project_version(root: Path) -> str:
     实测 pyproject 已到 1.7.0、``importlib.metadata`` 还报 1.2.0，``stats``
     于是把旧版本号当现版本打出来（v1.8 审计修复）。旁边找得到 pyproject 就说明
     这是仓库检出（editable 或直接跑），repo 里的 pyproject 永远比 metadata 新；
-    真·wheel 安装旁边没有 pyproject，才回落到 metadata。都不可得给 '?'。
+    真· wheel 安装旁边没有 pyproject，才回落到 metadata。都不可得给 '?'。
     """
     pyproject = root / "pyproject.toml"
     if pyproject.is_file():
@@ -1274,8 +1752,8 @@ def cmd_contact_sheet(args) -> int:
     不进标签）——一眼看出这一格改了什么。格内不出 HUD（对比的是构图本身）。
     """
     from PIL import Image, ImageDraw
-    photo = _need(args.photo, "背景照片")
-    char_p = _need(args.char, "立绘")
+    photo = _need(args.photo, _h("背景照片", "background photo"))
+    char_p = _need(args.char, _h("立绘", "character"))
     src01 = image_to_rgb01(photo)
     char01 = image_to_rgba01(char_p)
     height, width = src01.shape[:2]
@@ -1286,8 +1764,11 @@ def cmd_contact_sheet(args) -> int:
     for _key, values in axes:
         total *= len(values)
     if total > _SHEET_MAX_CELLS:
-        raise CliError(f"笛卡尔积 {total} 格超过上限 {_SHEET_MAX_CELLS}——"
-                       "减少 --vary 的轴或每轴取值数")
+        raise CliError(_h(f"笛卡尔积 {total} 格超过上限 {_SHEET_MAX_CELLS}——"
+                          f"减少 --vary 的轴或每轴取值数",
+                          f"Cartesian product of {total} cells exceeds the "
+                          f"{_SHEET_MAX_CELLS}-cell cap — reduce --vary axes or "
+                          f"values per axis"))
 
     # 笛卡尔积（保持 --vary 顺序：第一个轴变化最慢）
     combos: list[dict] = [{}]
@@ -1370,7 +1851,9 @@ def cmd_contact_sheet(args) -> int:
     if out.parent and not out.parent.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(out, format="PNG")
-    print(f"对比网格 {out}（{len(cells)} 格 × {cell_w}px，{cols} 列 {rows} 行）")
+    print(_h(f"对比网格 {out}（{len(cells)} 格 × {cell_w}px，{cols} 列 {rows} 行）",
+             f"Contact sheet {out} ({len(cells)} cells × {cell_w}px, "
+             f"{cols} columns × {rows} rows)"))
     for i, (_im, label) in enumerate(scaled, 1):
         print(f"  [{i}] {label}")
     return 0
@@ -1385,18 +1868,21 @@ def cmd_batch(args) -> int:
     """
     src_dir = Path(args.photo_dir)
     if not src_dir.is_dir():
-        raise CliError(f"照片目录不存在：{src_dir}")
+        raise CliError(_h(f"照片目录不存在：{src_dir}",
+                          f"Photo directory does not exist: {src_dir}"))
     photos = sorted(p for p in src_dir.iterdir()
                     if p.is_file() and p.suffix.lower() in
                     (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"))
     if not photos:
-        raise CliError(f"{src_dir} 里没有图片文件（jpg/png/webp/bmp/tif）")
-    char_p = _need(args.char, "立绘")
+        raise CliError(_h(f"{src_dir} 里没有图片文件（jpg/png/webp/bmp/tif）",
+                          f"No image files in {src_dir} (jpg/png/webp/bmp/tif)"))
+    char_p = _need(args.char, _h("立绘", "character"))
     char01 = image_to_rgba01(char_p)
     depth_dir = Path(args.depth_dir) if args.depth_dir else None
     if depth_dir is not None:
         if not depth_dir.is_dir():
-            raise CliError(f"深度帧目录不存在：{depth_dir}")
+            raise CliError(_h(f"深度帧目录不存在：{depth_dir}",
+                              f"Depth frame directory does not exist: {depth_dir}"))
         # 深度帧读取与 render --depth 同一条懒加载路径：模块被裁剪过时在这里就
         # 人话报错，不进循环——循环里的宽松 except 会把 NameError/ImportError 当成
         # "这个候选文件读不了" 吞掉，整批照片静默退回无深度渲染（v1.5 审计修复）。
@@ -1404,8 +1890,11 @@ def cmd_batch(args) -> int:
             from arcam.depth import load_depth
         except ImportError as exc:
             raise CliError(
-                f"读不到 LiDAR 深度模块：{exc}（arcam.depth 应随包一起提供；"
-                "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §2）") from None
+                _h(f"读不到 LiDAR 深度模块：{exc}（arcam.depth 应随包一起提供；"
+                   "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §2）",
+                   f"Cannot import the LiDAR depth module: {exc} (arcam.depth ships "
+                   "with the package; if the install was trimmed, see the contract "
+                   "in docs/LIDAR-SPEC.md §2)")) from None
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1461,7 +1950,7 @@ def cmd_batch(args) -> int:
         except Exception as exc:
             failed.append((photo.name, f"{type(exc).__name__}: {exc}"))
             print(f"  [{i}/{len(photos)}] {photo.name} → "
-                  f"{t('note.batchFailed', lang=args.lang)}：{exc}")
+                  f"{t('note.batchFailed', lang=args.lang)}{_h('：', ': ')}{exc}")
     print(t("note.batchDone", ok_count, len(photos), lang=args.lang)
           if ok_count == len(photos)
           else t("note.batchPartial", ok_count, len(photos), len(failed),
@@ -1469,7 +1958,7 @@ def cmd_batch(args) -> int:
     return 0 if not failed else 1
 
 def cmd_char_layer(args) -> int:
-    char_p = _need(args.char, "立绘")
+    char_p = _need(args.char, _h("立绘", "character"))
     char01 = image_to_rgba01(char_p)
     cam, subj = _pose(args, args.width, args.height)
     # 与 render 同一套 _compose_kw：char-layer 收了 --shot/--edge-bar/--rot-basis
@@ -1479,14 +1968,16 @@ def cmd_char_layer(args) -> int:
     layer, _rect = compose_char_layer(char01, subj, cam, **_compose_kw(args))
     out = Path(args.out)
     save_png(layer, out)
-    print(f"立绘层 {out}（{layer.shape[1]}×{layer.shape[0]} RGBA"
-          f"—— 直接盖在对应出图上严丝合缝）")
+    print(_h(f"立绘层 {out}（{layer.shape[1]}×{layer.shape[0]} RGBA"
+             f"—— 直接盖在对应出图上严丝合缝）",
+             f"Character layer {out} ({layer.shape[1]}×{layer.shape[0]} RGBA"
+             f" — drop it onto the matching render, pixel-for-pixel)"))
     return 0
 
 
 def cmd_bundle(args) -> int:
-    photo = _need(args.photo, "背景照片")
-    char_p = _need(args.char, "立绘")
+    photo = _need(args.photo, _h("背景照片", "background photo"))
+    char_p = _need(args.char, _h("立绘", "character"))
     src01 = image_to_rgb01(photo)
     char01 = image_to_rgba01(char_p)
     height, width = src01.shape[:2]
@@ -1497,7 +1988,9 @@ def cmd_bundle(args) -> int:
     #  合成路径自带 frame_key，与 --frame 一致。）
     layer = shot.char_layer
     if layer is None:
-        raise CliError("这一遍没有产出立绘层（立绘缺失或落位失败）")
+        raise CliError(_h("这一遍没有产出立绘层（立绘缺失或落位失败）",
+                          "This pass produced no character layer (missing character "
+                          "or failed placement)"))
     placement = _placement(char01, subj, cam, args)
     scene_json = json.dumps(_scene_dict(args, char01, subj, cam, shot.rect, placement),
                             ensure_ascii=False, indent=2).encode("utf-8")
@@ -1515,26 +2008,34 @@ def cmd_bundle(args) -> int:
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16
             zf.writestr(info, data)
-    print(f"素材包 {out}（{', '.join(n for n, _ in parts)}；"
-          f"JPEG q0.95，时间戳固定 1980-01-01）")
+    print(_h(f"素材包 {out}（{', '.join(n for n, _ in parts)}；"
+             f"JPEG q0.95，时间戳固定 1980-01-01）",
+             f"Bundle {out} ({', '.join(n for n, _ in parts)}; "
+             f"JPEG q0.95, timestamps pinned to 1980-01-01)"))
     return 0
 
 
 def cmd_matte(args) -> int:
-    img = _need(args.image, "图片")
+    img = _need(args.image, _h("图片", "image"))
     src01 = image_to_rgb01(img)
     try:
         result = anime_cut(src01, args.model)
     except ImportError as e:
-        raise CliError(f"{e}\n（装一下再试：pip install onnxruntime，"
-                       f"或 pip install -e \".[matting]\"）") from None
+        raise CliError(_h(f"{e}\n（装一下再试：pip install onnxruntime，"
+                          f"或 pip install -e \".[matting]\"）",
+                          f"{e}\n(Install it and retry: pip install onnxruntime, "
+                          f"or pip install -e \".[matting]\")")) from None
     except FileNotFoundError as e:
-        raise CliError(f"{e}\n（下载 isnet-anime-q8.onnx 后用 --model PATH 指过来）") from None
+        raise CliError(_h(f"{e}\n（下载 isnet-anime-q8.onnx 后用 --model PATH 指过来）",
+                          f"{e}\n(Download isnet-anime-q8.onnx, then point "
+                          f"--model PATH at it)")) from None
     except ValueError as e:
         raise CliError(str(e)) from None
     out = Path(args.out)
     save_png(result.rgba, out)
-    print(f"已抠图 {out}（前景占比 {result.fg:.1%}，推理 {result.ms:.0f} ms）")
+    print(_h(f"已抠图 {out}（前景占比 {result.fg:.1%}，推理 {result.ms:.0f} ms）",
+             f"Cut out {out} (foreground {result.fg:.1%}, inference "
+             f"{result.ms:.0f} ms)"))
     return 0
 
 
@@ -1552,7 +2053,7 @@ def cmd_prep(args) -> int:
     """
     from arcam.matte_tools import (_MIN_CONTENT_SIDE, auto_trim, content_bounds,
                                    is_half_body, lens_blur, soften_edge)
-    char_p = _need(args.char, "立绘")
+    char_p = _need(args.char, _h("立绘", "character"))
     char01 = image_to_rgba01(char_p)
     lang = args.lang
 
@@ -1608,12 +2109,15 @@ def cmd_prep(args) -> int:
     half = is_half_body(arr)
     out = Path(args.out)
     save_png(arr, out)
-    print(f"已修图 {out}（{arr.shape[1]}×{arr.shape[0]} RGBA）")
+    print(_h(f"已修图 {out}（{arr.shape[1]}×{arr.shape[0]} RGBA）",
+             f"Prepped {out} ({arr.shape[1]}×{arr.shape[0]} RGBA)"))
     for line in actions:
         print(f"  · {line}")
     if half:
         print(f"  · {t('note.halfAuto', lang=lang)}")
-        print("    （半身图建议配 --mode free 出图；贴地会把下沿钉在地面上）")
+        print(_h("    （半身图建议配 --mode free 出图；贴地会把下沿钉在地面上）",
+                 "    (Half-body art pairs with --mode free; on-ground pins the "
+                 "bottom edge to the floor)"))
     else:
         # note.chHint 是「自由模式…；贴地模式…」两句：只报第一句（与语言无关地
         # 截到第一个分句——中文用全角分号、英文用句点空格，两种都要认）
@@ -1638,11 +2142,15 @@ def cmd_video(args) -> int:
     track = load_track(args.track)
     problems = track_issues(track)
     if problems:
-        raise CliError("轨道有问题：\n  - " + "\n  - ".join(problems))
+        raise CliError(_h("轨道有问题：\n  - " + "\n  - ".join(problems),
+                          "Track problems:\n  - " + "\n  - ".join(problems)))
     if not args.bg:
-        raise CliError("video 需要 --bg 指定背景（单张图片或帧目录）——"
-                       "原版导出的每一帧都铺着实时画面，离线侧就是这段素材")
-    char_p = _need(args.char, "立绘")
+        raise CliError(_h("video 需要 --bg 指定背景（单张图片或帧目录）——"
+                          "原版导出的每一帧都铺着实时画面，离线侧就是这段素材",
+                          "video needs --bg for the background (a single image or a "
+                          "frame directory) — every original export frame carries the "
+                          "live view; offline, that is this material"))
+    char_p = _need(args.char, _h("立绘", "character"))
     char01 = image_to_rgba01(char_p)
     out_dir = Path(args.out)
     try:
@@ -1650,8 +2158,11 @@ def cmd_video(args) -> int:
     except PILUnidentifiedImageError as e:
         # --bg 指到非图片（视频文件最常见）：PIL 的原话是 "cannot identify image
         # file"，用户看不出"该拿帧目录来"。补一句用法提示再退出 1。
-        raise CliError(f"{e}\n（--bg 只收单张图片或帧目录；视频请先解成帧目录，"
-                       "如 ffmpeg -i in.mp4 frames/frame_%06d.png）") from None
+        raise CliError(_h(f"{e}\n（--bg 只收单张图片或帧目录；视频请先解成帧目录，"
+                          f"如 ffmpeg -i in.mp4 frames/frame_%06d.png）",
+                          f"{e}\n(--bg takes a single image or a frame directory; "
+                          f"decode video to frames first, e.g. ffmpeg -i in.mp4 "
+                          f"frames/frame_%06d.png)")) from None
     extras = []
     mp4 = out_dir / MP4_NAME
     if mp4.is_file():
@@ -1659,23 +2170,37 @@ def cmd_video(args) -> int:
     gif_p = out_dir / GIF_NAME
     if args.gif and gif_p.is_file():
         extras.append(gif_p.name)
-    tail = (" + " + " + ".join(extras)) if extras else "（未装 imageio/imageio-ffmpeg，只有 PNG 序列）"
-    print(f"已渲染 {len(frames)} 帧 → {out_dir}{tail}")
+    tail = (" + " + " + ".join(extras) if extras
+            else _h("（未装 imageio/imageio-ffmpeg，只有 PNG 序列）",
+                    " (imageio/imageio-ffmpeg not installed; PNG sequence only)"))
+    print(_h(f"已渲染 {len(frames)} 帧 → {out_dir}{tail}",
+             f"Rendered {len(frames)} frames → {out_dir}{tail}"))
     return 0
 
 
 def _print_summary(track) -> None:
     n = frame_count(track)
     k0, k1 = track.keys[0], track.keys[-1]
-    print(f"轨道 {track.width}×{track.height} @ {track.fps:g}fps"
-          f"（{n} 帧 / {(n - 1) / track.fps:.3f}s）")
-    print(f"  画幅 {track.frame_key} · 模式 {track.mode} · 景别 {track.shot}"
-          f" · 倍率 {track.char_scale:g} · 占比 {track.size_pct:g}%")
-    print(f"  键 {len(track.keys)} 个（t {k0.t:g} → {k1.t:g}s）")
-    print(f"  横向 {k0.lateral_m:g} → {k1.lateral_m:g} m · 距离 {k0.distance_m:g}"
-          f" → {k1.distance_m:g} m")
-    print(f"  俯角 {k0.pitch_deg:g} → {k1.pitch_deg:g}° · 滚转 {k0.roll_deg:g}"
-          f" → {k1.roll_deg:g}°")
+    print(_h(f"轨道 {track.width}×{track.height} @ {track.fps:g}fps"
+             f"（{n} 帧 / {(n - 1) / track.fps:.3f}s）",
+             f"Track {track.width}×{track.height} @ {track.fps:g}fps"
+             f" ({n} frames / {(n - 1) / track.fps:.3f}s)"))
+    # frame_key / shot 是 scene.json 与 CLI 的**数据键**（原版中文键），与数字
+    # 单位同一口径不翻——翻译了就没法粘回 track.json / --shot；只翻标签
+    print(_h(f"  画幅 {track.frame_key} · 模式 {track.mode} · 景别 {track.shot}"
+             f" · 倍率 {track.char_scale:g} · 占比 {track.size_pct:g}%",
+             f"  Aspect {track.frame_key} · Mode {track.mode} · Shot {track.shot}"
+             f" · Scale {track.char_scale:g} · Height {track.size_pct:g}%"))
+    print(_h(f"  键 {len(track.keys)} 个（t {k0.t:g} → {k1.t:g}s）",
+             f"  {len(track.keys)} keys (t {k0.t:g} → {k1.t:g}s)"))
+    print(_h(f"  横向 {k0.lateral_m:g} → {k1.lateral_m:g} m · 距离 {k0.distance_m:g}"
+             f" → {k1.distance_m:g} m",
+             f"  Lateral {k0.lateral_m:g} → {k1.lateral_m:g} m · Distance "
+             f"{k0.distance_m:g} → {k1.distance_m:g} m"))
+    print(_h(f"  俯角 {k0.pitch_deg:g} → {k1.pitch_deg:g}° · 滚转 {k0.roll_deg:g}"
+             f" → {k1.roll_deg:g}°",
+             f"  Pitch {k0.pitch_deg:g} → {k1.pitch_deg:g}° · Roll {k0.roll_deg:g}"
+             f" → {k1.roll_deg:g}°"))
 
 
 def cmd_check(args) -> int:
@@ -1683,11 +2208,12 @@ def cmd_check(args) -> int:
     problems = track_issues(track)
     _print_summary(track)
     if problems:
-        print(f"发现 {len(problems)} 个问题：", file=sys.stderr)
+        print(_h(f"发现 {len(problems)} 个问题：", f"Found {len(problems)} problems:"),
+              file=sys.stderr)
         for m in problems:
             print(f"  - {m}", file=sys.stderr)
         return 1
-    print("轨道合法。")
+    print(_h("轨道合法。", "Track is valid."))
     return 0
 
 
@@ -1705,22 +2231,35 @@ def cmd_lidar_sim(args) -> int:
     from arcam.lidar_sim import synth_ground_frame
 
     if args.push is not None and args.out is not None:
-        raise CliError("--out 与 --push 二选一（落盘 或 推流，别同时给）")
+        raise CliError(_h("--out 与 --push 二选一（落盘 或 推流，别同时给）",
+                          "--out and --push are mutually exclusive (write to disk or "
+                          "push, not both)"))
     if args.frames < 1:
-        raise CliError(f"--frames 至少 1（收到 {args.frames}）")
+        raise CliError(_h(f"--frames 至少 1（收到 {args.frames}）",
+                          f"--frames must be at least 1 (got {args.frames})"))
     if args.width < 8 or args.height < 8:
-        raise CliError(f"深度帧尺寸太小：{args.width}×{args.height}（至少 8×8）")
+        raise CliError(_h(f"深度帧尺寸太小：{args.width}×{args.height}（至少 8×8）",
+                          f"Depth frame size too small: {args.width}×{args.height} "
+                          f"(at least 8×8)"))
     if args.push is not None:
         off = [k for k, v in _SIM_PUSH_FIXED_SPEC.items()
                if getattr(args, k) != v]
         if off:
             raise CliError(
-                f"--push 推流模式下不支持 {'/'.join('--' + k for k in off)}："
-                f"推流由 arcam.lidar_sim.simulate_scene_server 按固定规格 "
-                f"{_SIM_PUSH_FIXED_SPEC['width']}×{_SIM_PUSH_FIXED_SPEC['height']}"
-                f"（seed {_SIM_PUSH_FIXED_SPEC['seed']}）合成。要自定义尺寸/种子"
-                "请用落盘模式（--out DIR 或缺省）再 arcam lidar inspect 验证，"
-                "或让 serve 侧支持尺寸参数")
+                _h(f"--push 推流模式下不支持 {'/'.join('--' + k for k in off)}："
+                   f"推流由 arcam.lidar_sim.simulate_scene_server 按固定规格 "
+                   f"{_SIM_PUSH_FIXED_SPEC['width']}×{_SIM_PUSH_FIXED_SPEC['height']}"
+                   f"（seed {_SIM_PUSH_FIXED_SPEC['seed']}）合成。要自定义尺寸/种子"
+                   "请用落盘模式（--out DIR 或缺省）再 arcam lidar inspect 验证，"
+                   "或让 serve 侧支持尺寸参数",
+                   f"--push streaming mode does not support "
+                   f"{'/'.join('--' + k for k in off)}: streaming synthesizes at a "
+                   f"fixed {_SIM_PUSH_FIXED_SPEC['width']}×"
+                   f"{_SIM_PUSH_FIXED_SPEC['height']} "
+                   f"(seed {_SIM_PUSH_FIXED_SPEC['seed']}) via "
+                   "arcam.lidar_sim.simulate_scene_server. For custom size/seed use "
+                   "disk mode (--out DIR or the default) and verify with "
+                   "arcam lidar inspect, or add size support on the serve side"))
 
     meta0, depth0 = synth_ground_frame(h=args.h, pitch_deg=args.pitch,
                                        roll_deg=args.roll, width=args.width,
@@ -1736,11 +2275,16 @@ def cmd_lidar_sim(args) -> int:
             th = simulate_scene_server(args.push, h=args.h, pitch=args.pitch,
                                        roll=args.roll, frames=args.frames)
         except OSError as exc:
-            raise CliError(f"连不上 127.0.0.1:{args.push}：{exc}\n"
-                           "先在另一个终端跑 arcam lidar serve --port <同端口>") from None
+            raise CliError(_h(f"连不上 127.0.0.1:{args.push}：{exc}\n"
+                              "先在另一个终端跑 arcam lidar serve --port <同端口>",
+                              f"Cannot connect to 127.0.0.1:{args.push}: {exc}\n"
+                              "Run arcam lidar serve --port <same port> in another "
+                              "terminal first")) from None
         th.join(timeout=30.0 + args.frames)
-        print(f"已推送 {args.frames} 帧到 127.0.0.1:{args.push}"
-              f"（h={args.h} pitch={args.pitch} roll={args.roll}）")
+        print(_h(f"已推送 {args.frames} 帧到 127.0.0.1:{args.push}"
+                 f"（h={args.h} pitch={args.pitch} roll={args.roll}）",
+                 f"Pushed {args.frames} frames to 127.0.0.1:{args.push}"
+                 f" (h={args.h} pitch={args.pitch} roll={args.roll})"))
         return 0
 
     # 落盘模式：frame_%06d.depth（ARCD，内参外参齐备）
@@ -1753,10 +2297,14 @@ def cmd_lidar_sim(args) -> int:
                                          height=args.height, index=i, seed=args.seed)
         save_depth_file(out_dir / f"frame_{i:06d}.depth", meta, depth)
     valid = float(np.isfinite(depth0).mean())
-    print(f"已合成 {args.frames} 帧 → {out_dir}/frame_000000.depth …"
-          f"（{args.width}×{args.height}，有效覆盖率 {valid:.1%}，真值 h={args.h}"
-          f" pitch={args.pitch} roll={args.roll}）")
-    print(f"  验证闭环：arcam lidar inspect {out_dir}/frame_000000.depth")
+    print(_h(f"已合成 {args.frames} 帧 → {out_dir}/frame_000000.depth …"
+             f"（{args.width}×{args.height}，有效覆盖率 {valid:.1%}，真值 h={args.h}"
+             f" pitch={args.pitch} roll={args.roll}）",
+             f"Synthesized {args.frames} frames → {out_dir}/frame_000000.depth … "
+             f"({args.width}×{args.height}, valid coverage {valid:.1%}, "
+             f"truth h={args.h} pitch={args.pitch} roll={args.roll})"))
+    print(_h(f"  验证闭环：arcam lidar inspect {out_dir}/frame_000000.depth",
+             f"  Close the loop: arcam lidar inspect {out_dir}/frame_000000.depth"))
     return 0
 
 def cmd_lidar_inspect(args) -> int:
@@ -1770,9 +2318,12 @@ def cmd_lidar_inspect(args) -> int:
         from arcam.plane import camera_env_from_plane, fit_ground_plane
     except ImportError as exc:
         raise CliError(
-            f"读不到 LiDAR 模块：{exc}（arcam.depth/arcam.plane 应随包一起提供；"
-            "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §2/§3）") from None
-    depth_p = _need(args.depth, "深度文件")
+            _h(f"读不到 LiDAR 模块：{exc}（arcam.depth/arcam.plane 应随包一起提供；"
+               "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §2/§3）",
+               f"Cannot import the LiDAR modules: {exc} (arcam.depth/arcam.plane "
+               "ship with the package; if the install was trimmed, see the contract "
+               "in docs/LIDAR-SPEC.md §2/§3)")) from None
+    depth_p = _need(args.depth, _h("深度文件", "depth file"))
     try:
         frame = load_depth(depth_p)
         plane = fit_ground_plane(frame)
@@ -1796,13 +2347,21 @@ def cmd_lidar_inspect(args) -> int:
     if args.json:
         print(json.dumps(info, ensure_ascii=False, indent=2))
         return 0
-    print(f"深度 {depth_p}（{width}×{height}，{frame.source or '无来源描述'}）")
-    print(f"  有效覆盖率 coverage={coverage:.1%}")
-    print(f"  地面平面 inliers={plane.inliers} rms={plane.rms:.3f}m")
-    print(f"  相机高 h={env.height_m:.3f}m")
-    print(f"  俯仰 pitch={env.pitch_deg:.2f}° 滚转 roll={env.roll_deg:.2f}°")
+    print(_h(f"深度 {depth_p}（{width}×{height}，{frame.source or '无来源描述'}）",
+             f"Depth {depth_p} ({width}×{height}, "
+             f"{frame.source or 'no source description'})"))
+    print(_h(f"  有效覆盖率 coverage={coverage:.1%}",
+             f"  Valid coverage: coverage={coverage:.1%}"))
+    print(_h(f"  地面平面 inliers={plane.inliers} rms={plane.rms:.3f}m",
+             f"  Ground plane: inliers={plane.inliers} rms={plane.rms:.3f}m"))
+    print(_h(f"  相机高 h={env.height_m:.3f}m",
+             f"  Camera height: h={env.height_m:.3f}m"))
+    print(_h(f"  俯仰 pitch={env.pitch_deg:.2f}° 滚转 roll={env.roll_deg:.2f}°",
+             f"  Pitch: pitch={env.pitch_deg:.2f}° Roll: roll={env.roll_deg:.2f}°"))
     if frame.roll_deg is not None:
-        print(f"  （ARKit 给定 roll={frame.roll_deg:.2f}°，已先反旋再解 pitch）")
+        print(_h(f"  （ARKit 给定 roll={frame.roll_deg:.2f}°，已先反旋再解 pitch）",
+                 f"  (ARKit gave roll={frame.roll_deg:.2f}°; un-rotated before "
+                 f"solving pitch)"))
     return 0
 
 
@@ -1814,7 +2373,8 @@ def _live_frame_line(n: int, meta: dict, depth) -> str:
         for label, key in (("h", "height_m"), ("pitch", "pitch_deg"), ("roll", "roll_deg"))
         if isinstance(meta.get(key), (int, float))
     )
-    return f"第 {n} 帧 {width}×{height}" + (f" {env}" if env else "")
+    return _h(f"第 {n} 帧 {width}×{height}", f"Frame {n} {width}×{height}") \
+        + (f" {env}" if env else "")
 
 
 def cmd_lidar_serve(args) -> int:
@@ -1834,31 +2394,43 @@ def cmd_lidar_serve(args) -> int:
     try:
         import arcam.lidar_live as live
     except ImportError:
-        print("实时流模块未就绪（arcam lidar serve 需要 arcam/lidar_live.py）。"
-              "实时流协议见 docs/LIDAR-SPEC.md §6：TCP，每帧 = [u32 BE meta_len]"
-              "[JSON][u32 BE len][depth float32 米]。")
+        print(_h("实时流模块未就绪（arcam lidar serve 需要 arcam/lidar_live.py）。"
+                 "实时流协议见 docs/LIDAR-SPEC.md §6：TCP，每帧 = [u32 BE meta_len]"
+                 "[JSON][u32 BE len][depth float32 米]。",
+                 "The live-stream module is not ready (arcam lidar serve needs "
+                 "arcam/lidar_live.py). Protocol in docs/LIDAR-SPEC.md §6: TCP, "
+                 "each frame = [u32 BE meta_len][JSON][u32 BE len][depth float32 "
+                 "in meters]."))
         return 0
     serve = getattr(live, "serve", None)
     if not callable(serve):
-        print("实时流模块未就绪（arcam/lidar_live.py 里没有可调用的 serve()）。")
+        print(_h("实时流模块未就绪（arcam/lidar_live.py 里没有可调用的 serve()）。",
+                 "The live-stream module is not ready (no callable serve() in "
+                 "arcam/lidar_live.py)."))
         return 0
     kw = {"port": int(args.port)}
     if args.out is not None:
         kw["out_dir"] = str(args.out)
-        print(f"深度帧将写入 {args.out}（frame_%06d.depth）", flush=True)
+        print(_h(f"深度帧将写入 {args.out}（frame_%06d.depth）",
+                 f"Depth frames will be written to {args.out} (frame_%06d.depth)"),
+              flush=True)
     n = 0
     try:
-        print(f"实时流监听 127.0.0.1:{int(args.port)}，等待设备连接（Ctrl-C 停止）",
+        print(_h(f"实时流监听 127.0.0.1:{int(args.port)}，等待设备连接（Ctrl-C 停止）",
+                 f"Live stream listening on 127.0.0.1:{int(args.port)}, waiting for "
+                 f"a device (Ctrl-C stops)"),
               flush=True)
         for meta, depth in serve(**kw):          # 必须迭代：generator 只在被消费时才 accept
             n += 1
             print(_live_frame_line(n, meta, depth), flush=True)
     except KeyboardInterrupt:
-        print(f"\n已停止，共接收 {n} 帧。", flush=True)
+        print(_h(f"\n已停止，共接收 {n} 帧。", f"\nStopped, received {n} frames total."),
+              flush=True)
         return 0
     except (ValueError, OSError) as e:
         raise CliError(str(e)) from None
-    print(f"连接已关闭，共接收 {n} 帧。", flush=True)
+    print(_h(f"连接已关闭，共接收 {n} 帧。",
+             f"Connection closed, received {n} frames total."), flush=True)
     return 0
 
 
@@ -1880,16 +2452,20 @@ def cmd_web(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """CLI 入口。退出码 0 正常 / 1 运行期失败 / 2 用法错误（argparse 自带）。"""
-    parser = build_parser()
+    global _CUR_LANG
+    # 语言必须在建 parser **之前**定：argparse 的 help 在建 parser 时就要用语言，
+    # parse 完才知道就晚了（--lang 本身也挂在每个子命令上，见 _add_lang）。
+    _CUR_LANG = _prescan_lang(sys.argv[1:] if argv is None else list(argv))
+    parser = build_parser(_CUR_LANG)
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
     except CliError as e:
-        print(f"错误：{e}", file=sys.stderr)
+        print(_h(f"错误：{e}", f"Error: {e}"), file=sys.stderr)
         return 1
     except FileNotFoundError as e:
-        print(f"错误：找不到文件 {e}", file=sys.stderr)
+        print(_h(f"错误：找不到文件 {e}", f"Error: file not found {e}"), file=sys.stderr)
         return 1
     except (ValueError, OSError) as e:
-        print(f"错误：{e}", file=sys.stderr)
+        print(_h(f"错误：{e}", f"Error: {e}"), file=sys.stderr)
         return 1

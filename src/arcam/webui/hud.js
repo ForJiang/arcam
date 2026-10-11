@@ -25,6 +25,19 @@
     return { u: cam.W / 2 + F * xr / zc, v: cam.H / 2 + F * yr / zc };
   }
 
+  // tt(key, ...)：语言表取文案（i18n.js 先于本文件加载，window.arcamT 必在；
+  // 缺 key 时回落裸 key —— 与 Python 侧 t() 同口径，立刻现形不静默漏翻）。
+  function tt(key) {
+    return window.arcamT ? window.arcamT.apply(null, arguments) : key;
+  }
+
+  // HUD 画在 canvas 上（fillText 不渲染 HTML）：语言表里 hud.* 几条带 <b> 标签
+  // 是给网页 innerHTML 用的，这里先取文案再剥标签（与 Python hud.py 的
+  // _strip_tags 同口径）。
+  function stripTags(s) {
+    return String(s).replace(/<\/?b>/g, "");
+  }
+
   // ── place() 反投影（geometry.py:85 的 JS 对译）────────────────────
   // 画布像素 (u,v) → 世界 (x, d)：人立在地面上（Y_world=0）的解析逆。
   // 与 Python place() 逐字同式：d 夹 [0.5,20]、x 夹 [-6,6]（SPEC §5 冻结项）。
@@ -188,7 +201,7 @@
     ctx.beginPath(); ctx.moveTo(a.u, a.v); ctx.lineTo(b.u, b.v); ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = "rgba(255,120,120,.95)"; ctx.font = "22px sans-serif";
-    ctx.fillText(label || "地平线", lab.u + 10, lab.v - 10);
+    ctx.fillText(label || tt("horizon"), lab.u + 10, lab.v - 10);
     ctx.restore();
   }
 
@@ -241,55 +254,67 @@
   // docs 侧那份改为从 arcam-core.js import —— 两边都不许再出现第二份）
   var SHOTS = { "全身": 1.00, "膝上": 0.72, "腰上": 0.47, "胸上": 0.28, "头肩": 0.20 };
 
+  // 提示文案走语言表 hints.*（中文列与 Python hud.py composition_hints 的现文案
+  // 逐字一致；SHOTS 的键是景别参数值，不翻）。
   function compositionHints(cam, placement, W, H, shot, mode) {
     if (W < 8 || H < 8) return [];
     var F = focalPx(cam.W, cam.H, cam.feq);
     var hv = H / 2 - F * Math.tan(cam.pitch * Math.PI / 180);
     var hr = hv / H;
     var out = [];
-    if (hr >= 0.42 && hr <= 0.58) out.push("地平线在正中，抬一点或压一点");
-    if (cam.pitch > 40) out.push("俯角 " + cam.pitch.toFixed(0) + "°，人物会被压扁");
-    if (cam.pitch < -35) out.push("仰角偏大，人物会被拉长");
+    if (hr >= 0.42 && hr <= 0.58) out.push(tt("hints.horizonMid"));
+    if (cam.pitch > 40) out.push(tt("hints.pitchHigh", cam.pitch.toFixed(0)));
+    if (cam.pitch < -35) out.push(tt("hints.pitchLow"));
     if (placement && placement.w > 0) {
       var hw = placement.w / 2, hh = placement.h / 2;
       if (placement.u + hw < 0 || placement.u - hw > W ||
           placement.v + hh < 0 || placement.v - hh > H) {
-        out.push("人物出画了 —— 抬/压一点镜头，或把距离调远");
+        out.push(tt("hints.outOfFrame"));
         return out;
       }
       var xr = placement.u / W;
       var near = Math.min(Math.abs(xr - 1 / 3), Math.abs(xr - 2 / 3), Math.abs(xr - 0.5));
-      if (near > 0.11) out.push("角色挪到三分线上更稳");
+      if (near > 0.11) out.push(tt("hints.thirds"));
       var fill = placement.h / H;
-      if (fill > 0.92) out.push("角色快顶满画面");
-      if (fill < 0.10) out.push("角色偏小");
+      if (fill > 0.92) out.push(tt("hints.tooBig"));
+      if (fill < 0.10) out.push(tt("hints.tooSmall"));
       var cover = SHOTS[shot] || 1;
       if (cover >= 0.95 && mode === "ground") {
         var cutV = placement.v + placement.h / 2;
-        if (cutV < hv - H * 0.03) out.push("脚在地平线以上，浮空了");
+        if (cutV < hv - H * 0.03) out.push(tt("hints.floating"));
       }
     }
     return out;
   }
 
   // ── hud 读数（index.html:1957-1972）─────────────────────────────
+  // 四行读数走语言表 hud.*（与 Python hud.py 的 t("hud.*") 同键同名）；表里带
+  // <b> 标签，canvas 侧先剥。warns 平行数组记录警告行（黄）—— 不能再用中文
+  // 前缀判色（切英文后前缀就对不上了）。
   function drawHud(ctx, cam, subj, hasChar, placement, shot, mode) {
     var a = project(subj.x, -cam.h, subj.d, cam);
     var b = project(subj.x, subj.hp - cam.h, subj.d, cam);
     var px = (a && b) ? Math.abs(a.v - b.v) : 0;
     var F = focalPx(cam.W, cam.H, cam.feq);
-    var lines = [];
-    lines.push("俯角 " + cam.pitch.toFixed(1) + "°　滚转 " + cam.roll.toFixed(1) + "°");
-    lines.push("预览 " + cam.W + "×" + cam.H + "　f=" + F.toFixed(0) + "px");
+    var lines = [], warns = [];
+    lines.push(stripTags(tt("hud.line1", cam.pitch.toFixed(1), cam.roll.toFixed(1))));
+    warns.push(false);
+    lines.push(stripTags(tt("hud.line2", cam.W, cam.H, F.toFixed(0))));
+    warns.push(false);
     if (hasChar) {
-      lines.push((a && b)
-        ? "人在画面高 " + (px / cam.H * 100).toFixed(1) + "%"
-        : "人物在相机后方");
+      if (a && b) {
+        lines.push(stripTags(tt("hud.person", (px / cam.H * 100).toFixed(1))));
+        warns.push(false);
+      } else {
+        lines.push(stripTags(tt("hud.behind")));
+        warns.push(true);
+      }
     } else {
-      lines.push("还没选立绘");
+      lines.push(stripTags(tt("hud.nochar")));
+      warns.push(true);
     }
     var hints = compositionHints(cam, placement, cam.W, cam.H, shot, mode);
-    if (hints.length) lines.push("⚠ " + hints.join("　·　"));
+    if (hints.length) { lines.push("⚠ " + hints.join("　·　")); warns.push(true); }
     ctx.save();
     ctx.font = "13px sans-serif";
     ctx.textBaseline = "top";
@@ -297,8 +322,7 @@
       var y = 8 + i * 17;
       ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,.75)";
       ctx.strokeText(lines[i], 8, y);
-      ctx.fillStyle = (lines[i].indexOf("⚠") === 0 || lines[i].indexOf("人物在相机后方") === 0 ||
-                       lines[i].indexOf("还没选立绘") === 0) ? "#ffd54f" : "#fff";
+      ctx.fillStyle = warns[i] ? "#ffd54f" : "#fff";
       ctx.fillText(lines[i], 8, y);
     }
     ctx.restore();

@@ -59,7 +59,7 @@ function setStatus(msg, ms, isError) {
   const el = $('status-msg');
   el.textContent = msg;
   el.className = isError ? 'error' : 'ok';
-  $('status-time').textContent = typeof ms === 'number' ? '耗时 ' + Math.round(ms) + ' ms' : '';
+  $('status-time').textContent = typeof ms === 'number' ? t('note.elapsed', Math.round(ms)) : '';
 }
 
 function setInputHint(text) { $('input-hint').textContent = text || ''; }
@@ -67,7 +67,7 @@ function setInputHint(text) { $('input-hint').textContent = text || ''; }
 function setName(id, text) {
   const el = $(id);
   el.textContent = text;
-  el.classList.toggle('empty', text === '未选择');
+  el.classList.toggle('empty', text === t('name.empty'));
 }
 
 function pad2(n) { return String(n).padStart(2, '0'); }
@@ -87,7 +87,7 @@ function toCanvas(x) {
   if (x && (x.width || x.naturalWidth)) {
     return drawToCanvas(x, x.naturalWidth || x.width, x.naturalHeight || x.height);
   }
-  throw new Error('抠图结果不是图片');
+  throw new Error(t('err.cutoutNotImg'));
 }
 
 // 全画布扫 alpha：立绘带不带透明通道决定 hint 文案（本地版由后端 fg 告知，这里自己算）
@@ -100,12 +100,12 @@ function hasAlpha(canvas) {
 function canvasToBlob(canvas, type, quality) {
   return new Promise((resolve, reject) => {
     if (typeof canvas.toBlob === 'function') {
-      canvas.toBlob((b) => { b ? resolve(b) : reject(new Error('画布编码失败')); }, type, quality);
+      canvas.toBlob((b) => { b ? resolve(b) : reject(new Error(t('err.canvasEncode'))); }, type, quality);
     } else if (typeof canvas.convertToBlob === 'function') { // OffscreenCanvas
       canvas.convertToBlob({ type: type, quality: quality })
-        .then(resolve, (e) => reject(e || new Error('画布编码失败')));
+        .then(resolve, (e) => reject(e || new Error(t('err.canvasEncode'))));
     } else {
-      reject(new Error('画布不支持编码导出'));
+      reject(new Error(t('err.canvasNoEncode')));
     }
   });
 }
@@ -153,7 +153,7 @@ function loadImageEl(file) {
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => resolve({ img: img, w: img.naturalWidth, h: img.naturalHeight, revoke: url });
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片解码失败：' + file.name)); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error(t('err.imgDecodeFile', file.name))); };
     img.src = url;
   });
 }
@@ -190,7 +190,7 @@ async function setPhoto(file) {
   setName('photo-name', file.name + ' · ' + loaded.w + '×' + loaded.h);
   $('preview-empty').hidden = true;
   if (state.charCanvas) renderNow();
-  else setStatus('照片已上传，请继续上传立绘');
+  else setStatus(t('note.photoOk'));
 }
 
 async function setChar(file) {
@@ -214,11 +214,11 @@ async function setChar(file) {
     // 普通图立绘：有抠图模块就引导点按钮，没有就指引去本地版（matte.js 懒加载一次）
     await ensureMatte();
     setInputHint(typeof window.arcamMatte === 'function'
-      ? '这是普通图立绘，可点「抠图」去除背景'
-      : '这是普通图立绘（无 alpha）：本页抠图不可用，请用本地版「抠图」后导出带 alpha 的 PNG');
+      ? t('note.plainChar')
+      : t('hint.plainCharWeb'));
   }
   if (state.photoCanvasFull) renderNow();
-  else setStatus('立绘已上传，请上传照片');
+  else setStatus(t('note.charOk'));
   // 导入后问一句全身/半身（只定默认走哪条路，不改任何状态）
   $('kind-modal').hidden = false;
 }
@@ -228,7 +228,7 @@ async function setChar(file) {
 function handleFile(kind, file) {
   if (!file) return;
   if (!file.type || file.type.indexOf('image/') !== 0) {
-    setStatus('只支持图片文件（' + (file.name || '未命名') + '）', null, true);
+    setStatus(t('err.notImage', file.name || t('err.unnamed')), null, true);
     return;
   }
   if (kind === 'photo') return setPhoto(file);
@@ -292,11 +292,11 @@ function scheduleRender() {
 async function renderNow() {
   clearTimeout(state.renderTimer);
   if (!pipelineReady) {
-    setStatus('运算模块未就绪：' + _missing.join('、') + ' 未发布或加载失败', null, true);
+    setStatus(t('err.modulesMissing', _missing.join('、')), null, true);
     return;
   }
   if (!state.photoCanvasPreview || !state.charCanvas) {
-    setStatus('请先上传照片与立绘', null, true);
+    setStatus(t('note.needBoth'), null, true);
     return;
   }
   const seq = ++state.renderSeq;
@@ -305,7 +305,7 @@ async function renderNow() {
     const p = state.params;
     // 轻量校验：值域口径与后端 choices 一致（在core的 SHOTS/FRAMES 里查）
     if (!core.SHOTS[p.shot] || !(p.frame in core.FRAMES)) {
-      throw new Error('参数越界：shot=' + p.shot + ' / frame=' + p.frame);
+      throw new Error(t('err.paramRange', p.shot, p.frame));
     }
     const r = await renderMod.composeShot(
       state.photoCanvasPreview, state.charCanvas, subjOf(p),
@@ -315,14 +315,14 @@ async function renderNow() {
     drawToPreview(r.shot);
     drawHudOverlay();
     showScene(attachMmdKey(r.scene, state.photoCanvasPreview.width, state.photoCanvasPreview.height));
-    setStatus('渲染完成', performance.now() - t0);
+    setStatus(t('note.renderDone'), performance.now() - t0);
   } catch (e) {
-    setStatus('渲染出错：' + (e && e.message ? e.message : e), null, true);
+    setStatus(t('note.renderErr', (e && e.message ? e.message : e)), null, true);
   }
 }
 
 function drawToPreview(src) {
-  if (!src) throw new Error('合成结果为空');
+  if (!src) throw new Error(t('err.composeEmpty'));
   const c = $('preview-canvas');
   c.width = src.width;
   c.height = src.height;
@@ -356,31 +356,31 @@ async function ensureMatte() {
 }
 
 async function doMatte() {
-  if (!state.charImg) { setStatus('请先上传立绘', null, true); return; }
+  if (!state.charImg) { setStatus(t('note.needChar'), null, true); return; }
   await ensureMatte();
   const fn = window.arcamMatte;
   if (typeof fn !== 'function') {
-    setStatus('抠图模块未加载（vendor/ 缺文件；本地版「arcam web」同样可抠图）', null, true);
+    setStatus(t('err.matteModule'), null, true);
     return;
   }
   try {
-    setStatus('抠图模型推理中…');
+    setStatus(t('note.matteRunning'));
     const t0 = performance.now();
     const onProgress = (frac) => {
       if (typeof frac === 'number' && isFinite(frac)) {
-        setStatus('抠图模型推理中… ' + Math.round(frac * 100) + '%');
+        setStatus(t('note.matteRunningPct', Math.round(frac * 100)));
       }
     };
     const out = await fn(state.charImg, onProgress); // 契约：async (imgEl, onProgress) => canvas
     state.charCanvas = toCanvas(out);
     // 重新扫一次 alpha：抠图结果理应有透明像素；没有就把 hint 留着提醒换图
     state.charHasAlpha = hasAlpha(state.charCanvas);
-    setName('char-name', state.charName + ' · 已抠图');
-    setInputHint(state.charHasAlpha ? '' : '抠图结果没有透明像素，请换一张立绘');
-    setStatus('抠图完成', performance.now() - t0);
+    setName('char-name', t('note.cutoutTag', state.charName));
+    setInputHint(state.charHasAlpha ? '' : t('note.cutoutNoAlpha'));
+    setStatus(t('note.matteOk'), performance.now() - t0);
     scheduleRender();
   } catch (e) {
-    setStatus('抠图失败：' + (e && e.message ? e.message : e), null, true);
+    setStatus(t('note.matteErr', (e && e.message ? e.message : e)), null, true);
   }
 }
 
@@ -396,49 +396,49 @@ async function composeFull() {
 
 async function doExportPng() {
   try {
-    setStatus('导出中…');
-    if (!state.photoCanvasFull) throw new Error('还没有上传照片，出不了图');
+    setStatus(t('note.exporting'));
+    if (!state.photoCanvasFull) throw new Error(t('err.noPhoto'));
     const r = await composeFull();
     const blob = await canvasToBlob(r.shot, 'image/png');
     const name = 'arcam-render-' + stamp() + '.png';
     await saveBlob(blob, name);
-    setStatus('已开始下载 ' + name);
+    setStatus(t('note.saveStart', name));
   } catch (e) {
-    setStatus('导出失败：' + (e && e.message ? e.message : e), null, true);
+    setStatus(t('note.exportErr', (e && e.message ? e.message : e)), null, true);
   }
 }
 
 async function doExportLayer() {
   try {
-    setStatus('导出中…');
+    setStatus(t('note.exporting'));
     const p = state.params;
-    if (!state.charCanvas) throw new Error('还没有上传立绘，出不了立绘层');
+    if (!state.charCanvas) throw new Error(t('err.noCharLayer'));
     // 层与照片同尺寸：没有照片时 camOf 会拿 null.width 抛裸 TypeError，和人话校验一致先挡
-    if (!state.photoCanvasFull) throw new Error('还没有上传照片，出不了立绘层');
+    if (!state.photoCanvasFull) throw new Error(t('err.noPhotoLayer'));
     // 立绘层：与照片同尺寸的透明层，直接盖在出图上严丝合缝（Python cmd_char_layer 同语义）
     const r = await renderMod.composeCharLayer(
       state.charCanvas, subjOf(p),
       camOf(p, state.photoCanvasFull.width, state.photoCanvasFull.height),
       composeParams(p));
     const layer = r && (r.layer || r.charLayer || r.char_layer);
-    if (!layer) throw new Error('立绘层为空（立绘缺失或落位失败）');
+    if (!layer) throw new Error(t('err.layerEmpty'));
     const blob = await canvasToBlob(layer, 'image/png');
     const name = 'arcam-char-layer-' + stamp() + '.png';
     await saveBlob(blob, name);
-    setStatus('已开始下载 ' + name);
+    setStatus(t('note.saveStart', name));
   } catch (e) {
-    setStatus('导出失败：' + (e && e.message ? e.message : e), null, true);
+    setStatus(t('note.exportErr', (e && e.message ? e.message : e)), null, true);
   }
 }
 
 async function doExportBundle() {
   try {
-    setStatus('导出中…');
+    setStatus(t('note.exporting'));
     const p = state.params;
-    if (!state.charCanvas) throw new Error('素材包需要立绘');
+    if (!state.charCanvas) throw new Error(t('err.bundleNeedChar'));
     // 没有照片时 composeFull 里的 camOf 会拿 null.width 抛裸 TypeError；先人话挡掉，
     // 也省掉一遍白跑的合成（doExportPng 同款校验）
-    if (!state.photoCanvasFull) throw new Error('还没有上传照片，出不了素材包');
+    if (!state.photoCanvasFull) throw new Error(t('err.noPhotoBundle'));
     const r = await composeFull(); // { shot, rect, scene, light }
     // 素材包的 character.png 必须是「与 shot.jpg 同一个裁切框」的那份立绘层：
     // Python cmd_bundle 明确不另调 compose_char_layer（它内部固定 '满幅'，
@@ -458,9 +458,9 @@ async function doExportBundle() {
       camOf(p, state.photoCanvasFull.width, state.photoCanvasFull.height),
       layerKw);
     const layer = layerRes && layerRes.layer;
-    if (!layer) throw new Error('这一遍没有产出立绘层（立绘缺失或落位失败）');
+    if (!layer) throw new Error(t('err.layerEmptyPass'));
     const scene = r && r.scene;
-    if (!scene) throw new Error('scene.json 生成失败');
+    if (!scene) throw new Error(t('err.sceneFail'));
     // 3D 开着：scene.json 的 mmd 段记这一枪是 3D 渲的（原版 index.html:3776-3787）
     attachMmdKey(scene, state.photoCanvasFull.width, state.photoCanvasFull.height);
     const shotBlob = await canvasToBlob(r.shot, 'image/jpeg', 0.95); // JPEG q0.95（同 CLI encode_jpeg 95）
@@ -473,22 +473,22 @@ async function doExportBundle() {
     ]);
     const name = 'arcam-bundle-' + stamp() + '.zip';
     await saveBlob(zip, name);
-    setStatus('已开始下载 ' + name + '（shot.jpg + scene.json + character.png）');
+    setStatus(t('note.bundleStart', name));
   } catch (e) {
-    setStatus('导出失败：' + (e && e.message ? e.message : e), null, true);
+    setStatus(t('note.exportErr', (e && e.message ? e.message : e)), null, true);
   }
 }
 
 async function doCopyScene() {
   const text = $('scene-json').textContent;
-  if (!text) { setStatus('scene.json 还是空的，先渲染一次', null, true); return; }
+  if (!text) { setStatus(t('note.sceneEmpty'), null, true); return; }
   try {
     await navigator.clipboard.writeText(text);
-    setStatus('scene.json 已复制到剪贴板');
+    setStatus(t('note.sceneCopied'));
   } catch (err) {
     // 部分浏览器/非安全上下文拒绝写剪贴板：展开面板让人手动复制（同本地 webui）
     $('scene-details').open = true;
-    setStatus('浏览器拒绝写剪贴板，已展开 scene.json 请手动复制', null, true);
+    setStatus(t('note.clipDenied'), null, true);
   }
 }
 
@@ -687,7 +687,7 @@ function init() {
   $('btn-copy-scene').addEventListener('click', doCopyScene);
 
   syncModeVisibility();
-  setStatus('就绪');
+  setStatus(t('note.ready'));
   $('status-msg').className = '';
 
   // J4 挂钩点：抠图钮只在 window.arcamMatte 就绪后出现。三种上线方式都覆盖——
@@ -723,8 +723,7 @@ function init() {
   drawHudOverlay();
 
   if (!pipelineReady) {
-    const msg = '运算模块未就绪：' + _missing.join('、') +
-      ' 未发布或加载失败，本页功能暂不可用';
+    const msg = t('err.modulesMissingPage', _missing.join('、'));
     setStatus(msg, null, true);
     $('preview-empty').textContent = msg;
     $('preview-empty').hidden = false;
@@ -768,6 +767,12 @@ function applyLang() {
   });
   $('btn-lang').textContent = lang === 'en' ? '中' : 'EN';
   $('btn-lang').title = t('lang.switch');
+  // 拖拽区文件名：空态（setName 打的 empty 类）跟着语言走，已上传的文件名不动。
+  // ⚠ 不给这些 span 挂 data-t——上面的无脑覆写会把文件名冲成「未选择」；
+  //    frame-read 同款「非 data-t 手动刷」口径。
+  document.querySelectorAll('.dz-name.empty').forEach((el) => {
+    el.textContent = t('name.empty');
+  });
   if (window.arcamLive && window.arcamLive.active) $('btn-live').textContent = t('btn.liveStop');
   else $('btn-live').textContent = t('btn.live');
   drawHudOverlay();   // 取景框读数非 data-t，切语言手动刷
@@ -795,7 +800,7 @@ function bindEditLine() {
 function doPrep() {
   if (!state.charCanvas) { showTip('note.chNone'); return; }
   const MT = window.arcamMatteTools;
-  if (!MT) { setStatus('修图模块未加载', null, true); return; }
+  if (!MT) { setStatus(t('err.matteModuleShort'), null, true); return; }
   const before = MT.copyOf(state.charCanvas);
   const r = MT.autoPrepareChar(state.charCanvas);
   if (r.canvas !== before && (r.cut !== null || r.trimmed)) {
@@ -812,7 +817,7 @@ function doPrep() {
 function doTrim() {
   if (!state.charCanvas) { showTip('note.chNone'); return; }
   const MT = window.arcamMatteTools;
-  if (!MT) { setStatus('修图模块未加载', null, true); return; }
+  if (!MT) { setStatus(t('err.matteModuleShort'), null, true); return; }
   const w0 = state.charCanvas.width, h0 = state.charCanvas.height;
   const r = MT.autoTrim(state.charCanvas);
   if (!r) { $('edit-note').textContent = t('note.noMargin'); return; }
@@ -884,7 +889,7 @@ function draw3DInto(full, rect) {
   }
   if (!lay) {
     // 渲失败：不叠层（drawInto 已被 charDraw 顶掉），只记落位 + 把报错摆出来
-    d3dNote(t('note.3dDrawFail', 'render 返回 0'), true);
+    d3dNote(t('note.3dDrawFail', t('err.renderZero')), true);
     return placementForScene(cam, rect);
   }
   full.getContext('2d').drawImage(lay, 0, 0, W, H);
@@ -1057,7 +1062,7 @@ function refresh3dRows() {
     b.addEventListener('click', () => { state.pose3D = idx; refresh3dRows(); renderNow(); });
     return b;
   };
-  prow.appendChild(mk('静止', -1));
+  prow.appendChild(mk(t('pose.still'), -1));
   M3D.poseNames().forEach((name, i) => prow.appendChild(mk(name, i)));
   const hasPose = M3D.poseNames().length > 0;
   $('pose3dLabel').hidden = !hasPose;
@@ -1084,7 +1089,7 @@ async function do3DImport(src, pmxIdx) {
     // onProgress 第一个参量是 0~1 的分数（mmd.js readBytes/buildFromPackage 的约定）
     const ok = await M3D.load(src, (frac) =>
       d3dNote(t('note.3dLoading') + ' ' + Math.round(frac * 100) + '%'), pmxIdx);
-    if (!ok) { d3dNote(t('note.3dFail', M3D.error || '未知错误'), true); return; }
+    if (!ok) { d3dNote(t('note.3dFail', M3D.error || t('err.unknown')), true); return; }
     state.use3D = true;
     $('t3d').classList.add('on');
     forceGroundForMmd();          // 3D 必须站地上：自由模式那套对真透视模型没意义
@@ -1194,15 +1199,15 @@ function doAutoFix() {
   const aspect = state.charCanvas ? state.charCanvas.width / state.charCanvas.height : 0.6;
   const r = H.autoFixX(cam, subj, p.mode, p.size_pct,
                        { shot: p.shot, charScale: p.char_scale, charAspect: aspect });
-  if (!r) { setStatus('摆不正：人物在相机后方或参数退化', null, true); return; }
+  if (!r) { setStatus(t('note.autofixFail'), null, true); return; }
   if (r.freeU !== undefined) {
-    setStatus('已吸附到 ' + Math.round(r.snapped * 100) + '% 三分线（自由模式请用拖动微调）');
+    setStatus(t('note.snapFree', Math.round(r.snapped * 100)));
     return;
   }
   p.x = Math.round(r.x * 100) / 100;
   $('p-x-num').value = p.x;
   $('p-x-rng').value = p.x;
-  setStatus('已吸附到 ' + Math.round(r.snapped * 100) + '% 三分线（x=' + p.x + 'm）');
+  setStatus(t('note.snapGround', Math.round(r.snapped * 100), p.x));
   renderNow();
 }
 
@@ -1230,8 +1235,8 @@ function bindDrag() {
     const px = toCanvasPixel(ev);
     const p = state.params;
     if (p.mode === 'free') {
-      setStatus('自由模式拖动：' + Math.round(px.u / cv.width * 100) + '% , '
-                + Math.round(px.v / cv.height * 100) + '%（精细位置请用左侧参数）');
+      setStatus(t('note.dragFree', Math.round(px.u / cv.width * 100),
+                  Math.round(px.v / cv.height * 100)));
       return;
     }
     const H = window.arcamHud;
@@ -1261,12 +1266,12 @@ function bindFullscreen() {
     if (!stage) return;
     if (document.fullscreenElement) { document.exitFullscreen(); return; }
     const p = stage.requestFullscreen && stage.requestFullscreen();
-    if (p && p.catch) p.catch(() => setStatus('浏览器不让全屏（需用户手势；iOS Safari 不支持元素全屏）', null, true));
+    if (p && p.catch) p.catch(() => setStatus(t('note.fsDenied'), null, true));
   });
   document.addEventListener('fullscreenchange', () => {
     const on = !!document.fullscreenElement;
     $('btn-fullscreen').textContent = on ? t('btn.exitFullscreen') : t('btn.fullscreen');
-    if (on) setStatus('全屏取景中——拖画面摆位，Esc 退出');
+    if (on) setStatus(t('note.fsOn'));
   });
 }
 
@@ -1326,9 +1331,9 @@ function bindBatch() {
     const files = e.target.files;
     e.target.value = '';                          // 清掉，否则同一批文件再选不触发 change
     if (!files || !files.length) return;
-    if (!state.charCanvas) { setStatus('批量出图需要先上传立绘', null, true); return; }
-    if (files.length > 12) { setStatus(`一次最多 12 张（收到 ${files.length}）`, null, true); return; }
-    setStatus(`批量出图中（${files.length} 张）…`);
+    if (!state.charCanvas) { setStatus(t('note.batchNeedChar'), null, true); return; }
+    if (files.length > 12) { setStatus(t('note.batchTooManyGot', files.length), null, true); return; }
+    setStatus(t('note.batchRunning', files.length));
     const parts = [];
     const failed = [];
     for (let i = 0; i < files.length; i++) {
@@ -1339,11 +1344,11 @@ function bindBatch() {
         parts.push({ name: `shot_${String(i + 1).padStart(3, '0')}.png`,
                      data: new Uint8Array(await blob.arrayBuffer()) });
       } catch (err) {
-        failed.push(`第 ${i + 1} 张：${(err && err.message) || err}`);
+        failed.push(t('err.batchItem', i + 1, (err && err.message) || err));
       }
     }
     if (!parts.length) {
-      setStatus('一张都没出图：' + failed.slice(0, 3).join('；'), null, true);
+      setStatus(t('err.batchAllFail', failed.slice(0, 3).join('；')), null, true);
       return;
     }
     if (failed.length) {
@@ -1351,8 +1356,8 @@ function bindBatch() {
     }
     const zip = buildBundleZip(parts);
     await saveBlob(zip, 'arcam-batch.zip');
-    setStatus(`批量完成：${parts.length - (failed.length ? 1 : 0)} 张` +
-              (failed.length ? `，${failed.length} 张跳过（见 zip 内 _errors.txt）` : ''));
+    setStatus(t('note.batchDoneDocs', parts.length - (failed.length ? 1 : 0)) +
+              (failed.length ? t('note.batchSkip', failed.length) : ''));
   });
 }
 

@@ -21,11 +21,11 @@ var S_DEFAULTS = {
   x: 0, d: 4, h: 1.6, hp: 1.65, feq: 23, pitch: 0, roll: 0,
   shot: '全身', char_scale: 1.0, frame: '满幅', rot_basis: 'world',
   mode: 'ground', size_pct: 60, edge_bar: 0, tone: false,
-  // 光影三开关（v1.3.0）：本地版三项都真生效（webapp → compose 的门）；
-  // 网页版（docs）只有 shadow 真生效——JS 侧没有 bakeLit（v1 起环境光烘焙
-  // 就是 no-op），light/grain 在那边只影响状态显示，UI 提示里写明。
+  // 光影三开关（v1.3.0）：三项都直接改变出图。v1.9.0 起网页版同样真烘
+  // 环境光/颗粒（docs/arcam-lighting.js 移植 bakeLit，本地版走 webapp →
+  // compose 的同一条门），不再有「只叠阴影」的版本差。
   light: true, grain: true, shadow: true,
-  shadow_az: 0, shadow_opacity: 1.0,
+  shadow_az: 0, shadow_opacity: 1.0, grain_scale: 1.0,
   base_only: false          // 内部态：3D 就绪时由 buildParams 自动带上，不进用户面板
 };
 
@@ -345,8 +345,8 @@ async function doExport3D(target) {
     var scene = attachMmdKey(r.scene, W, H);
     if (target === 'png') {
       var blob = await canvasToBlob(cv, 'image/png');
-      saveBlob(blob, 'arcam-3d-' + stamp() + '.png');
-      setStatus('已开始下载 arcam-3d-*.png');
+      var how = await saveBlob(blob, 'arcam-3d-' + stamp() + '.png');
+      setStatus(how === 'cancel' ? '已取消保存' : '已开始下载 arcam-3d-*.png');
       return;
     }
     // bundle：shot.jpg + scene.json + character.png（MMD 层）
@@ -357,8 +357,10 @@ async function doExport3D(target) {
       { name: 'scene.json', data: new TextEncoder().encode(JSON.stringify(scene, null, 2)) },
       { name: 'character.png', data: new Uint8Array(await layerBlob.arrayBuffer()) }
     ];
-    saveBlob(buildBundleZip(parts), 'arcam-bundle-' + stamp() + '.zip');
-    setStatus('已开始下载 arcam-bundle-*.zip（shot.jpg + scene.json + character.png）');
+    var how = await saveBlob(buildBundleZip(parts), 'arcam-bundle-' + stamp() + '.zip');
+    setStatus(how === 'cancel'
+      ? '已取消保存'
+      : '已开始下载 arcam-bundle-*.zip（shot.jpg + scene.json + character.png）');
   } catch (e) { showApiError(e); }
 }
 
@@ -375,12 +377,42 @@ function canvasToBlob(canvas, type, quality) {
     canvas.toBlob(function (b) { resolve(b); }, type, quality);
   });
 }
-function saveBlob(blob, name) {
+//: 保存兜底链（原版 index.html:3407-3453 移植；安卓 WebView 桥不移植——本项目没有安卓壳）。
+//  顺序：navigator.share（能分享文件时优先，移动端体验最好）→ showSaveFilePicker
+//  （桌面 Chromium 能让用户选路径）→ <a download>（老兜底）。前一段失败自然落到下一段；
+//  AbortError 是用户主动取消，静默返回 'cancel' 不往上抛。
+async function saveBlob(blob, name) {
+  var file = null;
+  try { file = new File([blob], name, { type: blob.type || 'application/octet-stream' }); } catch (e) {}
+  if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file] });
+      return 'share';
+    } catch (e) {
+      if (e && e.name === 'AbortError') return 'cancel';
+    }
+  }
+  if (window.showSaveFilePicker) {
+    try {
+      var handle = await window.showSaveFilePicker({ suggestedName: name });
+      var w = await handle.createWritable();
+      await w.write(blob);
+      await w.close();
+      return 'picker';
+    } catch (e) {
+      if (e && e.name === 'AbortError') return 'cancel';
+    }
+  }
   var a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = name;
-  document.body.appendChild(a); a.click(); a.remove();
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // 延迟回收：个别浏览器同步 revoke 会把刚触发的下载一起取消
   setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
+  return 'download';
 }
 function stamp() {
   var d = new Date();
@@ -407,15 +439,10 @@ async function doExport(target) {
       throw new ApiError((data && data.error) || ('HTTP ' + res.status), data && data.hint);
     }
     var blob = await res.blob();
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = EXPORT_FILES[target] || 'arcam-export';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    // 延迟回收：个别浏览器同步 revoke 会把刚触发的下载一起取消
-    setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
-    setStatus('已开始下载 ' + a.download);
+    var name = EXPORT_FILES[target] || 'arcam-export';
+    // 兜底链（share → picker → download）统一走这里；cancel = 用户主动取消
+    var how = await saveBlob(blob, name);
+    setStatus(how === 'cancel' ? '已取消保存' : '已开始下载 ' + name);
   } catch (e) {
     showApiError(e);
   }
@@ -778,7 +805,7 @@ function frameRectJs(key, W, H) {
 //: 多选照片 → dataURI 数组 → /api/batch → zip 下载。
 //  与 CLI arcam batch 同语义：同一立绘同一组参数，逐张出图；单张失败不拖垮
 //  整批（服务端跳过的原因写进 zip 里的 _errors.txt）。
-function doBatch(files) {
+async function doBatch(files) {
   if (!files || !files.length) return;
   if (!state.char) { setStatus('批量出图需要先上传立绘', null, true); return; }
   if (files.length > 12) { setStatus('一次最多 12 张（分批处理）', null, true); return; }
@@ -791,30 +818,24 @@ function doBatch(files) {
       r.readAsDataURL(f);
     });
   });
-  Promise.all(readers).then(function (uris) {
-    return fetch('/api/batch', {
+  try {
+    var uris = await Promise.all(readers);
+    var res = await fetch('/api/batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ photos: uris, params: buildParams() })
     });
-  }).then(function (res) {
-    return res.blob().then(function (blob) {
-      if (!res.ok) {
-        return res.json().catch(function () { return null; }).then(function (d) {
-          throw new ApiError((d && d.error) || ('HTTP ' + res.status), d && d.hint);
-        });
-      }
-      var note = res.headers.get('X-Arcam-Batch') || '';
-      var a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'arcam-batch.zip';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
-      setStatus('批量完成：' + note);
-    });
-  }).catch(function (e) { showApiError(e); });
+    var blob = await res.blob();
+    if (!res.ok) {
+      var d = await res.json().catch(function () { return null; });
+      throw new ApiError((d && d.error) || ('HTTP ' + res.status), d && d.hint);
+    }
+    var note = res.headers.get('X-Arcam-Batch') || '';
+    // 走 saveBlob 兜底链（v1.9.0）：和单张导出/3D 导出同一条路，
+    // navigator.share / showSaveFilePicker 优先、<a download> 兜底
+    var how = await saveBlob(blob, 'arcam-batch.zip');
+    setStatus('批量完成：' + note + (how === 'cancel' ? '（已取消保存）' : ''));
+  } catch (e) { showApiError(e); }
 }
 
 /* ================= 9. 效果开关 + 拖拽摆位 + 自动摆正 ================= */
@@ -845,6 +866,9 @@ function bindFx() {
   bindSlider('shadow_az', 'p-shadow-az-rng', 'p-shadow-az-val',
              function (v) { return v.toFixed(0) + '°'; });
   bindSlider('shadow_opacity', 'p-shadow-op-rng', 'p-shadow-op-val',
+             function (v) { return v.toFixed(2); });
+  // 颗粒强度（v1.9.0）：乘在颗粒幅度上，不动曲线/白平衡/饱和；1.0 = 原版逐位一致
+  bindSlider('grain_scale', 'p-grain-scale-rng', 'p-grain-scale-val',
              function (v) { return v.toFixed(2); });
   $('btn-autofix').addEventListener('click', doAutoFix);
 }
@@ -998,54 +1022,12 @@ function syncControlsFromParams() {
   $('p-shadow-az-val').textContent = state.params.shadow_az.toFixed(0) + '°';
   $('p-shadow-op-rng').value = state.params.shadow_opacity;
   $('p-shadow-op-val').textContent = state.params.shadow_opacity.toFixed(2);
+  $('p-grain-scale-rng').value = state.params.grain_scale;
+  $('p-grain-scale-val').textContent = state.params.grain_scale.toFixed(2);
   $('fx-light').checked = !!state.params.light;
   $('fx-grain').checked = !!state.params.grain;
   $('fx-shadow').checked = !!state.params.shadow;
   syncModeVisibility();
-}
-
-/* ================= 7.9 批量出图（v1.6.0；/api/batch） ================= */
-
-//: 多选照片 → 每张转 dataURI → 一次 POST /api/batch → 下载 zip。
-//  服务端单张失败不拖垮整批（明细写进 zip 的 _errors.txt），这里把张数报出来。
-function bindBatch() {
-  $('btn-batch').addEventListener('click', function () { $('file-photos').click(); });
-  $('file-photos').addEventListener('change', function (e) {
-    var files = e.target.files;
-    if (!files || !files.length) return;
-    if (!state.char) { setStatus('批量出图需要先上传立绘', null, true); return; }
-    if (files.length > 12) { setStatus('一次最多 12 张（收到 ' + files.length + '）', null, true); return; }
-    setStatus('批量出图中（' + files.length + ' 张）…');
-    var readers = [];
-    for (var i = 0; i < files.length; i++) {
-      readers.push(new Promise(function (resolve, reject) {
-        var fr = new FileReader();
-        fr.onload = function () { resolve(fr.result); };
-        fr.onerror = function () { reject(new Error(files[i].name + ' 读不出来')); };
-        fr.readAsDataURL(files[i]);
-      }));
-    }
-    Promise.all(readers).then(function (uris) {
-      return fetch('/api/batch', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ photos: uris, params: buildParams() })
-      });
-    }).then(function (res) {
-      if (!res.ok) {
-        return res.json().then(function (e) {
-          throw new Error((e && e.error) || ('HTTP ' + res.status));
-        });
-      }
-      return res.blob().then(function (blob) {
-        var a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = 'arcam-batch.zip';
-        a.click();
-        setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
-        setStatus('批量完成：' + files.length + ' 张（见 zip）');
-      });
-    }).catch(function (e) { showApiError(e); });
-  });
 }
 
 /* ============ zip 最小实现（store 方式，不压缩；v1.7.0 从 docs/app.js 移植） ============
@@ -1438,7 +1420,6 @@ function init() {
   bindFx();
   bindDrag();
   bind3D();
-  bindBatch();
   bindFullscreen();
   syncModeVisibility();
   setStatus('就绪');

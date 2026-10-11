@@ -53,10 +53,17 @@ def main(argv: list[str] | None = None) -> int      # 'arcam web' 子命令入�
 {"x":0.0,"d":4.0,"h":1.6,"hp":1.65,"feq":23.0,"pitch":0.0,"roll":0.0,
  "shot":"全身","char_scale":1.0,"frame":"满幅","rot_basis":"world",
  "mode":"ground","size_pct":60.0,"edge_bar":0,"tone":false,
- "depth_uploaded":false}
+ "light":true,"grain":true,"shadow":true,
+ "shadow_az":0.0,"shadow_opacity":1.0,"grain_scale":1.0,
+ "depth_uploaded":false,"base_only":false}
 ```
-默认值 = 原版 `S` 默认（`index.html:921-937`）。显式值 > 深度测出 > 标称默认
-（LIDAR-SPEC §0：布尔「用户动过没」由前端传显式键，缺键即未动）。
+默认值 = 原版 `S` 默认（`index.html:921-937`）+ 本项目新增键的缺省（光影三开关
+v1.3.0、阴影方位/浓度 v1.6.0、颗粒强度 v1.9.0，缺省值都取「与原版逐位一致」）。
+`shadow_opacity`/`grain_scale` 校验口径是 **nonnegative**：0 是有语义的合法值
+（关阴影/关颗粒，两侧滑块最左档），负数 400（CLI 同口径 exit 2）。
+`base_only` 是内部态：3D 就绪时由前端自动带上，不进用户面板。
+显式值 > 深度测出 > 标称默认（LIDAR-SPEC §0：布尔「用户动过没」由前端传显式键，
+缺键即未动）。
 
 ## 3. 前端 `src/arcam/webui/`（index.html / style.css / app.js）
 

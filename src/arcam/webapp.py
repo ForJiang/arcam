@@ -120,7 +120,7 @@ PARAM_DEFAULTS: dict = {
     "shot": "全身", "char_scale": 1.0, "frame": "满幅", "rot_basis": "world",
     "mode": "ground", "size_pct": 60.0, "edge_bar": 0, "tone": False,
     "light": True, "grain": True, "shadow": True,
-    "shadow_az": 0.0, "shadow_opacity": 1.0,
+    "shadow_az": 0.0, "shadow_opacity": 1.0, "grain_scale": 1.0,
     "base_only": False,
     "depth_uploaded": False,
 }
@@ -137,7 +137,8 @@ _NUM_SPECS: dict[str, tuple[str, str | None]] = {
     "char_scale": ("立绘倍率（只乘投影跨度）", "positive"),
     "size_pct": ("自由模式立绘占画面高度百分比", "positive"),
     "shadow_az": ("阴影光线方位角（度，0=正落脚下）", None),
-    "shadow_opacity": ("阴影浓度倍率", "positive"),
+    "shadow_opacity": ("阴影浓度倍率", "nonnegative"),
+    "grain_scale": ("颗粒强度倍率（1.0=原版）", "nonnegative"),
 }
 
 #: choices 字段（与 CLI argparse 的 choices 逐字同源）
@@ -445,6 +446,12 @@ def parse_params(raw) -> tuple[dict, set]:
                 raise ParamError(
                     f"参数 {key}（{desc}）应为正数，得到 {number:g}",
                     f"{key} 请给 > 0 的数")
+            if rule == "nonnegative" and number < 0.0:
+                # 0 是有语义的合法值：shadow_opacity=0 关阴影、grain_scale=0
+                # 关颗粒（两侧滑块最左档就是 0），不能按 positive 一刀切 400
+                raise ParamError(
+                    f"参数 {key}（{desc}）应为非负数，得到 {number:g}",
+                    f"{key} 请给 >= 0 的数")
             out[key] = number
         elif key in _CHOICE_SPECS:
             choices = _CHOICE_SPECS[key]
@@ -694,6 +701,7 @@ def _compose(store: Store, params: dict, explicit: set, scale: float = 1.0,
               shadow=params["shadow"], grain=params["grain"],
               sample_light=params["light"],
               shadow_az=params["shadow_az"], shadow_opacity=params["shadow_opacity"],
+              grain_scale=params["grain_scale"],
               shot=params["shot"], edge_bar=params["edge_bar"])
 
     depth = None

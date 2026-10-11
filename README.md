@@ -66,7 +66,10 @@ uv venv
 # 1) 出图：立绘贴地放进照片，顺带写 scene.json 配方
 arcam render photo.jpg char.png -o shot.png --scene scene.json
 #   光影开关：--no-light / --no-grain / --no-shadow（原版那三个钮）
-#   HUD 排查构图：--overlay grid|horizon|figure|hud
+#   阴影方向/浓度：--shadow-az 30 --shadow-opacity 0.6（方位 0=正落脚下，浓度 0=不铺）
+#   颗粒强度：--grain-scale 1.5（默认 1.0=原版逐位一致；0=不撒颗粒）
+#   HUD 排查构图：--overlay grid,horizon,figure,hud（逗号组合多层，
+#     恒按 grid→horizon→figure→hud 的 canonical 序叠，与书写顺序无关）
 
 # 2) 只要透明立绘层（和照片逐像素对应，事后自己叠）
 arcam char-layer char.png -o layer.png --mode free --size-pct 70
@@ -381,16 +384,20 @@ GitHub Pages 只伺服静态文件、跑不了 Python 服务，所以把 focal/p
 - **功能对齐**：全部摆放参数、出图、立绘层、素材包、scene.json 与原版同构；
   **抠图也在网页版可用**（`vendor/` 内置 isnet-anime-q8.onnx + onnxruntime-web，
   首次点「抠图」才下载约 44MB 模型）。
-- **网页版没有的**（本地版专属）：LiDAR 深度驱动、视频轨道渲染、环境光烘焙 bakeLit、
-  色调匹配 tone、遮挡抠除（tone 开关保留但合成时忽略，页面上有注明）。
+- **网页版没有的**（本地版专属）：LiDAR 深度驱动、视频轨道渲染、色调匹配 tone、
+  遮挡抠除（tone 开关保留但合成时忽略，页面上有注明）。环境光与颗粒烘焙
+  （bakeLit）自 v1.9.0 起网页版同样真生效（`docs/arcam-lighting.js` 与 Python
+  逐字节对齐，颗粒强度滑块两侧都可调）。
 - **部署**：仓库 Settings → Pages → Source 选 `main` 分支 `/docs` 目录即可
   （推送脚本 `tools/push-to-github.sh` 会一并开启）。站内所有运算都在访客浏览器里，
   照片立绘不出设备。
 - **正确性基准**：`docs/tests/golden.json` 由 Python 管线生成（40 组 focal /
-  200 组 project / 120 组 place / 102 组 placement / 3 组整帧 scene），JS 侧
-  偏差 < 1e-9（引擎 libm 的 1 ulp 差，比阈值低 7 个数量级）；合成调用序列与
-  scene 字段顺序与 Python 逐项对齐。差分夹具 `tools/golden-diff.mjs`
-  （Node 直跑，462 向量 0 失败），Python 侧重算门禁
+  200 组 project / 120 组 place / 102 组 placement / 3 组整帧 scene + v1.9.0
+  起 10 张合成 fixture 上的光照五组：measureRegion 7 / bakeLit 17 / charStats 4 /
+  litScaleBucket 8 / grainTile 2，共 500 向量），JS 侧偏差 < 1e-9（引擎 libm 的
+  1 ulp 差，比阈值低 7 个数量级），其中 bakeLit 出图**逐字节全等**（0 容差）；
+  合成调用序列与 scene 字段顺序与 Python 逐项对齐。差分夹具
+  `tools/golden-diff.mjs`（Node 直跑，500 向量 0 失败），Python 侧重算门禁
   `tests/test_golden_recompute.py`（fixture 必须能被当前实现逐向量重算）。
 
 ## 测试
@@ -409,7 +416,8 @@ GitHub Pages 只伺服静态文件、跑不了 Python 服务，所以把 focal/p
 - 其余模块的 golden 用例（投影 12 组公式手推、4×4 矩阵交叉验证、像素级合成性质）
   见 P1–P4 各自的测试文件。
 - `tests/test_golden_recompute.py`：Pages 版数值基准 `docs/tests/golden.json` 必须
-  能用当前 Python 实现逐向量重算（462 向量全比对），fixture 不许悄悄过期。
+  能用当前 Python 实现逐向量重算（500 向量全比对，bakeLit 逐字节 0 容差），
+  fixture 不许悄悄过期。
   配套 `tools/golden-diff.mjs`（Node 跑 JS 侧差分，实测最大偏差 5.551e-17）：
 
   ```bash

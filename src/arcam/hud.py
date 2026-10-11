@@ -122,12 +122,18 @@ def _to_pil(img: np.ndarray) -> Image.Image:
 
 def _flat(rgba: tuple[float, float, float, float],
           bg: tuple[int, int, int] = (0, 0, 0)) -> tuple[int, int, int]:
-    """rgba(0-1 alpha) 预合成到黑底 → RGB（原版 canvas 浮层下是视频/照片，
-    这里按黑底近似——HUD 是辅助线，与原版同款"压暗"观感一致）。"""
+    """rgba(0-255 RGB + 0-1 alpha) 预合成到黑底 → RGB 字节。
+
+    常量是原版 canvas ``rgba()`` 逐字：RGB 在**字节域**（0-255）、alpha 在
+    0-1。⚠ 早年把 RGB 当 0-1 浮点又乘了 255：非白色（网格青 120,255,255、
+    地平线红 255,120,120、骨色 255,212,121）乘完被 PIL 一律夹成纯白 —— HUD
+    只剩线型、颜色全丢。黑底近似保留（原版 canvas 浮层下是视频/照片，HUD 是
+    辅助线，压暗观感一致）。
+    """
     r, g, b, a = rgba
-    return (int(round((r * a + bg[0] * (1 - a)) * 255)),
-            int(round((g * a + bg[1] * (1 - a)) * 255)),
-            int(round((b * a + bg[2] * (1 - a)) * 255)))
+    return (int(round(r * a + bg[0] * (1 - a))),
+            int(round(g * a + bg[1] * (1 - a))),
+            int(round(b * a + bg[2] * (1 - a))))
 
 
 # ─────────────────────── drawFrame ───────────────────────

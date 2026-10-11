@@ -13,8 +13,11 @@
   观察者/画布 v 向下。**禁止 `toFixed` 之外的任何取整捷径**（scene.json 的
   `toFixed(2)/(3)` 语义与 Python `js_to_fixed` 一致，直接用）。
 - 验收基准：`docs/tests/golden.json`（Python 侧已生成：focal 40 / project 200 /
-  place 120 / placement 84 / scene 3）。J1 必须用 node_repl（`mcp__node_repl__js`，
-  纯 Node 内核）加载自己的 JS + golden 做**数值 diff 全过**（几何 1e-9 相对误差）。
+  place 120 / placement 102 / scene 3 + v1.9.0 起光照五组 38 向量
+  （measureRegion 7 / bakeLit 17 / charStats 4 / litScaleBucket 8 / grainTile 2，
+  bakeLit 逐字节 0 容差），共 500 向量）。J1 必须用 node_repl
+  （`mcp__node_repl__js`，纯 Node 内核）加载自己的 JS + golden 做**数值 diff 全过**
+  （几何 1e-9 相对误差；光照组 bakeLit 字节全等）。
 - 文件互斥：J1 只写 arcam-core.js；J2 只写 arcam-render.js；J3 只写
   index.html/style.css/app.js；J4 只写 matte.js + vendor/。禁止互相写。
 - 视觉：`docs/WEB-STYLE.md` tokens（J3 的 style.css 用同一套 :root 变量，深浅色
@@ -50,14 +53,25 @@ export function viewRect(W, H) -> {x:0,y:0,w:W,h:H}
 export function contactShadowAlpha(charImg, placement, ambient) -> HTMLCanvasElement  // sprite.py 等价
 export function drawSprite(base, charImg, c, {shadow, ambient, shadowLayer})          // drawCharTo 等价
 export function composeShot(photoCanvas, charImg, subj, cam, params)                  // compose.py 六步
-  // → { shot: HTMLCanvasElement, rect, scene: Object, light: null }
+  // → { shot: HTMLCanvasElement, rect, scene: Object, light: null }  // light 恒 null，采样走内部
 export function composeCharLayer(charImg, subj, cam, params) -> { layer, rect }
+export function sampleLightFor(photoCanvas, charImg, subj, cam, params) -> sample|null
+  // composeShot ③ 采光的单独入口：素材包的 character.png 要与 shot.jpg 同一套光，
+  // 由 doExportBundle 采一份经 params.sample 传给 composeCharLayer（Python
+  // compose_shot 第二遍传 light_used 的 JS 对译）
 export function buildScene(rect, placement, subj, cam, params) -> Object              // scene.py 1:1
 ```
 - 六步照 `docs/SPEC.md` §3.6：frameRect → 铺帧（drawImage 全画布）→ 画立绘
   （translate→rotate→先阴影后图，锚点图心）→ 裁切（整数 off 画布，js 偏移取整）。
-- 环境光/色调/遮挡（bakeLit/tone/occlusion）**不在 v1 范围**（tone 参数接受但忽略，
-  在 README「未移植」注明）；light 恒 null。
+- 环境光与颗粒烘焙（`docs/arcam-lighting.js`，v1.9.0 起）：照片路径按 `params.light`
+  门采光（32×32 降采样 + 直方图），`bakeLit` 过曲线/白平衡/饱和/颗粒四段，
+  `params.grain` 只门控颗粒段、`params.grainScale` 是强度倍率（1.0 = 原版逐位
+  一致，golden 里有逐字节向量）。立绘层路径自己不采光（透明底没有照片），
+  由调用方经 `params.sample` 把采好的光传进来才烘 —— 素材包的 character.png
+  与 shot.jpg 因此同一套光（`sampleLightFor` + doExportBundle，Python
+  compose_shot 第二遍传 light_used 的 JS 对译）。色调（tone）与 LiDAR 遮挡仍
+  **不在范围**（tone 参数接受但忽略）；`light` 返回值恒 null（冻结的返回形状，
+  采样值走内部消费，对外入口是 `sampleLightFor`）。
 - `buildScene` 字段名/顺序/单位/toFixed 与 Python `scene.py` 逐字一致（golden 里有
   3 组完整样例，字段顺序用 `Object.keys()` 逐项比）。
 - 缩放用 `imageSmoothingQuality='high'`（与原版浏览器一致）。

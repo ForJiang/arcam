@@ -526,6 +526,21 @@ class TestParamsValidation:
                                    {"params": "全部默认"})
         assert status == 400 and json.loads(raw)["ok"] is False
 
+    def test_zero_allowed_for_grain_scale_and_shadow_opacity(self, server, uploaded):
+        """grain_scale/shadow_opacity=0 是合法值（v1.9.0 合并修复）。
+
+        两侧滑块最左档就是 0（关颗粒/关阴影），早年按 positive 一刀切会 400，
+        滑块拖到底直接报错。0 放行、负数仍拒。
+        """
+        for key in ("grain_scale", "shadow_opacity"):
+            status, _, raw = post_json(uploaded, "/api/render",
+                                       {"params": {**FULL_PARAMS, key: 0.0}})
+            assert status == 200, f"{key}=0 应放行：{raw[:120]}"
+            status, _, raw = post_json(uploaded, "/api/render",
+                                       {"params": {**FULL_PARAMS, key: -0.5}})
+            assert status == 400, f"{key}=-0.5 应拒"
+            assert key in json.loads(raw)["error"]
+
     def test_scale_bounds(self, server, uploaded):
         for scale in (1.5, 0.0, -0.5, float("nan"), "half"):
             status, _, raw = post_json(uploaded, "/api/render",

@@ -41,8 +41,6 @@
       <input type="file" id="file-photo" accept="image/*" hidden>
       <!-- 批量模式：一次多选照片，同一立绘同一组参数出一套 zip（/api/batch） -->
       <input type="file" id="file-photos" accept="image/*" multiple hidden>
-      <!-- 批量：多选照片 → 同一立绘同一组参数 → 一个 zip（/api/batch） -->
-      <input type="file" id="file-photos" accept="image/*" multiple hidden>
 
       <div class="drop-zone" id="drop-char">
         <strong data-t="dz.char">立绘</strong>
@@ -135,6 +133,10 @@
         <div class="param-row">
           <label for="p-shadow-op-rng">阴影浓度 <span class="val" id="p-shadow-op-val">1.00</span></label>
           <input type="range" id="p-shadow-op-rng" min="0" max="2" step="0.05" value="1">
+        </div>
+        <div class="param-row">
+          <label for="p-grain-scale-rng">颗粒强度 <span class="val" id="p-grain-scale-val">1.00</span></label>
+          <input type="range" id="p-grain-scale-rng" min="0" max="3" step="0.05" value="1">
         </div>
         <div class="btn-row">
           <button type="button" id="btn-autofix" data-t="btn.autoFix">自动摆正</button>

@@ -15,6 +15,13 @@ from arcam.frames import frame_rect
 from arcam.geometry import Camera, focal_px, project
 from arcam.hud import (
     _COVER_FULL,
+    _DIM,
+    _flat,
+    _FRAME_LINE,
+    _GRID_MAJOR,
+    _GRID_MINOR,
+    _HORIZON,
+    _THIRD_LINE,
     composition_hints,
     draw_figure,
     draw_grid,
@@ -286,3 +293,31 @@ def test_cover_full_constant():
     """接地门限 0.95 与原版逐字（index.html:1930 的 shotCover >= 0.95）。"""
     assert _COVER_FULL == 0.95
     assert SHOTS["全身"] == 1.00 and SHOTS["头肩"] == 0.20
+
+
+def test_flat_composites_byte_rgb_not_float():
+    """_flat 的颜色域（v1.9.0 合并修复）：常量是原版 canvas rgba() 逐字 ——
+    RGB 在字节域（0-255）、alpha 在 0-1。早年把 RGB 当 0-1 又乘 255，非白色
+    （网格青、地平线红、骨色）全被 PIL 夹成纯白，HUD 只剩线型没有颜色。
+    """
+    assert _flat(_GRID_MAJOR) == (120, 255, 255)        # 青，alpha=1 原样
+    assert _flat(_GRID_MINOR) == (81, 202, 230)         # 90/225/255 × 0.9 四舍五入
+    assert _flat(_HORIZON) == (204, 96, 96)             # 255/120/120 × 0.8
+    assert _flat(_FRAME_LINE) == (230, 230, 230)        # 白 × 0.9
+    assert _flat(_THIRD_LINE) == (76, 76, 76)           # 白 × 0.30（暗三分线）
+    assert _flat(_DIM) == (0, 0, 0)                     # 压暗层不受影响
+    # 自定义底色时按 bytes 混合（不再是 255 倍放大）
+    assert _flat((255, 255, 255, 0.5), (100, 100, 100)) == (178, 178, 178)
+
+
+def test_draw_grid_and_horizon_keep_their_colors():
+    """网格青 / 地平线红真的落到像素上（颜色域修复的端到端证据）。"""
+    out = draw_grid(_img(), CAM)
+    px = out.reshape(-1, 3)
+    cyan = ((px[:, 0] > 100) & (px[:, 0] < 140) & (px[:, 1] > 240) & (px[:, 2] > 240)).sum()
+    assert cyan > 100, f"网格青色像素应成片出现（实测 {cyan}）"
+    out2 = draw_horizon(out, Camera(1920, 1080, 1.6, 23.0, 0.0, 0.0), "地平线")
+    px2 = out2.reshape(-1, 3)
+    red = ((px2[:, 0] > 190) & (px2[:, 1] > 80) & (px2[:, 1] < 110)
+           & (px2[:, 2] > 80) & (px2[:, 2] < 110)).sum()
+    assert red > 50, f"地平线红色像素应出现（实测 {red}）"

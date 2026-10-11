@@ -24,11 +24,11 @@ const S_DEFAULTS = {
   x: 0, d: 4, h: 1.6, hp: 1.65, feq: 23, pitch: 0, roll: 0,
   shot: '全身', char_scale: 1.0, frame: '满幅', rot_basis: 'world',
   mode: 'ground', size_pct: 60, edge_bar: 0, tone: false,
-  // 光影三开关（v1.3.0）：本地版三项都真生效（webapp → compose 的门）；
-  // 网页版（docs）只有 shadow 真生效——JS 侧没有 bakeLit（v1 起环境光烘焙
-  // 就是 no-op），light/grain 在那边只影响状态显示，UI 提示里写明。
+  // 光影三开关（v1.3.0）：三项都直接改变出图。v1.9.0 起网页版同样真烘
+  // 环境光/颗粒（docs/arcam-lighting.js 移植 bakeLit，本地版走 webapp →
+  // compose 的同一条门），不再有「只叠阴影」的版本差。
   light: true, grain: true, shadow: true,
-  shadow_az: 0, shadow_opacity: 1.0,
+  shadow_az: 0, shadow_opacity: 1.0, grain_scale: 1.0,
   base_only: false          // 内部态：3D 就绪时由 buildParams 自动带上，不进用户面板
 };
 
@@ -110,7 +110,25 @@ function canvasToBlob(canvas, type, quality) {
   });
 }
 
-function saveBlob(blob, name) {
+// 保存兜底链（原版 index.html:3407-3453，去掉安卓 WebView 桥——本项目没有安卓壳）：
+// share → showSaveFilePicker → <a download>，任一段失败自然落下一段；
+// 用户取消（AbortError）静默返回 'cancel' 不抛。返回 'share'/'picker'/'download'/'cancel'。
+async function saveBlob(blob, name) {
+  let file = null;
+  try { file = new File([blob], name, { type: blob.type || 'application/octet-stream' }); } catch (e) {}
+  if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file] }); return 'share'; }
+    catch (e) { if (e && e.name === 'AbortError') return 'cancel'; }
+  }
+  if (window.showSaveFilePicker) {
+    try {
+      const h = await window.showSaveFilePicker({ suggestedName: name });
+      const w = await h.createWritable();
+      await w.write(blob);
+      await w.close();
+      return 'picker';
+    } catch (e) { if (e && e.name === 'AbortError') return 'cancel'; }
+  }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = name;
@@ -119,6 +137,7 @@ function saveBlob(blob, name) {
   a.remove();
   // 延迟回收：个别浏览器同步 revoke 会把刚触发的下载一起取消（同本地 webui）
   setTimeout(() => { URL.revokeObjectURL(a.href); }, 10000);
+  return 'download';
 }
 
 /* ================= 4. 图片装载（file → ImageBitmap/Image → canvas） ================= */
@@ -253,9 +272,11 @@ function composeParams(p) {
     rotBasis: p.rot_basis,
     edgeBar: p.edge_bar,
     tone: !!p.tone,
+    light: p.light !== false,
+    grain: p.grain !== false,
     shadow: p.shadow !== false,
     shadowAz: p.shadow_az, shadowOpacity: p.shadow_opacity,
-    shadow_az: p.shadow_az, shadow_opacity: p.shadow_opacity
+    grainScale: p.grain_scale
   };
   if (mmdReady()) {
     kw.charDraw = draw3DInto;      // 3D 层挂钩点：替换 arcam-render.js 里的 drawInto
@@ -380,7 +401,7 @@ async function doExportPng() {
     const r = await composeFull();
     const blob = await canvasToBlob(r.shot, 'image/png');
     const name = 'arcam-render-' + stamp() + '.png';
-    saveBlob(blob, name);
+    await saveBlob(blob, name);
     setStatus('已开始下载 ' + name);
   } catch (e) {
     setStatus('导出失败：' + (e && e.message ? e.message : e), null, true);
@@ -403,7 +424,7 @@ async function doExportLayer() {
     if (!layer) throw new Error('立绘层为空（立绘缺失或落位失败）');
     const blob = await canvasToBlob(layer, 'image/png');
     const name = 'arcam-char-layer-' + stamp() + '.png';
-    saveBlob(blob, name);
+    await saveBlob(blob, name);
     setStatus('已开始下载 ' + name);
   } catch (e) {
     setStatus('导出失败：' + (e && e.message ? e.message : e), null, true);
@@ -425,10 +446,17 @@ async function doExportBundle() {
     // JS 侧 composeShot 的返回值里没有层（那是服务端 _Render 的内部产物），
     // 所以用同一套参数走 composeCharLayer 拿同框层：frameRect 与落位都由同一批
     // 参数决定，裁出来必然与 shot.jpg 严丝合缝。
+    // 光也要同一套：sampleLightFor 按 composeShot ③ 的同一算法现采一份传进去
+    // （Python compose_shot 第二遍传 light_used 的 JS 对译）—— 少了这一句，
+    // Pages 素材包的 character.png 不烘光而 shot.jpg 烘过，两层不同光。
+    const layerKw = composeParams(p);
+    layerKw.sample = renderMod.sampleLightFor(
+      state.photoCanvasFull, state.charCanvas, subjOf(p),
+      camOf(p, state.photoCanvasFull.width, state.photoCanvasFull.height), layerKw);
     const layerRes = await renderMod.composeCharLayer(
       state.charCanvas, subjOf(p),
       camOf(p, state.photoCanvasFull.width, state.photoCanvasFull.height),
-      composeParams(p));
+      layerKw);
     const layer = layerRes && layerRes.layer;
     if (!layer) throw new Error('这一遍没有产出立绘层（立绘缺失或落位失败）');
     const scene = r && r.scene;
@@ -444,7 +472,7 @@ async function doExportBundle() {
       { name: 'character.png', data: new Uint8Array(await layerBlob.arrayBuffer()) }
     ]);
     const name = 'arcam-bundle-' + stamp() + '.zip';
-    saveBlob(zip, name);
+    await saveBlob(zip, name);
     setStatus('已开始下载 ' + name + '（shot.jpg + scene.json + character.png）');
   } catch (e) {
     setStatus('导出失败：' + (e && e.message ? e.message : e), null, true);
@@ -649,11 +677,10 @@ function init() {
 
   $('btn-matte').addEventListener('click', doMatte);
   $('btn-rerender').addEventListener('click', renderNow);
+  // file-photos 的 change 只由 bindBatch() 绑一次（那边带护栏：立绘未上传、
+  // 超过 12 张、逐张合成与失败明细）。init 里再绑一条 = 选一次文件跑两遍批量、
+  // 下两个 zip（webui 侧同款坑，v1.9.0 两边一起修）。
   $('btn-batch').addEventListener('click', () => $('file-photos').click());
-  $('file-photos').addEventListener('change', (e) => {
-    doBatch(e.target.files);
-    e.target.value = '';
-  });
   $('btn-png').addEventListener('click', doExportPng);
   $('btn-layer').addEventListener('click', doExportLayer);
   $('btn-bundle').addEventListener('click', doExportBundle);
@@ -1119,6 +1146,16 @@ function bind3D() {
 /* ================= 12.6 效果开关 + 自动摆正（v1.3.0） ================= */
 
 function bindFx() {
+  // 光影三开关 → params（直接改变出图；v1.9.0 起网页版也真烘光/颗粒）。
+  // 显式逐个绑（不用 map 循环）：DOM id 与参数键的对应一眼可见。
+  $('fx-light').addEventListener('change', (e) => {
+    state.params.light = e.target.checked;
+    renderNow();
+  });
+  $('fx-grain').addEventListener('change', (e) => {
+    state.params.grain = e.target.checked;
+    renderNow();
+  });
   $('fx-shadow').addEventListener('change', (e) => {
     state.params.shadow = e.target.checked;
     renderNow();
@@ -1137,6 +1174,8 @@ function bindFx() {
   });
   bindSlider('shadow_az', 'p-shadow-az-rng', 'p-shadow-az-val', (v) => v.toFixed(0) + '°');
   bindSlider('shadow_opacity', 'p-shadow-op-rng', 'p-shadow-op-val', (v) => v.toFixed(2));
+  // 颗粒强度（v1.9.0）：乘在颗粒幅度上，不动曲线/白平衡/饱和；1.0 = 原版逐位一致
+  bindSlider('grain_scale', 'p-grain-scale-rng', 'p-grain-scale-val', (v) => v.toFixed(2));
   $('btn-autofix').addEventListener('click', doAutoFix);
 }
 
@@ -1270,61 +1309,22 @@ function syncControlsFromParams() {
   $('p-shadow-az-val').textContent = state.params.shadow_az.toFixed(0) + '°';
   $('p-shadow-op-rng').value = state.params.shadow_opacity;
   $('p-shadow-op-val').textContent = state.params.shadow_opacity.toFixed(2);
+  $('p-grain-scale-rng').value = state.params.grain_scale;
+  $('p-grain-scale-val').textContent = state.params.grain_scale.toFixed(2);
   $('fx-shadow').checked = state.params.shadow !== false;
+  $('fx-light').checked = state.params.light !== false;
+  $('fx-grain').checked = state.params.grain !== false;
   syncModeVisibility();
 }
 
 
 /* ================= 11.5 批量出图（v1.6.0，客户端） ================= */
 
-//: 多选照片 → 逐张 composeShot → 一个 zip。与 CLI arcam batch 同语义；单张
-//  失败不拖垮整批（跳过，明细进 zip 里的 _errors.txt——HTTP 头是 latin-1，
-//  中文原因进头会 500，那是服务端 /api/batch 踩过的坑，客户端同理不犯）。
-async function doBatch(files) {
-  try {
-    if (!files || !files.length) return;
-    if (!state.charCanvas) throw new Error('批量出图需要立绘');
-    if (files.length > 12) throw new Error('一次最多 12 张（分批处理）');
-    setStatus('批量出图中（' + files.length + ' 张）…');
-    const p = state.params;
-    const entries = [];
-    const errors = [];
-    for (let i = 0; i < files.length; i++) {
-      try {
-        const loaded = await loadImageEl(files[i]);
-        const canvas = drawToCanvas(loaded.img, loaded.w, loaded.h);
-        if (loaded.revoke) URL.revokeObjectURL(loaded.revoke);
-        const r = await renderMod.composeShot(
-          canvas, state.charCanvas, subjOf(p),
-          camOf(p, loaded.w, loaded.h), composeParams(p));
-        const blob = await canvasToBlob(r.shot, 'image/png');
-        entries.push({ name: `shot_${String(i + 1).padStart(3, '0')}.png`,
-                       data: new Uint8Array(await blob.arrayBuffer()) });
-      } catch (e) {
-        errors.push(`  第 ${i + 1} 张：${(e && e.message) || e}`);
-      }
-    }
-    if (!entries.length) throw new Error('一张都没出图：' + errors.slice(0, 3).join('；'));
-    if (errors.length) {
-      entries.push({ name: '_errors.txt',
-                     data: new TextEncoder().encode(
-                       'arcam batch —— 跳过的照片及原因：\n\n' + errors.join('\n')) });
-    }
-    const zip = buildBundleZip(entries);
-    saveBlob(zip, 'arcam-batch.zip');
-    setStatus(`批量完成：${entries.length - (errors.length ? 1 : 0)} 张出图` +
-              (errors.length ? `，${errors.length} 张跳过（见 zip 内 _errors.txt）` : ''));
-  } catch (e) {
-    setStatus('批量失败：' + (e && e.message ? e.message : e), null, true);
-  }
-}
-
-/* ================= 11.5 批量出图（v1.6.0；纯客户端逐张合成再打包） ================= */
-
 function bindBatch() {
   $('btn-batch').addEventListener('click', () => $('file-photos').click());
   $('file-photos').addEventListener('change', async (e) => {
     const files = e.target.files;
+    e.target.value = '';                          // 清掉，否则同一批文件再选不触发 change
     if (!files || !files.length) return;
     if (!state.charCanvas) { setStatus('批量出图需要先上传立绘', null, true); return; }
     if (files.length > 12) { setStatus(`一次最多 12 张（收到 ${files.length}）`, null, true); return; }
@@ -1350,7 +1350,7 @@ function bindBatch() {
       parts.push({ name: '_errors.txt', data: new TextEncoder().encode(failed.join('\n') + '\n') });
     }
     const zip = buildBundleZip(parts);
-    saveBlob(zip, 'arcam-batch.zip');
+    await saveBlob(zip, 'arcam-batch.zip');
     setStatus(`批量完成：${parts.length - (failed.length ? 1 : 0)} 张` +
               (failed.length ? `，${failed.length} 张跳过（见 zip 内 _errors.txt）` : ''));
   });

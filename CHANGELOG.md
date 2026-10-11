@@ -2,6 +2,69 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.9.0] — 2026-10-11
+
+新功能批次（五分区并行 + 对抗复核 + 浏览器全链实测）：颗粒强度可调、网页版真烘光、
+保存分享兜底、HUD 叠加组合，外加审计级修复 8 处。
+
+### 新增
+
+- **颗粒强度倍率 `grain_scale`**（核心 + CLI + 两个网页版）：乘在 bakeLit 的颗粒
+  幅度上（1.0 = 原版逐位一致），曲线/白平衡/饱和一个字节不动。CLI `--grain-scale`、
+  网页两侧「效果开关」里的「颗粒强度」滑块（0–3）。0 与关颗粒同效、3 强于 1，
+  浏览器实测三档出图指纹全不同。
+- **网页版环境光/颗粒烘焙真生效**（`docs/arcam-lighting.js` 新文件，550 行）：
+  `src/arcam/lighting.py` 全文移植到 Pages 纯 JS（measureRegion / bakeLit /
+  charStats / litScaleBucket / grainTile / lightRegionRect），接进 composeShot 与
+  composeCharLayer。**光线匹配/颗粒匹配两个开关在网页版从此真正改变像素**
+  （原先只影响状态显示，是「静默失效」 bug 类里最年头的一个），并补了网页侧缺失的
+  两个开关。数值逐位复刻 numpy（pairwise 求和、cumsum 顺序累加、双取整口径），
+  golden 新增 38 个光照向量，bakeLit 出图**逐字节全等**（0 容差）。
+- **保存/分享兜底链**（两个网页版）：saveBlob 从只有 `<a download>` 一段扩成
+  `navigator.canShare → navigator.share → showSaveFilePicker → <a download>` 四级
+  兜底（原版 index.html:3407-3453 同款；安卓 WebView 桥明确不移植——本项目没有
+  安卓壳）。用户取消分享/选档后状态条不再谎报「已开始下载」。
+- **CLI `--overlay` 多层组合**：`--overlay grid,horizon,figure` 逗号组合，叠放
+  恒按 canonical 序（grid → horizon → figure → hud，与原版四个开关排列一致），
+  书写顺序不影响实际叠序；单选行为逐位不变。
+
+### 修复（BUG）
+
+- **HUD 颜色全白**（hud.py `_flat`）：常量是原版 canvas `rgba()` 逐字（RGB 在
+  字节域 0-255、alpha 在 0-1），实现却把 RGB 当 0-1 又乘了 255——非白色（网格青
+  120,255,255、地平线红 255,120,120、骨色 255,212,121）乘完被 PIL 一律夹成纯白，
+  HUD 只剩线型没有颜色。已按字节域合成（grid 主线 120,255,255、horizon 204,96,96），
+  两侧现在同色。
+- **素材包两层不同光**（docs）：composeCharLayer 恒不烘光，Pages 下载的素材包里
+  character.png 未烘而 shot.jpg 烘过。新增 `sampleLightFor` 公开入口，
+  doExportBundle 采一份与 shot 完全相同的光传进立绘层（Python compose_shot 第二遍
+  传 light_used 的 JS 对译），浏览器实测两层同光。
+- **`--grain-scale`/`--shadow-opacity` 负数静默失效**（cli.py）：乘在 gAmp/SH_ALPHA
+  上被夹成 0，出图与 0 逐字节相同、零提示；webapp 对同两键本就 400。CLI 补
+  nonnegative 校验（0 合法、负数 exit 2），两边同一口径。
+- **`grain_scale=0` 拖最左必 400**（webapp.py）：两键挂的是 positive 校验，与两侧
+  滑块 min=0 冲突。改 nonnegative（0 = 关颗粒/关阴影，有语义）。
+- **批量出图双触发**（两个网页版）：init 内联防 change + bindBatch 各绑一份，
+  选一次文件跑两遍批量、下两个 zip。两侧都修成唯一接线（webui 收敛进 init，
+  docs 收敛进 bindBatch 的清空 + 护栏版）。
+- **重复 `id="file-photos"`**（两个 index.html，v1.8.1 就有）：两个隐藏 input 同 id，
+  getElementById 只认第一个，第二个是死 markup。两侧各删一个。
+- **docs 死函数 `doBatch`**：唯一调用点随双绑定一起没了，留着就是两份批量实现。
+  删除（44 行），测试改为不变式（调用数 = await 数 + 1）。
+- **静态接线测试可被整段注释骗过**（tests）：把 bindSlider/addEventListener 几行
+  注释掉（括号仍配平）测试照样绿，控件变死控件完全看不见。两侧测试都加「只剥
+  注释、保留字符串」的预剥离，变异实测（注释掉真接线 → 立刻红）。
+
+### 备注
+
+- golden 向量 462 → **500**（新增 10 张合成 fixture + 光照五组 38 向量），
+  `tools/golden-diff.mjs` 500 向量 0 失败（worst 5.551e-17，bakeLit 字节全等）。
+- 全套 **597 passed / 1 skipped**；文档口径同步（README 的「网页版没有 bakeLit」
+  清单、WEB-SPEC §2 补 7 个参数键、SITE-SPEC 补采样入口与向量数）。
+- 浏览器全链实测（IAB）：docs 页 light/grain 开关与颗粒滑块三档各自改变预览
+  像素；webui 上传 → 渲染 → 滑块三档出图指纹全不同；素材包两层同光。
+
+
 ## [1.8.1] — 2026-10-11
 
 功能补齐：取景框读数（原版 ``frameRead``）。

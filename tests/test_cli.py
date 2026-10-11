@@ -418,6 +418,144 @@ def test_render_overlay_modes(tmp_path: Path, photo: Path, char: Path) -> None:
         assert d > 0, f"{a} 与 {b} 输出相同"
 
 
+# ─────────────────────── --overlay 多层组合（逗号） ───────────────────────
+
+#: overlay 回归共用的摆放参数：CLI 与 oracle 必须跑同一套，防止两边参数漂移
+_OV_EXTRA = ("--pitch", "12")
+
+
+def _render_overlay_png(photo: Path, char: Path, out: Path, overlay) -> bytes:
+    """跑一遍 render（可带 --overlay），返回落盘 PNG 的字节。"""
+    argv = ["render", str(photo), str(char), "-o", str(out), *_OV_EXTRA]
+    if overlay is not None:
+        argv += ["--overlay", overlay]
+    assert main(argv) == 0, overlay
+    return out.read_bytes()
+
+
+def _overlay_oracle(layers, photo: Path, char: Path, out: Path) -> bytes:
+    """把 layers（按给出顺序）逐层手工叠到出图上，返回 PNG 字节。
+
+    单层时即**改动前** ``_apply_overlay`` 的路径（cli.py 旧 :813-825 逐字对译：
+    compose_shot → 按 dtype 量化 → 对应的那一个 ``hud.draw_*`` → save_png），
+    是「单选 --overlay 逐位不变」的基准；多层时按 canonical 序连叠，是组合
+    语义的基准。好处：不依赖被改代码本身，解析/叠层顺序被悄悄改坏就会红。
+    """
+    from arcam.cli import _compose_kw, _placement, _pose, build_parser
+    from arcam.compose import compose_shot
+    from arcam.hud import draw_figure, draw_grid, draw_horizon, draw_hud_text
+    from arcam.i18n import t
+    from arcam.video import image_to_rgb01, image_to_rgba01, save_png
+
+    args = build_parser().parse_args(
+        ["render", str(photo), str(char), "-o", str(out), *_OV_EXTRA])
+    src01 = image_to_rgb01(photo)
+    char01 = image_to_rgba01(char)
+    height, width = src01.shape[:2]
+    cam, subj = _pose(args, width, height)
+    shot = compose_shot(src01, char01, subj, cam, **_compose_kw(args))
+    arr = np.asarray(shot.shot)
+    img = arr if arr.dtype == np.uint8 else \
+        np.clip(arr.astype(np.float64) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    for layer in layers:
+        if layer == "grid":
+            img = draw_grid(img, cam, subj.lateral_m)
+        elif layer == "horizon":
+            img = draw_horizon(img, cam, t("horizon", lang="zh"))
+        elif layer == "figure":
+            img = draw_figure(img, cam, subj)
+        else:
+            img, _hints = draw_hud_text(img, cam, subj, has_char=True,
+                                        canvas_size=(width, height), lang="zh",
+                                        shot=args.shot, mode=args.mode,
+                                        placement=_placement(char01, subj, cam, args))
+    save_png(img, out)
+    return out.read_bytes()
+
+
+def test_render_overlay_single_layer_byte_identical(tmp_path, photo, char) -> None:
+    """单选四层与改动前逐字节一致（--overlay 改逗号组合的向后兼容红线）。
+
+    旧命令行（--overlay grid 等）的输出一个字节都不能差：基准是对译出来的
+    改动前单层路径（见 _overlay_oracle），不是被改代码本身。
+    """
+    for layer in ("grid", "horizon", "figure", "hud"):
+        got = _render_overlay_png(photo, char, tmp_path / f"one-{layer}.png", layer)
+        want = _overlay_oracle([layer], photo, char, tmp_path / f"old-{layer}.png")
+        assert got == want, f"--overlay {layer} 输出与改动前不一致"
+
+
+def test_render_overlay_combo_canonical_order(tmp_path, photo, char) -> None:
+    """组合按 canonical 序叠：书写顺序不影响结果（hud,grid == grid,hud）。"""
+    want = _overlay_oracle(["grid", "hud"], photo, char, tmp_path / "old-gh.png")
+    for given in ("grid,hud", "hud,grid", " hud , grid ", "grid, hud"):
+        got = _render_overlay_png(photo, char, tmp_path / "combo.png", given)
+        assert got == want, f"--overlay {given!r} 未按 canonical 序（grid→hud）叠"
+
+
+def test_render_overlay_combo_stacks_every_layer(tmp_path, photo, char) -> None:
+    """组合把每一层都画上：与无叠层/任一单层都不同（防某一层静默不画）。"""
+    base = _render_overlay_png(photo, char, tmp_path / "plain.png", None)
+    grid = _render_overlay_png(photo, char, tmp_path / "g.png", "grid")
+    horizon = _render_overlay_png(photo, char, tmp_path / "h.png", "horizon")
+    combo = _render_overlay_png(photo, char, tmp_path / "gh.png", "grid,horizon")
+    for other, name in ((base, "无叠层"), (grid, "grid 单层"), (horizon, "horizon 单层")):
+        assert combo != other, f"组合输出与{name}相同（有层没画上）"
+    assert combo == _overlay_oracle(["grid", "horizon"], photo, char,
+                                    tmp_path / "old-gh2.png")
+
+
+def test_render_overlay_duplicate_name_dedups(tmp_path, photo, char) -> None:
+    """重复名去重（保首次出现）：grid,grid 与单选 grid 逐字节相同。"""
+    once = _render_overlay_png(photo, char, tmp_path / "g.png", "grid")
+    assert _render_overlay_png(photo, char, tmp_path / "gg.png", "grid,grid") == once
+    assert _render_overlay_png(photo, char, tmp_path / "ggg.png",
+                               "grid,grid,grid") == once
+
+
+def test_render_overlay_note_lists_actual_layers(tmp_path, photo, char,
+                                                 capsys) -> None:
+    """提示文案列**实际叠的层序**（canonical 序）；单层时与从前逐字相同。"""
+    out = tmp_path / "n.png"
+    assert main(["render", str(photo), str(char), "-o", str(out),
+                 *_OV_EXTRA, "--overlay", "grid"]) == 0
+    assert "｜已叠 HUD 层：grid\n" in capsys.readouterr().out
+    assert main(["render", str(photo), str(char), "-o", str(out),
+                 *_OV_EXTRA, "--overlay", "hud,grid"]) == 0
+    printed = capsys.readouterr().out
+    assert "｜已叠 HUD 层：grid+hud" in printed      # canonical 序，不是书写序
+    assert "hud+grid" not in printed
+
+
+def test_overlay_rejects_bad_names(tmp_path, photo, char, capsys) -> None:
+    """未知名/空段 → argparse 用法错误 exit 2（不抛 traceback），并列合法值。"""
+    for cmd in ("render", "watch"):
+        for bad in ("grid,foo", "grid,", ",grid", "grid,,horizon",
+                    "grid,horizon,bogus", "GRID"):
+            argv = [cmd, str(photo), str(char), "-o", str(tmp_path / "x.png"),
+                    "--overlay", bad]
+            if cmd == "watch":
+                argv.append("--once")
+            with pytest.raises(SystemExit) as e:
+                main(argv)
+            assert e.value.code == 2, (cmd, bad)
+            err = capsys.readouterr().err
+            assert "grid/horizon/figure/hud" in err, (cmd, bad, err)
+
+
+def test_watch_overlay_combo_matches_render(tmp_path, photo, char) -> None:
+    """watch 路径同样走 _apply_overlay：组合值与 render 同参逐字节相同。"""
+    watch_out = tmp_path / "watch.png"
+    assert main(["watch", str(photo), str(char), "-o", str(watch_out),
+                 "--once", *_OV_EXTRA, "--overlay", "hud,grid"]) == 0
+    render_out = _render_overlay_png(photo, char, tmp_path / "render.png", "grid,hud")
+    assert watch_out.read_bytes() == render_out
+    # 与任一单层不同（两层都真的叠上了）
+    only_grid = _render_overlay_png(photo, char, tmp_path / "g.png", "grid")
+    only_hud = _render_overlay_png(photo, char, tmp_path / "h.png", "hud")
+    assert watch_out.read_bytes() not in (only_grid, only_hud)
+
+
 # ─────────────────────── 批量 / 配方 / 对比网格 / GIF（新功能） ───────────────────────
 
 def _make_photo(path, seed=0):
@@ -1071,3 +1209,33 @@ def test_prep_keeps_result_when_content_survives(tmp_path, capsys):
     with Image.open(out) as im:
         assert im.size == (100, 100), "透明边应该被裁掉"
     assert "自动裁掉了四周的空白边" in capsys.readouterr().out
+
+
+def test_render_rejects_negative_grain_scale_and_shadow_opacity(
+    tmp_path: Path, photo: Path, char: Path
+) -> None:
+    """--grain-scale/--shadow-opacity 负数报用法错误（v1.9.0 合并修复）。
+
+    0 是有语义的合法值（关颗粒/关阴影，网页两侧滑块最左档），负数则是静默
+    失效：乘在 gAmp/SH_ALPHA 上被夹成 0，出图与 0 逐字节相同、零提示。
+    webapp.py 对同两键 400，CLI 这里 exit 2 并列出来值，两边同一口径。
+    """
+    import os
+    import subprocess
+
+    env = {**os.environ, "PYTHONPATH": str(SRC)}
+    for flag in ("--grain-scale", "--shadow-opacity"):
+        proc = subprocess.run(
+            [sys.executable, "-m", "arcam", "render", str(photo), str(char),
+             "-o", str(tmp_path / "x.png"), flag, "-1"],
+            cwd=str(SRC.parent), env=env, capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 2, f"{flag} -1 应报用法错误：{proc.stderr[-200:]}"
+        assert "应 >= 0" in proc.stderr, f"{flag} 的报错应说明口径：{proc.stderr[-200:]}"
+    # 0 放行（真出图，与 --no-grain/--no-shadow 同效但不报错）
+    out = tmp_path / "g0.png"
+    proc = subprocess.run(
+        [sys.executable, "-m", "arcam", "render", str(photo), str(char),
+         "-o", str(out), "--grain-scale", "0"],
+        cwd=str(SRC.parent), env=env, capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stderr
+    assert out.is_file()

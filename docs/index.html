@@ -43,7 +43,6 @@
         <span class="dz-name empty" id="photo-name">未选择</span>
       </div>
       <input type="file" id="file-photo" accept="image/*" hidden>
-      <input type="file" id="file-photos" accept="image/*" multiple hidden>
       <!-- 批量：多选照片 → 同一立绘同一组参数 → 一个 zip（客户端合成） -->
       <input type="file" id="file-photos" accept="image/*" multiple hidden>
 
@@ -77,10 +76,13 @@
         <p class="hint" id="edit-note"></p>
       </details>
 
-      <!-- 效果开关（v1.3.0）：shadow 真生效；light/grain 网页版仅状态显示 -->
+      <!-- 效果开关（v1.3.0/v1.9.0）：shadow/light/grain 网页版均真生效
+           （v1.9.0 起 arcam-lighting.js 移植 bakeLit，颗粒强度可调） -->
       <details class="fold">
         <summary data-t="fold.fx">效果开关</summary>
         <div class="check-grid">
+          <label class="chk"><input type="checkbox" id="fx-light" checked> <span data-t="btn.light">光线匹配</span></label>
+          <label class="chk"><input type="checkbox" id="fx-grain" checked> <span data-t="btn.grain">颗粒匹配</span></label>
           <label class="chk"><input type="checkbox" id="fx-shadow" checked> <span data-t="btn.shadow">接触阴影</span></label>
           <label class="chk"><input type="checkbox" id="fx-hud-grid" checked> <span data-t="btn.grid">地面网格</span></label>
           <label class="chk"><input type="checkbox" id="fx-hud-horizon"> <span data-t="btn.horizon">地平线</span></label>
@@ -94,10 +96,14 @@
           <label for="p-shadow-op-rng">阴影浓度 <span class="val" id="p-shadow-op-val">1.00</span></label>
           <input type="range" id="p-shadow-op-rng" min="0" max="2" step="0.05" value="1">
         </div>
+        <div class="param-row">
+          <label for="p-grain-scale-rng">颗粒强度 <span class="val" id="p-grain-scale-val">1.00</span></label>
+          <input type="range" id="p-grain-scale-rng" min="0" max="3" step="0.05" value="1">
+        </div>
         <div class="btn-row">
           <button type="button" id="btn-autofix" data-t="btn.autoFix">自动摆正</button>
         </div>
-        <p class="hint" data-t="hint.fxWeb">网页版只叠阴影开关；光线/颗粒烘焙为本地版专属（JS 侧无 bakeLit）</p>
+        <p class="hint" data-t="hint.fxWeb">网页版同样烘焙环境光与颗粒，颗粒强度可调</p>
       </details>
 
       <!-- 3D 立绘（MMD）：可选的一条路（C1 第一阶段；上游 index.html:258-306 / 1508-1710）。
@@ -304,7 +310,7 @@
       </div>
 
     </div>
-    <p class="hint">环境光 / tone 色调匹配 / 遮挡未移植到网页版（tone 开关保留，合成时忽略）；LiDAR 深度驱动与视频模式为本地版专属。</p>
+    <p class="hint">tone 色调匹配 / 遮挡未移植到网页版（tone 开关保留，合成时忽略）；LiDAR 深度驱动与视频模式为本地版专属。</p>
   </section>
 
   <!-- 状态条 + scene.json -->

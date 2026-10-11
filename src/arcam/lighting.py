@@ -373,11 +373,14 @@ def _to_u8_rgba(char_rgba: np.ndarray) -> np.ndarray:
 
 
 def bake_lit(char_rgba: np.ndarray, sample: LightSample | None,
-             canvas: tuple[int, int], *, grain: bool = True) -> np.ndarray:
+             canvas: tuple[int, int], *, grain: bool = True,
+             grain_scale: float = 1.0) -> np.ndarray:
     """把立绘按采样到的环境亮度/色温烘一版（gamma 曲线 + 白平衡 + 饱和 + 颗粒）。
 
     对应 ``bakeLit``（index.html:1285-1447）+ ``charLum``（1263-1283）+
     ``grainTile``（1168-1180）+ ``litScaleBucket``（1455-1458）。
+    ``grain_scale``（默认 1.0）：颗粒强度倍率，乘在原版 gAmp 上；1.0 时逐位
+    一致（v1.9.0 新增的创作控制，不影响冻结的 LUT 三段语义）。
     ``sample`` 为 None 时按原版「总开关关 / 采样无效」分支**原样返回立绘**
     （index.html:1305-1306）。``grain=False`` 只门控颗粒那一段（原版
     ``LIGHT_GRN`` 开关，index.html:1142）——曲线/白平衡/饱和的数值一个字节
@@ -411,7 +414,8 @@ def bake_lit(char_rgba: np.ndarray, sample: LightSample | None,
     if grain:
         lit_scale = (canvas[0] / w_px) if (canvas and canvas[0] > 0 and w_px > 0) else 1.0
         g_amp = (clampn(GRN_MAX * (1.0 - env_lum * 1.35), GRN_MIN, GRN_MAX)
-                 * clampn(1.0 / lit_scale_bucket(lit_scale), 1.0, GRN_COMP_MAX))
+                 * clampn(1.0 / lit_scale_bucket(lit_scale), 1.0, GRN_COMP_MAX)
+                 * grain_scale)          # v1.9.0 强度倍率；1.0 = 原版逐位一致
 
     r = lut_r[src[..., 0]].astype(np.float64)
     g = lut_g[src[..., 1]].astype(np.float64)

@@ -100,7 +100,8 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
                  env_overrides: dict | None = None,
                  shadow: bool = True, grain: bool = True,
                  sample_light: bool = True,
-                 shadow_az: float = 0.0, shadow_opacity: float = 1.0) -> ComposedShot:
+                 shadow_az: float = 0.0, shadow_opacity: float = 1.0,
+                 grain_scale: float = 1.0) -> ComposedShot:
     """composeShot 六步（index.html:3673-3701）。
 
     ① ``R = frameRect(frame_key)``
@@ -152,14 +153,16 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
         light=light, mode=mode, size_pct=size_pct, char_scale=char_scale,
         rot_basis=rot_basis, tone=tone, shot=shot, edge_bar=edge_bar,
         depth=depth, shadow=shadow, grain=grain, sample_light=sample_light,
-        shadow_az=shadow_az, shadow_opacity=shadow_opacity)
+        shadow_az=shadow_az, shadow_opacity=shadow_opacity,
+        grain_scale=grain_scale)
     # 立绘层与照片**同一个裁切框**：同一份 frame_key、同一套光，两张图才逐像素对应
     _, _, layer_rgba = _engine(
         None, char_rgba01, subj, cam, frame_key,
         light=light_used, mode=mode, size_pct=size_pct, char_scale=char_scale,
         rot_basis=rot_basis, tone=False, shot=shot, edge_bar=edge_bar,
         depth=depth, shadow=shadow, grain=grain, sample_light=sample_light,
-        shadow_az=shadow_az, shadow_opacity=shadow_opacity)
+        shadow_az=shadow_az, shadow_opacity=shadow_opacity,
+        grain_scale=grain_scale)
     return ComposedShot(shot=shot_rgba[..., :3], rect=rect,
                         light=light_used, char_layer=layer_rgba, env=env)
 
@@ -174,7 +177,8 @@ def compose_char_layer(char_rgba01: np.ndarray, subj: Subject, cam: Camera, *,
                        env_overrides: dict | None = None,
                        shadow: bool = True, grain: bool = True,
                        sample_light: bool = True,
-                       shadow_az: float = 0.0, shadow_opacity: float = 1.0
+                       shadow_az: float = 0.0, shadow_opacity: float = 1.0,
+                       grain_scale: float = 1.0
                        ) -> tuple[np.ndarray, Rect]:
     """buildCharCanvas（index.html:3709-3712）：同变换、不铺帧的透明立绘层。
 
@@ -214,7 +218,8 @@ def compose_char_layer(char_rgba01: np.ndarray, subj: Subject, cam: Camera, *,
         light=light, mode=mode, size_pct=size_pct, char_scale=char_scale,
         rot_basis=rot_basis, tone=False, shot=shot, edge_bar=edge_bar,
         depth=depth, shadow=shadow, grain=grain, sample_light=sample_light,
-        shadow_az=shadow_az, shadow_opacity=shadow_opacity)
+        shadow_az=shadow_az, shadow_opacity=shadow_opacity,
+        grain_scale=grain_scale)
     return layer_rgba, rect
 
 
@@ -226,7 +231,8 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
             depth: LiDARFrame | None = None,
             shadow: bool = True, grain: bool = True,
             sample_light: bool = True,
-            shadow_az: float = 0.0, shadow_opacity: float = 1.0
+            shadow_az: float = 0.0, shadow_opacity: float = 1.0,
+            grain_scale: float = 1.0
             ) -> tuple[Rect, LightSample | None, np.ndarray]:
     """composeShot 的公共引擎：返回 ``(rect, light_used, rgba_uint8)``。
 
@@ -285,7 +291,8 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
         ambient = m.mean if m is not None else None
         drawn = char_rgba01
         if m is not None:
-            drawn = bake_lit(drawn, m, (js_round(c.w), js_round(c.h)), grain=grain)
+            drawn = bake_lit(drawn, m, (js_round(c.w), js_round(c.h)), grain=grain,
+                             grain_scale=grain_scale)
         # 阴影是"场景"的一部分：自由模式不知道地面在哪，不铺（index.html:3117）；
         # shadow=False 是显式开关（原版 LIGHT_SHD，index.html:3050 声明 / 3116 门）
         shadow_layer = None

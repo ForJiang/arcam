@@ -10,10 +10,13 @@
  *   ① rect = frameRect(frame, W, H)
  *   ② 铺帧：photoCanvas 非空 → drawImage 整屏铺满（原版 g.drawImage(src,0,0,W,H)；
  *      照片与画布同尺寸时即 1:1  blit，cv 像素 = 视频像素）
- *   ③ 采光 —— **v1 不做**：light / tone / bakeLit / occlusion 全不在本期范围，
- *      params.light 与 params.tone 接受但忽略，返回值的 light 恒 null
+ *   ③ 采光：照片路径且 params.light 为真 → lightRegionRect 按立绘落位算采样框，
+ *      在**铺帧后的画布**上 measureRegion 出 32 级分布 + RGB 均值（Python _engine
+ *      的 sample_light 门；light 关 → 不采，bakeLit 按原版同分支原样返回立绘）
  *   ④ 摆位（core.currentPlacement 按 mode 分派）→ translate(u,v) → rotate(rot)
- *      → 先铺接触阴影 → 再 drawImage 立绘（锚点 = 图心，占局部 (-w/2,-h/2,w,h)）
+ *      → 先铺接触阴影 → 再 drawImage 立绘（锚点 = 图心，占局部 (-w/2,-h/2,w,h)）。
+ *      有采样时立绘先过 bakeLit（gamma 曲线 + R/B 白平衡 + 饱和度 + 颗粒）写成
+ *      新画布再画（tone / occlusion 仍不在本期范围）
  *   ⑤ 整数 off 画布裁切：off 尺寸 max(1,jsRound(R.w))×max(1,jsRound(R.h))，
  *      drawImage(full, -jsRound(R.x), -jsRound(R.y))；越界目标像素保持透明黑
  *      （对应导出 JPEG 的黑边）
@@ -37,7 +40,12 @@
  *   charName  立绘文件名，写 scene.character.name（默认 'character.png'）
  *   char      buildScene 专用：立绘图（鸭子类型，取 .width/.height 写
  *             character.image）；null → character 记 null（同 build_scene 判据）
- *   light / tone  **接受但忽略**（v1 无采光、无色调匹配；README「未移植」注明）
+ *   light     环境光烘焙总门（默认 true = Python compose_shot 的 sample_light 缺省）：
+ *             照片路径为真才采光 + 烘光；关掉则立绘原样（bakeLit 的同名分支）
+ *   grain     颗粒开关（默认 true，原版 LIGHT_GRN）：只门控 bakeLit 的颗粒那一段，
+ *             曲线/白平衡/饱和照算 —— 关掉颗粒不等于关掉光
+ *   grainScale 颗粒强度倍率（默认 1，乘在原版 gAmp 上；1.0 时与原版逐位一致）
+ *   tone      仍**接受但忽略**（v1 无色调匹配；README「未移植」注明）
  *
  * 与 Python 侧的已知差异（均为「回到本形」的有意选择，非 bug）：
  *   · 立绘层路径：Python 的入参/出参只有 RGB 画布，没有透明底可铺，于是用黑底 +
@@ -50,6 +58,11 @@
  *     所致（compose.py:56-57）；换画幅请传 params.frame。
  *   · 铺帧是 drawImage 五参语义（与原版一致）：同尺寸 1:1，不一致拉伸铺满；
  *     Python 离线侧对尺寸不符改为抛 ValueError。
+ *   · 采光从**铺帧后的画布**上读（_engine 的「正要导出的这一帧」口径）：drawImage
+ *     五参在照片与画布不同尺寸时是拉伸，读原图会与 region 不同坐标系。
+ *   · 烘光只发生在 composeShot 的照片路径；composeCharLayer 是透明底路径，没有
+ *     照片可采，按原版 buildCharCanvas 之外的退化分支**不烘**（Python 侧该入口由
+ *     调用方把照片那一遍采到的光传进来，所以层与出图同光；两侧入口签名不同）。
  *   · 阴影层 1×1 是 contactShadowAlpha 的「不画」标记（全透明，对应 Python 的
  *     zeros((1,1,4))）：drawSprite 直接略过该次 no-op drawImage；其余尺寸一律画
  *     （原版也无条件画）。Python 的跳过判据是「层内 alpha 最大值 > 0」（要读像素），
@@ -65,6 +78,7 @@
  */
 
 import { frameRect, currentPlacement, focalPx, project } from './arcam-core.js';
+import { measureRegion, bakeLit, lightRegionRect } from './arcam-lighting.js';
 
 /* ── 接触阴影常量（sprite.py:39-48，index.html:3044-3049）────────────────── */
 const SH_BAND = 0.085;    // 取立绘底部 8.5% 当「落地轮廓」
@@ -389,11 +403,24 @@ function normalizeParams(params) {
     //   丢掉，composeShot/composeCharLayer 里的分支永远不生效（静默失效）。
     charDraw: typeof p.charDraw === 'function' ? p.charDraw : null,
     shadow: p.shadow === undefined ? true : !!p.shadow,
+    // 环境光烘焙总门（原版 LIGHT_ON，Python 侧 sample_light）。⚠ 必须在这儿放行
+    // —— normalizeParams 是白名单，漏放 light 会让 UI 开关静默失效（v1 起这一带
+    // 就是 no-op，charDraw 那条注释记的就是同一个坑）。默认 true = Python
+    // compose_shot 的 sample_light 缺省值（照片路径采光 + 烘光）。
+    light: p.light === undefined ? true : !!p.light,
+    // 颗粒开关（原版 LIGHT_GRN）：只门控 bakeLit 的颗粒段，曲线/白平衡/饱和照算。
+    grain: p.grain === undefined ? true : !!p.grain,
     // 阴影方向/浓度（v1.6.0；与 Python compose_shot 的 shadow_az/shadow_opacity
     // 对应）。⚠ 同样必须在这儿放行——normalizeParams 是白名单，漏放这两个键
     // 会让滑块静默失效（charDraw 那条注释记的就是同一个坑）。
     shadowAz: numOr(p.shadowAz, 0.0),
     shadowOpacity: numOr(p.shadowOpacity, 1.0),
+    grainScale: numOr(p.grainScale, 1.0),
+    // 外部采好的光（composeCharLayer 用）：透明底路径自己没有照片可采，由调用方
+    // 把 composeShot/sampleLightFor 采到的 sample 传进来，两层才同一套光
+    // （Python compose_shot 第二遍传 light_used 就是这个语义）。⚠ 同样必须放行
+    // —— normalizeParams 是白名单，漏了这键素材包的 character.png 会静默不烘。
+    sample: (p.sample === undefined || p.sample === null) ? null : p.sample,
   };
 }
 
@@ -425,16 +452,82 @@ function cropOffset(full, rect) {
   return off;
 }
 
-/** 立绘层与 composeShot 共用的绘制段（②之后的透明底/照片底 + ④画立绘）。 */
-function drawInto(full, charImg, subj, cam, p, rect) {
+/**
+ * ③ 采光（_engine:268-277）：照片路径且 p.light 为真时，量「正要导出的这一帧」。
+ * 采样框由 lightRegionRect 按**立绘**尺寸与落位算（Python _light_region_rect：
+ * lightRegion + clampRegion），采样源是铺帧后的 full —— drawImage 五参在照片与
+ * 画布不同尺寸时是拉伸，读原图会与 region 不同坐标系（Python 侧 src 与 cam 尺寸
+ * 不符直接抛 ValueError）。light 关 / 无照片 → null，bakeLit 按原版同分支原样
+ * 返回立绘。rect 必须原样传入：自由模式吸附后落位会变，采光框要跟着吸附后的立绘走。
+ */
+function sampleLight(full, charImg, subj, cam, p, rect) {
+  const cw = charImg === null || charImg === undefined
+    ? 0 : Math.trunc(Number(charImg.width));
+  const ch = charImg === null || charImg === undefined
+    ? 0 : Math.trunc(Number(charImg.height));
+  const region = lightRegionRect(cw, ch, subj, cam, {
+    mode: p.mode,
+    shot: p.shot,
+    charScale: p.charScale,
+    rotBasis: p.rotBasis,
+    sizePct: p.sizePct,
+    edgeBar: p.edgeBar,
+    rect: rect,
+  });
+  const px = pixelsOf(full);
+  if (px === null) return null;
+  return measureRegion(px.data, px.width, px.height, region, 32);
+}
+
+/** 立绘像素过一遍 bakeLit 写成新画布（sample 为 null 时原样返回 charImg）。
+ *  canvasW = jsRound(c.w)（Python bake_lit 的 canvas[0]，只用到这一个数 —— 颗粒
+ *  缩放补偿 litScale = 目标宽/原生宽）。p.grain 门控颗粒段，p.grainScale 是倍率。 */
+function litCanvas(charImg, c, sample, p) {
+  if (sample === null || sample === undefined) return charImg;
+  const px = pixelsOf(charImg);
+  if (px === null) return charImg;
+  const out = bakeLit(px.data, px.width, px.height, sample, jsRound(c.w),
+                      p.grain, p.grainScale);
+  const cv = makeCanvas(px.width, px.height);
+  const g = ctx2d(cv);
+  const img = g.createImageData(px.width, px.height);
+  img.data.set(out);
+  g.putImageData(img, 0, 0);
+  return cv;
+}
+
+/**
+ * 照片路径的采光入口（composeShot ③ 的同一算法，单独暴露给立绘层用）。
+ * 照片按画布尺寸铺一遍再量（与 composeShot 的 full 同坐标系），light 关 /
+ * 无照片 → null。供 composeCharLayer 拿「与 shot.jpg 同一套」的光 —— Python
+ * compose_shot 第二遍传 light_used 的 JS 对译。
+ */
+export function sampleLightFor(photoCanvas, charImg, subj, cam, params) {
+  const p = normalizeParams(params);
+  checkMode(p.mode);
+  const { W, H } = camDims(cam);
+  if (photoCanvas === null || photoCanvas === undefined || !p.light) return null;
+  const full = makeCanvas(W, H);
+  ctx2d(full).drawImage(photoCanvas, 0, 0, W, H);
+  const rect = frameRect(p.frame, W, H);
+  return sampleLight(full, charImg, subj, cam, p, rect);
+}
+
+/** 立绘层与 composeShot 共用的绘制段（②之后的透明底/照片底 + ④画立绘）。
+ *  sample = ③ 采到的光（null = 不烘，立绘原样进 drawSprite）。 */
+function drawInto(full, charImg, subj, cam, p, rect, sample) {
   const c = placementFor(charImg, subj, cam, p, rect);
   if (c !== null && c !== undefined) {
     // shadow 门（原版 LIGHT_SHD；v1.3.0 与 Python/本地 web 同语义）。
-    // ⚠ JS 侧没有 bakeLit（v1 起环境光烘焙就是 no-op，light 恒 null），
-    //   所以 light/grain 两开关在网页版只影响**状态显示**、不改像素——
-    //   这一点在 UI 提示里写明，不假装生效。
     const wantShadow = p.mode === 'ground' && p.shadow !== false;
-    drawSprite(full, charImg, c, {
+    // 烘光（bakeLit，lighting.py:375）：sample 非 null 才过 LUT + 白平衡 + 饱和度
+    // + 颗粒，写成新画布再画。⚠ 两处口径照 Python _engine:291-295：
+    //   · 颗粒缩放补偿用**落位后**的目标宽（litScale = jsRound(c.w)/立绘原生宽），
+    //     所以必须在 c 算出来之后才烘；
+    //   · 接触阴影始终用**未烘**的立绘（Python contact_shadow_layer 的第一个入参
+    //     也是 char_rgba01），只把烘过的图交给 drawSprite。
+    const img = litCanvas(charImg, c, sample, p);
+    drawSprite(full, img, c, {
       shadow: wantShadow,                  // 阴影是「场景」的一部分：自由模式不铺
       ambient: p.ambient,
       shadowLayer: wantShadow
@@ -454,7 +547,7 @@ function drawInto(full, charImg, subj, cam, p, rect) {
  *   shot —— 按 R 裁好的出图（照片路径取 RGB；透明底路径带 alpha）；
  *   rect —— 实际裁切框 {x,y,w,h}（frameRect 的产物）；
  *   scene —— buildScene 的产物（version 1，与原版 scene.json 同构）；
- *   light —— v1 不做采光，恒 null。
+ *   light —— 恒 null（SITE-SPEC §2 冻结的返回形状；采到的光只进 bakeLit）。
  */
 export function composeShot(photoCanvas, charImg, subj, cam, params) {
   const p = normalizeParams(params);
@@ -468,16 +561,21 @@ export function composeShot(photoCanvas, charImg, subj, cam, params) {
   if (photoCanvas !== null && photoCanvas !== undefined) {
     g.drawImage(photoCanvas, 0, 0, W, H);
   }
-  // ③ 采光：v1 不做（params.light / params.tone 接受但忽略，light 恒 null）
+  // ③ 采光：照片路径且 light 开着才量（Python _engine 的 sample_light 门）
+  const sample = (photoCanvas !== null && photoCanvas !== undefined && p.light)
+    ? sampleLight(full, charImg, subj, cam, p, rect)
+    : null;
   // ④ 画立绘（先阴影后图）。params.charDraw 是 3D 层的挂钩点（FEATURE-SPEC §5）：
   //    给了就用它画（mmd.js 的 WebGL 层），返回的落位对象仍进 scene.json；
-  //    没给走原 drawInto。钩子签名 (full, rect) -> placement。
+  //    没给走原 drawInto（sample 非 null 时先烘光）。钩子签名 (full, rect) -> placement。
   const c = (typeof p.charDraw === 'function')
     ? p.charDraw(full, rect)
-    : drawInto(full, charImg, subj, cam, p, rect);
+    : drawInto(full, charImg, subj, cam, p, rect, sample);
   // ⑤ 小数偏移裁切（越界目标像素保持透明黑）
   const shot = cropOffset(full, rect);
-  // ⑥ 配方 + 光（恒 null）
+  // ⑥ 配方 + 光。light 恒 null（SITE-SPEC §2 冻结的返回形状）：采到的光只进
+  //    bakeLit，不随出图带回；立绘层要同一套光用 sampleLightFor 采一份传进去
+  //    （doExportBundle 就这么干，见 composeCharLayer 的 params.sample）。
   const scene = buildScene(rect, c, subj, cam, Object.assign({}, p, { char: charImg }));
   return { shot: shot, rect: rect, scene: scene, light: null };
 }
@@ -499,8 +597,10 @@ export function composeCharLayer(charImg, subj, cam, params) {
   const full = makeCanvas(W, H);          // 透明底：原版空 canvas 天然带 alpha
   // ④ 画立绘（先阴影后图）。params.charDraw 是 3D 层的挂钩点（同 composeShot）：
   //    3D 开着时这一层就是 MMD 的透明层（模型自身的 alpha），同一个裁切框。
+  //    sample 走 params.sample（默认 null = 不烘）：透明底自己没有照片可采，
+  //    调用方（doExportBundle）用 sampleLightFor 采一份传进来，与 shot.jpg 同光。
   if (typeof p.charDraw === 'function') p.charDraw(full, rect);
-  else drawInto(full, charImg, subj, cam, p, rect);
+  else drawInto(full, charImg, subj, cam, p, rect, p.sample);
   const layer = cropOffset(full, rect);
   return { layer: layer, rect: rect };
 }

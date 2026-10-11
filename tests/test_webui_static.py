@@ -76,6 +76,8 @@ PARAM_KEYS = ["x", "d", "h", "hp", "feq", "pitch", "roll", "shot",
               "light", "grain", "shadow",
               # 阴影方向/浓度（v1.6.0 新增创作控制，默认 = 原版行为）
               "shadow_az", "shadow_opacity",
+              # 颗粒强度倍率（v1.9.0）：乘在 bake_lit 颗粒幅度上，1.0 = 原版逐位一致
+              "grain_scale",
               # 3D 路径（v1.7.0）：后端只出照片底，MMD 层客户端合成
               "base_only"]
 
@@ -131,6 +133,49 @@ class _IdCollector(HTMLParser):
         self.stack.pop()
 
 
+def _strip_comments(src, html=False):
+    """只剥注释、**保留字符串字面量**，供「接线是否真在代码里」的子串断言用。
+
+    为什么需要它：裸 ``"bindSlider('grain_scale', …)" in js`` 会被整段注释
+    骗过 —— 把那两行注释掉（括号仍配平）测试照样绿，滑块变成死控件，正是
+    「控件存在但到不了执行点」这个最高发 bug 类的检测漏洞（v1.9.0 对抗复核
+    变异实测复现）。``_strip_js_noise`` 连字符串一起抹，不能用于子串断言。
+    ``html=True`` 时连 ``<!-- -->`` 一起剥（注释掉的控件同样不该算数）。
+    """
+    out = []
+    i, n = 0, len(src)
+    while i < n:
+        if html and src.startswith("<!--", i):
+            j = src.find("-->", i)
+            i = n if j < 0 else j + 3
+            continue
+        c = src[i]
+        if c in "'\"`":                      # 字符串/模板字面量整体跳过
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == c:
+                    j += 1
+                    break
+                j += 1
+            out.append(src[i:j])
+            i = j
+            continue
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i)
+            i = n if j < 0 else j + 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _strip_js_noise(src):
     """去掉注释与字符串，供大括号/圆括号/方括号配平启发式使用。"""
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
@@ -157,6 +202,22 @@ def _pages_files():
         "arcam-render.js": (DOCS / "arcam-render.js").read_text(encoding="utf-8"),
         "matte.js": (DOCS / "matte.js").read_text(encoding="utf-8"),
     }
+
+
+def _enclosing_fn(js, pos):
+    """返回包含位置 pos 的最近**命名**函数声明首行（`async function x(` / `function x(`）。
+
+    匿名回调（`.then(function (res) {`）不匹配：那些位置归到外层命名函数，
+    对本仓库的调用点判定够用（真正的匿名回调里的下载点另有专项测试盯）。
+    """
+    best = None
+    for m in re.finditer(r"^(async\s+)?function\s+(\w+)\s*\(", js, flags=re.M):
+        if m.start() < pos:
+            best = m
+        else:
+            break
+    assert best is not None, f"位置 {pos} 不在任何命名函数里"
+    return best.group(0)
 
 
 def _ids_of(html):
@@ -388,6 +449,30 @@ def test_param_schema_matches_cli():
     assert re.search(r'id="row-edge-bar"[^>]*hidden', html), "edge-bar 行应默认 hidden"
 
 
+def test_grain_scale_slider_wired():
+    """颗粒强度滑块（v1.9.0）：HTML 控件 + app.js 绑定 + 记忆写回三段齐全。
+
+    「参数存在于代码但永远到不了执行点」是本项目最高发 bug 类，所以逐段钉死：
+    滑块 id 在 HTML、bindSlider 把它绑到 grain_scale 参数键、
+    syncControlsFromParams 把它写回控件（缺任何一段 = 假控件）。
+    """
+    html, js = _files()["index.html"], _files()["app.js"]
+    # 剥注释后再断言：注释掉的控件/接线不算数（见 _strip_comments 的说明）
+    html, js = _strip_comments(html, html=True), _strip_comments(js)
+    assert 'id="p-grain-scale-rng" min="0" max="3" step="0.05" value="1"' in html, \
+        "index.html 缺颗粒强度滑块（量程 0–3、步进 0.05、默认 1）"
+    assert 'id="p-grain-scale-val"' in html, "index.html 缺颗粒强度数值 span"
+    assert "bindSlider('grain_scale', 'p-grain-scale-rng', 'p-grain-scale-val'" in js, \
+        "app.js 未把颗粒强度滑块绑到 grain_scale 参数键"
+    # 参数记忆恢复后必须写回控件，否则界面与 state.params 不一致
+    body = _strip_comments(_fn_body(js, "syncControlsFromParams"))
+    assert re.search(r"\$\('p-grain-scale-rng'\)\.value\s*=\s*state\.params\.grain_scale",
+                     body), "syncControlsFromParams 未写回颗粒强度滑块"
+    assert re.search(r"\$\('p-grain-scale-val'\)\.textContent\s*=\s*"
+                     r"state\.params\.grain_scale\.toFixed\(2\)", body), \
+        "syncControlsFromParams 未写回颗粒强度数值 span"
+
+
 def test_param_keys_match_webapp():
     """前端参数键必须与 webapp.py 的 PARAM_DEFAULTS 逐字一致（键名漂移 → 400）。"""
     src = (ROOT / "src" / "arcam" / "webapp.py").read_text(encoding="utf-8")
@@ -399,6 +484,71 @@ def test_param_keys_match_webapp():
     for label, js in (("webui", _files()["app.js"]), ("docs", _pages_files()["app.js"])):
         got = set(re.findall(r"([a-z_]+)\s*:", _s_defaults(js)))
         assert got == set(PARAM_KEYS), f"{label}/app.js 的 S_DEFAULTS 键不一致：{sorted(got)}"
+
+
+def test_save_blob_fallback_chain():
+    """保存兜底链（原版 index.html:3407-3453 移植）：share → picker → download。
+
+    静态钉死四件事：三段兜底与顺序、AbortError 静默取消、doExport 不再有
+    内联 a.download 重复实现、所有 saveBlob 调用点都带 await（漏 await 会
+    静默丢下载——saveBlob 现在是 async，调用处不 await 就抓不到取消）。
+    """
+    js = _files()["app.js"]
+    raw = _fn_body(js, "saveBlob")
+    # ① 三段兜底齐全且顺序正确（share 最早、<a download> 垫底）
+    for frag in ("navigator.canShare", "navigator.share", "showSaveFilePicker",
+                 "createWritable", "URL.createObjectURL"):
+        assert frag in raw, f"saveBlob 缺兜底段 {frag}"
+    order = [raw.index("navigator.canShare"), raw.index("showSaveFilePicker"),
+             raw.index("URL.createObjectURL")]
+    assert order == sorted(order), "saveBlob 兜底顺序应为 share → picker → download"
+    # 安卓 WebView 桥明确不移植（本项目没有安卓壳，原版 index.html:3417-3426）
+    assert "ArcLog" not in raw, "saveBlob 不应出现安卓桥 ArcLog"
+    assert "new File([blob], name, { type: blob.type || 'application/octet-stream' })" in raw, \
+        "saveBlob 未用 File 包装 blob（blob.type 为空时兜底 octet-stream）"
+    assert "navigator.canShare({ files: [file] })" in raw and \
+        "navigator.share({ files: [file] })" in raw, "share 段缺 files 传参"
+    assert "window.showSaveFilePicker({ suggestedName: name })" in raw, \
+        "picker 段缺 suggestedName"
+    # ② 用户取消静默返回；四返回值都在
+    assert "AbortError" in raw and "'cancel'" in raw, "取消应静默返回 'cancel'"
+    for ret in ("'share'", "'picker'", "'download'"):
+        assert ret in raw, f"saveBlob 缺返回值 {ret}"
+    # ③ doExport 收敛到 saveBlob，不再内联一份下载代码
+    exp = _fn_body(js, "doExport")
+    assert re.search(r"await\s+saveBlob\(", exp), "doExport 应 await saveBlob"
+    assert "createElement" not in exp and ".download" not in exp, \
+        "doExport 里还有内联下载代码（重复实现，应收敛到 saveBlob）"
+    # ④ 调用点数 = await 调用点数（定义行那处不算）：漏一个 await 就是静默失效
+    calls = len(re.findall(r"\bsaveBlob\(", js))
+    awaited = len(re.findall(r"await\s+saveBlob\(", js))
+    assert calls == awaited + 1, f"saveBlob 共 {calls} 处引用、仅 {awaited} 处带 await"
+    # ⑤ 每个调用点都落在 async 函数里：saveBlob 是 async，同步函数里连 await
+    #  都写不了，Promise 会被静默丢掉（用户点下载没反应）
+    for m in re.finditer(r"\bsaveBlob\(", js):
+        if js[:m.start()].rstrip().endswith("function"):
+            continue                      # 定义行本身
+        head = _enclosing_fn(js, m.start())
+        assert head.startswith("async function"), \
+            f"saveBlob 调用点在非 async 函数里（{head.strip()}），await 写不了"
+
+
+def test_batch_wired_once():
+    """批量出图只能有一条接线（v1.6.0 双接线事故回归）。
+
+    踩过的坑：init 里内联防 change 调 doBatch，bindBatch() 又各自绑了一份
+    change —— 选一次文件发两次 /api/batch、下两个 zip、状态条还被覆盖。
+    这里钉死唯一接线 + 唯一 fetch 点。
+    """
+    js = _strip_comments(_files()["app.js"])
+    assert "function bindBatch" not in js and re.search(r"\bbindBatch\(\)", js) is None, \
+        "bindBatch 是与 init 里 doBatch 接线重复的死代码（双触发批量）"
+    assert re.search(r"\$\('file-photos'\)\.addEventListener\('change'", js), \
+        "init 里应保留 file-photos 的 change 接线（调 doBatch）"
+    assert len(re.findall(r"\$\('file-photos'\)\.addEventListener\('change'", js)) == 1, \
+        "file-photos 的 change 只能绑一次（双绑 = 批量跑两遍）"
+    assert js.count("fetch('/api/batch'") == 1, "/api/batch 应只有一个 fetch 点"
+    assert "function doBatch(files)" in js, "doBatch 是批量出图的唯一实现"
 
 
 def test_css_tokens_and_responsive():

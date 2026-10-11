@@ -136,14 +136,62 @@ def _add_placement(p: argparse.ArgumentParser) -> None:
     g.add_argument("--shadow-az", type=float, default=0.0, metavar="度",
                    help="阴影光线方位角（默认 0 = 影子正落脚下，与原版一致；非 0 = "
                         "斜射拖偏。原版 2D 阴影无方向，这是离线侧新增控制）")
-    g.add_argument("--shadow-opacity", type=float, default=1.0, metavar="倍",
-                   help="阴影浓度倍率（默认 1.0，乘在原版 SH_ALPHA 上）")
+    g.add_argument("--shadow-opacity", type=_nonneg, default=1.0, metavar="倍",
+                   help="阴影浓度倍率（默认 1.0，乘在原版 SH_ALPHA 上；0 = 不铺阴影）")
+    g.add_argument("--grain-scale", type=_nonneg, default=1.0, metavar="倍",
+                   help="颗粒强度倍率（默认 1.0 = 原版逐位一致；乘在 bakeLit 的 gAmp 上，"
+                        "只改颗粒那段，曲线/白平衡/饱和不动；0 = 不撒颗粒）")
+
+
+def _nonneg(value: float) -> float:
+    """argparse ``type=``：非负浮点（0 合法、负数报用法错误 exit 2）。
+
+    ``--shadow-opacity``/``--grain-scale`` 的 0 是有语义的合法值（关阴影 /
+    关颗粒，网页两侧滑块最左档就是 0），负数则是静默失效：乘在 gAmp/SH_ALPHA
+    上被夹成 0，出图与 0 逐字节相同、零提示（v1.9.0 对抗复核实测）。webapp.py
+    对同两键本就 400，CLI 不能另立一套口径。
+    """
+    v = float(value)
+    if v < 0.0:
+        raise argparse.ArgumentTypeError(f"应 >= 0，得到 {v:g}")
+    return v
 
 
 def _add_lang(p: argparse.ArgumentParser) -> None:
     """语言开关（FEATURE-SPEC §3）：只影响人话输出，不改任何数值行为。"""
     p.add_argument("--lang", default="zh", choices=list(LANGS), metavar="语言",
                    help="人话输出语言：zh 中文 / en English（默认 zh；数值行为不变）")
+
+
+#: ``--overlay`` 的合法层名与 **canonical 叠放次序**（grid → horizon → figure →
+#: hud）——与原版取景区四个辅助开关的排列一致（网页侧 webui/index.html:127-129
+#: 前三项 + HUD 读数，各自独立）。用户书写顺序不改变实际叠放次序：
+#: ``--overlay hud,grid`` 仍按 grid+hud 叠。
+OVERLAY_LAYERS = ("grid", "horizon", "figure", "hud")
+
+
+def _overlay_layers(value) -> tuple[str, ...]:
+    """``--overlay`` 的值 → canonical 序、去重（保首次出现）的层名元组。
+
+    兼两职：build_parser 里当 argparse ``type=`` 用（坏值抛
+    :class:`argparse.ArgumentTypeError` → 用法错误 exit 2，不抛 traceback）；
+    ``_apply_overlay``/提示文案里当归一化用（顺带收裸字符串的 API 直调）。
+    逗号分段、逐段去空白；空段与未知名都报错并列合法值；重复名去重。
+    返回顺序恒为 :data:`OVERLAY_LAYERS` 的 canonical 序，与书写顺序无关。
+    """
+    if value is None:
+        return ()
+    parts = ([p.strip() for p in value.split(",")] if isinstance(value, str)
+             else [str(p).strip() for p in value])
+    if any(not p for p in parts):
+        raise argparse.ArgumentTypeError(
+            f"层名不能为空（--overlay 用逗号组合多层，如 grid,horizon；合法值："
+            f"{'/'.join(OVERLAY_LAYERS)}；收到 {value!r}）")
+    bad = [p for p in parts if p not in OVERLAY_LAYERS]
+    if bad:
+        raise argparse.ArgumentTypeError(
+            f"未知层名 {'/'.join(bad)}（合法值：{'/'.join(OVERLAY_LAYERS)}）")
+    return tuple(layer for layer in OVERLAY_LAYERS if layer in set(parts))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -201,9 +249,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--depth", metavar="DEPTH", default=None,
                    help="LiDAR 深度帧：16-bit PNG/TIF（毫米）/ .npy（米）/ .depth（magic "
                         "ARCD）/ 人像 HEIC；E1-E4 全开，显式参数仍优先")
-    p.add_argument("--overlay", default=None, choices=("grid", "horizon", "figure", "hud"),
-                   metavar="层", help="出图后叠一层 HUD 取景装饰（默认不叠；原版那些"
-                                      "只在实时预览里画，出图不带——要排查构图时才开）")
+    p.add_argument("--overlay", default=None, type=_overlay_layers,
+                   metavar="层[,层...]",
+                   help="出图后叠 HUD 取景装饰层，可用逗号组合多层（如 grid,horizon,figure；"
+                        "合法值 grid/horizon/figure/hud，重复名只算一次）。实际叠放次序"
+                        "恒为 grid→horizon→figure→hud（与原版取景四开关排列一致），"
+                        "与书写顺序无关。默认不叠；原版那些只在实时预览里画，出图不带"
+                        "——要排查构图时才开")
     _add_placement(p)
     p.set_defaults(func=cmd_render)
 
@@ -240,8 +292,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--interval", type=float, default=1.0, metavar="秒",
                    help="轮询间隔（默认 1.0；文件系统事件在各平台可靠性不一，轮询最稳）")
     p.add_argument("--once", action="store_true", help="只跑一遍就退出（不进入监视循环）")
-    p.add_argument("--overlay", default=None, choices=("grid", "horizon", "figure", "hud"),
-                   metavar="层", help="出图后叠一层 HUD 取景装饰（默认不叠）")
+    p.add_argument("--overlay", default=None, type=_overlay_layers,
+                   metavar="层[,层...]",
+                   help="出图后叠 HUD 取景装饰层，可用逗号组合多层（如 grid,horizon；"
+                        "合法值 grid/horizon/figure/hud，重复名只算一次）。实际叠放次序"
+                        "恒为 grid→horizon→figure→hud（与原版取景四开关排列一致），"
+                        "与书写顺序无关（默认不叠）")
     _add_placement(p)
     _add_lang(p)
     p.set_defaults(func=cmd_watch)
@@ -507,7 +563,8 @@ def _compose_kw(args) -> dict:
                 grain=not getattr(args, "no_grain", False),
                 sample_light=not _light_off(args),
                 shadow_az=getattr(args, "shadow_az", 0.0),
-                shadow_opacity=getattr(args, "shadow_opacity", 1.0))
+                shadow_opacity=getattr(args, "shadow_opacity", 1.0),
+                grain_scale=getattr(args, "grain_scale", 1.0))
 
 
 def _light_off(args) -> bool:
@@ -598,15 +655,18 @@ def cmd_render(args) -> int:
         img_u8 = base_arr
     else:
         img_u8 = np.clip(base_arr.astype(np.float64) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    overlay_layers = _overlay_layers(args.overlay)
     overlay_note = ""
-    if args.overlay:
-        # HUD 只叠指定的一层（原版出图不带 HUD，这是排查构图的显式开关）
+    if overlay_layers:
+        # HUD 按 canonical 序逐层叠（原版出图不带 HUD，这是排查构图的显式开关）
         img_u8, overlay_note = _apply_overlay(
             img_u8, args, cam_eff, subj_eff, width, height,
             placement=_placement(char01, subj_eff, cam_eff, args))
     save_png(img_u8, out)
+    # 提示里列**实际叠的层序**（canonical 序，不是用户书写序）；单层时与从前逐字相同
     print(f"已出图 {out}（{width}×{height}）"
-          + (f"｜已叠 HUD 层：{args.overlay}{overlay_note}" if args.overlay else ""))
+          + (f"｜已叠 HUD 层：{'+'.join(overlay_layers)}{overlay_note}"
+             if overlay_layers else ""))
     if args.scene:
         scene_path = Path(args.scene)
         if scene_path.parent and not scene_path.parent.exists():
@@ -790,12 +850,14 @@ def _parse_vary(items: list[str]) -> list[tuple[str, list[str]]]:
 
 def _apply_overlay(img_u8: np.ndarray, args, cam: Camera, subj: Subject,
                    width: int, height: int, placement=None) -> tuple[np.ndarray, str]:
-    """按 ``--overlay`` 叠一层 HUD 取景装饰，返回 (画后的图, 附加提示文案)。
+    """按 ``--overlay`` 逐层叠 HUD 取景装饰，返回 (画后的图, 附加提示文案)。
 
     原版出图**不带** HUD（index.html:3487-3490：那些只在实时预览的 draw() 里画），
-    这是排查构图的显式开关。四层（grid/horizon/figure/hud）各自 1:1 对译
-    :mod:`arcam.hud`；render 与 watch 共用本函数——曾有两份逐字重复的分支，
-    改一处漏一处（v1.8 审计收敛）。
+    这是排查构图的显式开关。``--overlay`` 可逗号组合多层（如 ``grid,horizon``），
+    四层（grid/horizon/figure/hud）各自 1:1 对译 :mod:`arcam.hud`，按
+    :data:`OVERLAY_LAYERS` 的 canonical 序依次叠——书写顺序不影响叠放次序；
+    render 与 watch 共用本函数——曾有两份逐字重复的分支，改一处漏一处
+    （v1.8 审计收敛）。
 
     ``hud`` 层的构图提示必须喂**本遍实际落位**（placement）与 ``--shot/--mode``：
     不喂的话三分线/顶满/偏小/浮空那几条永远不触发（原版 compositionHints 读的
@@ -806,19 +868,20 @@ def _apply_overlay(img_u8: np.ndarray, args, cam: Camera, subj: Subject,
     lang = getattr(args, "lang", "zh")
     canvas = img_u8.copy()
     note = ""
-    if args.overlay == "grid":
-        canvas = draw_grid(canvas, cam, subj.lateral_m)
-    elif args.overlay == "horizon":
-        canvas = draw_horizon(canvas, cam, t("horizon", lang=lang))
-    elif args.overlay == "figure":
-        canvas = draw_figure(canvas, cam, subj)
-    else:
-        canvas, hints = draw_hud_text(canvas, cam, subj, has_char=True,
-                                      canvas_size=(width, height), lang=lang,
-                                      shot=args.shot, mode=args.mode,
-                                      placement=placement)
-        if hints:
-            note = "；构图提示：" + "；".join(hints)
+    for layer in _overlay_layers(args.overlay):
+        if layer == "grid":
+            canvas = draw_grid(canvas, cam, subj.lateral_m)
+        elif layer == "horizon":
+            canvas = draw_horizon(canvas, cam, t("horizon", lang=lang))
+        elif layer == "figure":
+            canvas = draw_figure(canvas, cam, subj)
+        else:  # hud
+            canvas, hints = draw_hud_text(canvas, cam, subj, has_char=True,
+                                          canvas_size=(width, height), lang=lang,
+                                          shot=args.shot, mode=args.mode,
+                                          placement=placement)
+            if hints:
+                note = "；构图提示：" + "；".join(hints)
     return canvas, note
 
 

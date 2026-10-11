@@ -557,3 +557,23 @@ def test_bake_lit_saturation_toward_environment():
         return float((img[..., 0].astype(np.int64) - img[..., 2].astype(np.int64)).mean())
 
     assert spread(flat) < spread(vivid)
+
+
+def test_bake_lit_grain_scale():
+    """grain_scale：1.0 逐位一致；0/3 明显不同且方向正确（v1.9.0 创作控制）。"""
+    from arcam.lighting import bake_lit
+    rng = np.random.default_rng(11)
+    char = np.zeros((120, 90, 4))
+    char[..., :3] = rng.random((120, 90, 3))
+    char[..., 3] = 1.0
+    sample = LightSample(mean=(0.35, 0.33, 0.30), levels=(0.2, 0.3, 0.5))
+    canvas = (1920, 1080)
+    base = bake_lit(char, sample, canvas, grain=True)
+    assert np.array_equal(base, bake_lit(char, sample, canvas, grain=True, grain_scale=1.0))
+    off = bake_lit(char, sample, canvas, grain=True, grain_scale=0.0)
+    up = bake_lit(char, sample, canvas, grain=True, grain_scale=3.0)
+    assert not np.array_equal(base, off), "grain_scale=0 应无颗粒"
+    assert not np.array_equal(base, up), "grain_scale=3 应更强"
+    # 关颗粒（grain=False）与 grain_scale=0 不等价：前者整段不算（含 lit_scale），
+    # 后者只把幅度乘 0——两者都无颗粒，但前者连 lit_scale_bucket 都不进。
+    assert np.array_equal(off, bake_lit(char, sample, canvas, grain=True, grain_scale=0.0))

@@ -197,7 +197,7 @@ TXT: dict[str, tuple[str, str]] = {
     "fold.fx": ("效果开关", "Effects"),
     "btn.horizon": ("地平线", "Horizon"),
     "hint.fx": ("HUD 三件只画在预览上，不出图；光影三件直接改变出图", "The three HUD toggles only affect the preview, never the export; the three lighting toggles change the export"),
-    "hint.fxWeb": ("网页版只叠阴影开关；光线/颗粒烘焙为本地版专属（JS 侧无 bakeLit）", "Web build only has the shadow toggle; light and grain baking are local-only (no bakeLit in JS)"),
+    "hint.fxWeb": ("网页版同样烘焙环境光与颗粒，颗粒强度可调", "The web build also bakes ambient light and grain; grain strength is adjustable"),
     "btn.fullscreen": ("全屏取景", "Fullscreen"),
     "hint.fullscreen": ("全屏后拖画面摆位、参数照旧可调（Esc 退出）", "Drag to position while fullscreen; parameters still work (Esc to exit)"),
     "note.paramsRestored": ("已恢复上次的参数", "Parameters restored from last session"),

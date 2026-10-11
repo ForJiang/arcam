@@ -594,6 +594,16 @@ function bindSelect(key, id, parse) {
   el.addEventListener('change', () => {
     state.params[key] = parse ? parse(el.value) : el.value;
     if (key === 'mode') syncModeVisibility();
+    // 画幅改了立刻刷取景框读数——不能等 renderNow：没上传照片时它早退，
+    // 读数会停在旧画幅上（原版在 hud() 里每帧刷，没这个坑）。
+    if (key === 'frame') {
+      const cv0 = $('preview-canvas');
+      if (cv0 && cv0.width >= 8) {
+        const fr = $('frame-read');
+        const R = window.arcamHud.frameRect(state.params.frame, cv0.width, cv0.height);
+        if (fr && R) fr.textContent = t('read.frame', Math.round(R.w), Math.round(R.h));
+      }
+    }
     scheduleRender();
   });
 }
@@ -733,6 +743,7 @@ function applyLang() {
   $('btn-lang').title = t('lang.switch');
   if (window.arcamLive && window.arcamLive.active) $('btn-live').textContent = t('btn.liveStop');
   else $('btn-live').textContent = t('btn.live');
+  drawHudOverlay();   // 取景框读数非 data-t，切语言手动刷
 }
 
 /* ================= 11. 修图线（纯色底/裁边/还原 + kind 弹窗） ================= */
@@ -1400,6 +1411,9 @@ function drawHudOverlay() {
   if (HUD_ON.horizon) window.arcamHud.drawHorizon(ctx, cam, t('horizon'));
   if (HUD_ON.body) window.arcamHud.drawFigure(ctx, cam, subj);
   window.arcamHud.drawHud(ctx, cam, subj, !!state.charCanvas, null, p.shot, p.mode);
+  // 取景框读数（原版 frameRead，index.html:1971）
+  const fr = $('frame-read');
+  if (fr && R) fr.textContent = t('read.frame', Math.round(R.w), Math.round(R.h));
 }
 
 init();

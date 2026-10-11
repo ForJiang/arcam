@@ -331,3 +331,9 @@ button:hover { background: var(--btn-bg-hover); }
 .d3d-row input[type="range"] { grid-column: 1 / -1; width: 100%; }
 .d3d-row .val { color: var(--muted); font-variant-numeric: tabular-nums; }
 #model3dRow button[data-busy] { opacity: .55; pointer-events: none; }
+
+/* 取景框读数（原版 frameRead，index.html:355）——选完画幅就知道出图裁到多大 */
+.frame-read {
+  font-size: 12px; color: var(--muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}

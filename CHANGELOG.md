@@ -2,6 +2,28 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.8.1] — 2026-10-11
+
+功能补齐：取景框读数（原版 ``frameRead``）。
+
+### 新增
+
+- 两个网页版的画幅选择行新增**取景框读数**（原版 index.html:355/1971：
+  hud() 里每帧刷「出图 {W}×{H}」）——选完画幅立刻知道出图裁到多大，不用等
+  渲染完看尺寸。五个画幅逐个实测（1:1→9×9、4:5→7×9、9:16→5×9、16:9/满幅→
+  16×9），中英切换同步刷新。
+- 画幅切换**即时刷新**读数（不等 renderNow）：没上传照片时 renderNow 早退，
+  读数会停在旧画幅上——原版在 hud() 每帧刷没这个坑，webui/docs 是事件驱动
+  渲染，补了 bindSelect 的 frame 分支。
+
+### 备注
+
+- 本轮同时完成全状态核查：完整用户旅程（上传 → 渲染 → 三种导出 → prep →
+  reset → batch）本机实测通过；线上与本地 11 个关键文件逐字节一致；线上 mmd/
+  子目录 6 个资源与 vendor/ 44MB 模型 206 就绪；HUD 实测绘制 26721 像素且
+  构图提示正确触发（pitch 45° → 「人物会被压扁」）。
+- 全套 **570 passed / 1 skipped**。
+
 ## [1.8.0] — 2026-10-11
 
 全项目审计轮次（五分区并行 + 编排者集成）：修复 12 个问题，收敛两侧分叉。
@@ -510,6 +532,7 @@ cli/video/matting · depth/plane/lidar/webapp · webui/Pages JS），修复 16 �
   `point(u,v,1)·depth`），与径向（cosθ）解释的仲裁结论一致，有回归测试钉住。
 - scene.json 与原版 1:1 同构（字段序/单位/toFixed 口径），未因本次审计变动。
 
+[1.8.1]: https://github.com/ForJiang/arcam/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/ForJiang/arcam/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/ForJiang/arcam/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/ForJiang/arcam/compare/v1.5.0...v1.6.0

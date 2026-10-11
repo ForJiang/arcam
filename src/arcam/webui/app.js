@@ -474,6 +474,14 @@ function bindSelect(key, id, parse) {
     state.params[key] = parse ? parse(el.value) : el.value;
     markTouched(key);
     if (key === 'mode') syncModeVisibility();
+    // 画幅改了立刻刷取景框读数——不能等 renderNow：没上传照片时它早退，
+    // 读数会停在旧画幅上（原版在 hud() 里每帧刷，没这个坑）。
+    if (key === 'frame') {
+      var cv0 = $('preview-canvas');
+      if (cv0 && cv0.width >= 8) {
+        updateFrameRead(frameRectJs(state.params.frame, cv0.width, cv0.height));
+      }
+    }
     scheduleRender();
   });
 }
@@ -526,6 +534,8 @@ function applyLang() {
   } else {
     $('btn-live').textContent = window.arcamT('btn.live');
   }
+  // 取景框读数不是 data-t 元素（内容是 t('read.frame', W, H) 拼的），切语言要手动刷
+  drawHudOverlay();
 }
 
 function initLang() {
@@ -735,6 +745,15 @@ function drawHudOverlay() {
   if (HUD_ON.horizon) window.arcamHud.drawHorizon(ctx, cam, window.arcamT('horizon'));
   if (HUD_ON.body) window.arcamHud.drawFigure(ctx, cam, subj);
   window.arcamHud.drawHud(ctx, cam, subj, !!state.charName, null, p.shot, p.mode);
+  updateFrameRead(R);
+}
+
+//: 取景框读数（原版 frameRead，index.html:1971：hud() 里每帧刷「出图 W×H」）。
+//  选完画幅立刻知道裁到多大，不用等渲染完看尺寸。语言跟着 applyLang 走。
+function updateFrameRead(R) {
+  var el = $('frame-read');
+  if (!el || !R) return;
+  el.textContent = window.arcamT('read.frame', Math.round(R.w), Math.round(R.h));
 }
 
 //: frameRect 的 JS 对译（frames.py 同公式；aspect 表与 Python FRAMES 逐字一致）

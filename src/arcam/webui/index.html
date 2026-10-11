@@ -256,6 +256,9 @@
           <option value="9:16">9:16</option>
           <option value="满幅" selected>满幅</option>
         </select>
+        <!-- 取景框读数（原版 frameRead，index.html:1971：hud() 里每帧刷）。
+             选完画幅就知道出图裁到多大——不用等渲染完看尺寸。 -->
+        <span class="frame-read" id="frame-read"></span>
       </div>
 
       <div class="param-row">

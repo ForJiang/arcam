@@ -244,6 +244,20 @@ def test_video_bad_track_rejected(tmp_path: Path, char: Path, photo: Path) -> No
     assert code == 1
 
 
+def test_video_bg_non_image_hints_frame_dir(tmp_path, track_file, char, capsys) -> None:
+    """--bg 指到非图片（视频文件最常见）：人话提示"只收单图/帧目录"，退出 1。
+
+    修前只有 PIL 的 ``cannot identify image file`` —— 用户看不出该拿帧目录来。
+    """
+    fake = tmp_path / "clip.mp4"
+    fake.write_bytes(b"\x00\x00\x00 ftypmp42not really a video")
+    code = main(["video", str(track_file), str(char), "-o", str(tmp_path / "frames"),
+                 "--bg", str(fake)])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--bg 只收单张图片或帧目录" in err and "frame_%06d.png" in err
+
+
 def test_missing_inputs(tmp_path: Path, char: Path, capsys: pytest.CaptureFixture) -> None:
     code = main(["render", str(tmp_path / "nope.jpg"), str(char),
                  "-o", str(tmp_path / "o.png")])
@@ -384,6 +398,53 @@ def test_module_entrypoint(tmp_path: Path, photo: Path, char: Path) -> None:
         cwd=str(SRC.parent), env=env, capture_output=True, text=True, timeout=300)
     assert proc.returncode == 0, proc.stderr
     assert out.is_file()
+
+
+# ─────────────────────── web 子命令的旗标翻译 ───────────────────────
+
+def test_web_translates_argv(monkeypatch) -> None:
+    """web → webapp.main 的 argv 翻译：host/port 透传，--no-open 才加。"""
+    import arcam.webapp as webapp
+    seen: dict = {}
+
+    def fake_main(argv):
+        seen["argv"] = list(argv)
+        return 0
+
+    monkeypatch.setattr(webapp, "main", fake_main)
+    assert main(["web", "--host", "0.0.0.0", "--port", "9000"]) == 0
+    assert seen["argv"] == ["--host", "0.0.0.0", "--port", "9000"]
+    assert main(["web", "--no-open"]) == 0
+    assert seen["argv"] == ["--host", "127.0.0.1", "--port", "8765", "--no-open"]
+
+
+def test_web_open_flags_mutually_exclusive(monkeypatch, capsys) -> None:
+    """--open 与 --no-open 互斥（v2.0.0 审计：--open 曾是"解析了没人读"的摆设）。
+
+    启动器固定传 ``arcam web --open --port``（WEB-SPEC §4），所以 --open 必须
+    继续被接受（且不传 --no-open 给 webapp.main）；两个一起给没有可执行语义，
+    进互斥组后由 parser 挡成用法错误 exit 2。
+    """
+    import arcam.webapp as webapp
+    seen: dict = {}
+
+    def fake_main(argv):
+        seen["argv"] = list(argv)
+        return 0
+
+    monkeypatch.setattr(webapp, "main", fake_main)
+
+    for argv, expect_no_open in ((["web", "--open"], False),
+                                 (["web", "--no-open"], True),
+                                 (["web"], False)):
+        seen.clear()
+        assert main(argv) == 0, argv
+        assert ("--no-open" in seen["argv"]) is expect_no_open, (argv, seen["argv"])
+
+    with pytest.raises(SystemExit) as e:
+        main(["web", "--open", "--no-open"])
+    assert e.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
 
 
 def test_render_overlay_modes(tmp_path: Path, photo: Path, char: Path) -> None:
@@ -789,6 +850,48 @@ def test_contact_sheet_rejects_duplicate_axis(tmp_path, photo, char, capsys):
     assert "给了两次" in capsys.readouterr().err
 
 
+def test_vary_rejects_bad_enum_and_number(tmp_path, photo, char, capsys):
+    """--vary 的枚举/edge_bar/数字取值不合法 → 退出码 1 + 人话错误（P1 回归钉）。
+
+    复现（v2.0.0 审计）：``--vary shot=bogus`` / ``frame=bogus`` /
+    ``rot_basis=bogus`` / ``edge_bar=9`` 全部**退出码 0** —— 值被 compose 侧
+    的原版 JS 兜底安静吃掉（SHOTS['全身'] / FRAMES[key]||0 / 非 frame 即
+    world / bar∉1..4 不吸附），出图与默认值无差，正是"参数解析了但没生效"。
+    顶层旗标有 argparse choices 挡着，这两个字符串路径当时没有。
+    """
+    bad = [("shot", "bogus", "全身/膝上"), ("frame", "bogus", "满幅"),
+           ("rot_basis", "bogus", "world/frame"), ("edge_bar", "9", "0/1/2/3/4"),
+           ("edge_bar", "abc", "不是整数"), ("d", "abc", "不是数字")]
+    for key, value, expect in bad:
+        code = main(["contact-sheet", str(photo), str(char), "-o", str(tmp_path / "s.png"),
+                     "--vary", f"{key}={value}"])
+        assert code == 1, (key, value)
+        err = capsys.readouterr().err
+        assert expect in err, (key, value, err)
+
+
+def test_spec_rejects_bad_enum_and_number(tmp_path, photo, char, capsys):
+    """--spec 与 --vary 同一套取值口径（共用一个 coercion，两边都要挡）。"""
+    bad = [("shot", "bogus", "全身/膝上"), ("frame", "bogus", "满幅"),
+           ("rot_basis", "bogus", "world/frame"), ("edge_bar", "7", "0/1/2/3/4"),
+           ("edge_bar", "abc", "不是整数"), ("x", "abc", "不是数字")]
+    for key, value, expect in bad:
+        code = main(["multi", str(photo), str(char), str(char),
+                     "-o", str(tmp_path / "m.png"), "--spec", f"{key}={value}"])
+        assert code == 1, (key, value)
+        err = capsys.readouterr().err
+        assert expect in err, (key, value, err)
+
+
+def test_vary_and_spec_accept_valid_enums(tmp_path, photo, char):
+    """合法枚举取值照旧放行（--vary shot=腰上 / --spec edge_bar=2 + tone=1）。"""
+    assert main(["contact-sheet", str(photo), str(char), "-o", str(tmp_path / "s.png"),
+                 "--vary", "shot=腰上", "--vary", "rot_basis=frame",
+                 "--cell-w", "120"]) == 0
+    assert main(["multi", str(photo), str(char), str(char), "-o", str(tmp_path / "m.png"),
+                 "--mode", "free", "--spec", "edge_bar=2;tone=1;shot=头肩"]) == 0
+
+
 def test_video_gif_export(tmp_path, photo, char, capsys):
     """video --gif：纯 PIL 写出动画 GIF（帧数/循环/时长正确）。"""
     from arcam.video import PoseTrack, PoseKey, save_track
@@ -859,6 +962,40 @@ def test_multi_two_chars(tmp_path, photo, char):
     a = np.asarray(Image.open(out).convert("RGB")).astype(int)
     b = np.asarray(Image.open(single).convert("RGB")).astype(int)
     assert int((np.abs(a - b).sum(2) > 12).sum()) > 500
+
+
+def test_multi_keeps_char_colors(tmp_path, photo, char):
+    """multi 出图必须保留立绘**本色**（P0 回归钉：层被当浮点用 → 人物纯白）。
+
+    复现（v2.0.0 审计）：``compose_char_layer`` 出的是 uint8 0..255，而
+    ``cli._paste_layer`` 把它赋值进 float64 数组后当 [0,1] 喂给
+    ``compose._over`` —— alpha=255 被当成 1.0 的 255 倍，source-over 算出
+    ``base·(1−255) + rgb·255``，再乘 255 clip → **整块立绘变 255,255,255**
+    （实测 1990 个不透明像素全白，而立绘本色是 235,60,200）。旧测试只断言
+    "与照片不同"，纯白块也能过，所以这条钉颜色本身。
+    """
+    out = tmp_path / "multi.png"
+    assert main(["multi", str(photo), str(char), "-o", str(out)]) == 0
+    layer_p = tmp_path / "layer.png"
+    assert main(["char-layer", str(char), "-o", str(layer_p),
+                 "--width", "128", "--height", "160"]) == 0
+    with Image.open(out) as im:
+        multi = np.asarray(im.convert("RGB")).astype(int)
+    with Image.open(layer_p) as im:
+        layer = np.asarray(im.convert("RGBA")).astype(int)
+    opaque = layer[..., 3] == 255
+    assert opaque.sum() > 100, "立绘层里应有成片不透明像素"
+    got = multi[opaque]
+    # ⚠ 直接和立绘层本色比，不是和阈值比：alpha=255 时 source-over 精确等于
+    #   层色，multi 出图在该处必须逐像素等于层色。按通道最小值判会漏——fixture
+    #   绿通道是 0，老 bug 复发时 R/B 饱和到 255 仍能过 >180/>150，而本色
+    #   比较在任何通道上都会红（对抗复核变异实测：删掉 dtype 分流后这条断言红）。
+    drift = int((np.abs(got - layer[opaque][..., :3]).max(axis=1) > 2).sum())
+    assert drift == 0, \
+        f"{drift}/{got.shape[0]} 个不透明像素的颜色与立绘层不符（_paste_layer dtype 老 bug 复发）"
+    # 立绘确实是彩的（不是白块也不是纯照片）：三通道都有动态
+    assert layer[opaque][..., :3].max() > 150 and layer[opaque][..., 1].max() < 100, \
+        "夹具立绘应是非灰的非白色（否则上面的本色比较没有区分力）"
 
 
 def test_multi_spec_validation(tmp_path, photo, char):
@@ -1239,3 +1376,30 @@ def test_render_rejects_negative_grain_scale_and_shadow_opacity(
         cwd=str(SRC.parent), env=env, capture_output=True, text=True, timeout=300)
     assert proc.returncode == 0, proc.stderr
     assert out.is_file()
+
+
+@pytest.mark.parametrize("flag", ["--pitch", "--roll", "--x", "--d", "--h", "--hp",
+                                  "--feq", "--char-scale", "--size-pct", "--shadow-az",
+                                  "--grain-scale", "--shadow-opacity"])
+def test_render_rejects_non_finite_numbers(tmp_path: Path, photo: Path, char: Path,
+                                           flag: str) -> None:
+    """浮点旗标拒 nan/inf（v2.0.0 合并修复）：与人话报错 exit 2，不是静默出图。
+
+    放行 nan 的旧行为：渲染链的 NaN 守卫让落位解不出 → 出一张**没有立绘**的图、
+    退出码 0、零提示（静默失效本类）；webapp 对同一批键本就 400（「不是有限数」），
+    CLI 这里 exit 2，两边同一口径。
+    """
+    import os
+    import subprocess
+
+    env = {**os.environ, "PYTHONPATH": str(SRC)}
+    # 等号形式传参：``--pitch -inf`` 里 ``-inf`` 会被 argparse 当成选项名
+    # （不是合法数字字面量），报的是「expected one argument」——那是 argparse 的
+    # 通用行为，不是本校验的口径话，用 ``--flag=-inf`` 才能走到类型函数
+    for bad in ("nan", "inf", "-inf"):
+        proc = subprocess.run(
+            [sys.executable, "-m", "arcam", "render", str(photo), str(char),
+             "-o", str(tmp_path / "x.png"), f"{flag}={bad}"],
+            cwd=str(SRC.parent), env=env, capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 2, f"{flag} {bad} 应报用法错误：{proc.stderr[-160:]}"
+        assert "应是有限数" in proc.stderr, f"{flag} {bad} 的报错应说明口径"

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import difflib
 import io
 import json
@@ -66,7 +67,7 @@ from arcam.depth import LiDARFrame, align_to_canvas, load_depth
 from arcam.frames import frame_rect
 from arcam.geometry import Camera
 from arcam.matting import anime_cut
-from arcam.numeric import Rect
+from arcam.numeric import Rect, js_to_fixed
 from arcam.placement import FRAMES, SHOTS, Subject, current_placement
 from arcam.plane import CameraEnv
 from arcam.scene import build_scene
@@ -376,9 +377,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="不自动打开浏览器（只用自己贴 URL）")
     args = parser.parse_args(argv)
 
+    if not 0 <= args.port <= 65535:
+        # socket.bind 对越界端口抛的是 OverflowError（不是 OSError），不先拦的话
+        # 用户看到的是裸 traceback 而不是人话（v1.9 审计复现：--port 99999）
+        print(f"错误：端口 {args.port} 不在 0-65535 范围", file=sys.stderr)
+        print("人话：换个 --port（默认 8765；0 = 让内核分配临时端口）。", file=sys.stderr)
+        return 1
     try:
         server = make_server(args.host, args.port, open_browser=not args.no_open)
-    except OSError as exc:
+    except (OSError, OverflowError) as exc:
         print(f"错误：起不来服务（{args.host}:{args.port}）：{exc}", file=sys.stderr)
         print("人话：端口大概被占用了 —— 换个 --port，或先停掉上次的服务。", file=sys.stderr)
         return 1
@@ -553,21 +560,39 @@ def _has_alpha(im: Image.Image) -> bool:
 
 
 def _to_f01(arr_u8: np.ndarray) -> np.ndarray:
-    """uint8 → float64 [0,1]（SPEC §1.2 计算口径，与其他模块一致）。"""
-    return arr_u8.astype(np.float64) / 255.0
+    """uint8 → float64 [0,1]（SPEC §1.2 计算口径，与其他模块一致）。
+
+    先 ``astype`` 再**原地**除：``astype`` 出的就是自己持有的新数组，原地除避免
+    ``/255`` 再复制一整份（12MP 照片峰值 586MB → 293MB，逐位相同）。
+    """
+    out = arr_u8.astype(np.float64)
+    out /= 255.0
+    return out
 
 
 def _downscale01(arr01: np.ndarray, factor: float) -> np.ndarray:
-    """按 factor 双线性降采样 float01 图（预览专用；factor ≥1 原样返回）。"""
+    """按 factor 双线性降采样 float01 图（预览专用；factor ≥1 原样返回）。
+
+    uint8 量化**分块**做（每块 ~2M 元素）：整幅一次算会在 float64 全图上同时
+    压 2-3 份临时数组（12MP 照片峰值 ~585MB，8GB 开发机上直接把机器拖进 swap，
+    实测单次 10.8s）；分块后峰值 ~96MB（uint8 全幅 36MB + 块临时 ~35MB +
+    PIL 拷贝 36MB），同一台机器实测 0.36s。算式与旧实现逐字相同（同 dtype 同
+    表达式），输出逐位一致——只改内存曲线，不改数值。
+    """
     if factor >= 1.0:
         return arr01
     height, width = arr01.shape[:2]
     new_w = max(1, int(round(width * factor)))
     new_h = max(1, int(round(height * factor)))
-    u8 = (np.clip(arr01, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-    mode = "RGBA" if u8.shape[2] == 4 else "RGB"
-    resized = Image.fromarray(np.ascontiguousarray(u8), mode).resize(
-        (new_w, new_h), Image.BILINEAR)
+    channels = arr01.shape[2]
+    u8 = np.empty((height, width, channels), dtype=np.uint8)
+    rows = max(1, (1 << 21) // max(1, width * channels))
+    for y0 in range(0, height, rows):
+        y1 = min(height, y0 + rows)
+        block = arr01[y0:y1]
+        u8[y0:y1] = (np.clip(block, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    mode = "RGBA" if channels == 4 else "RGB"
+    resized = Image.fromarray(u8, mode).resize((new_w, new_h), Image.BILINEAR)
     return np.asarray(resized, dtype=np.uint8).astype(np.float64) / 255.0
 
 
@@ -632,9 +657,6 @@ _BATCH_MAX = 12
 
 def _data_uri_to_rgb01(uri, what: str) -> np.ndarray:
     """dataURI → RGB float64 [0,1]。非 dataURI / 解不开 → ApiError 400。"""
-    import base64
-    import binascii
-    import io
     if not isinstance(uri, str) or not uri.startswith("data:"):
         raise ApiError(400, f"{what} 不是 dataURI",
                        "应形如 data:image/png;base64,…（FileReader.readAsDataURL 的产物）")
@@ -654,7 +676,7 @@ def _data_uri_to_rgb01(uri, what: str) -> np.ndarray:
     except Exception as exc:
         raise ApiError(400, f"{what} 不是合法图片：{type(exc).__name__}",
                        "确认 dataURI 对应的是 PNG/JPEG 等栅格图") from None
-    return arr.astype(np.float64) / 255.0
+    return _to_f01(arr)
 
 
 def _compose(store: Store, params: dict, explicit: set, scale: float = 1.0,
@@ -1201,6 +1223,16 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, f"target 取值 {target!r} 不在可选列表",
                            "target 可选：png（出图）、layer（RGBA 立绘层）、"
                            "bundle（shot.jpg + scene.json + character.png 三件套 zip）")
+        if target in ("layer", "bundle"):
+            # 3D 模式下前端 buildParams 会自动带 base_only=true（app.js:197），
+            # 而 doExport3D 只拦截 png/bundle 两个 target（app.js:424）——
+            # 「下载立绘层」会带着 base_only 落到本端点。base_only 让 compose_shot
+            # 不画立绘（webui 分工：立绘由客户端 WebGL 合成），char_layer 因此
+            # **全透明**：用户下到一张全透明的「立绘层」却收着 HTTP 200，
+            # 没有任何报错（静默错产物，v1.9 审计复现：alpha 全 0）。
+            # layer/bundle 要的就是立绘层本身，与预览的 3D 分工无关，这里显式
+            # 关掉 base_only（2D 路径本就不带该键，行为不变）。
+            params = {**params, "base_only": False}
         started = time.perf_counter()
         with self.server.render_lock:                # type: ignore[attr-defined]
             snap = self._store().snapshot()
@@ -1229,16 +1261,17 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _api_batch(self) -> None:
-        """批量出图（CLI arcam batch 的 web 版；FEATURE-SPEC §7）。
+        """批量出图（CLI ``arcam batch`` 的 web 版；v1.6.0 上线，CHANGELOG
+        「批量出图」节——WEB-SPEC §1 路由表尚未回写本端点，属编排者文档）。
 
         JSON：``{photos: [dataURI, …], params: {…}}`` → zip（每张一个
-        ``shot_<i>.png``，STORED 不压缩、时间戳固定——与 CLI bundle 同口径，
-        同参同图逐字节可复现）。照片以 dataURI 数组进（不扩 multipart 解析：
-        parse_multipart 是同名字段覆盖的 dict，批量要多个 photo 得改它的契约）。
-        单张失败不拖垮整批：跳过的张数进 ``X-Arcam-Batch-Failed`` 头（**只放
-        数字**——HTTP 头是 latin-1，中文原因放进去会 UnicodeEncodeError 直接
-        500，v1.6 踩过），具体原因写进 zip 里的 ``_errors.txt``（UTF-8，只在
-        有失败时才加，不污染全成功的产物）。
+        ``shot_<i>.png``，DEFLATED 压缩、时间戳固定 1980-01-01——与 CLI bundle
+        同一 :func:`_zip_bytes` 口径，同参同图逐字节可复现）。照片以 dataURI
+        数组进（不扩 multipart 解析：parse_multipart 是同名字段覆盖的 dict，
+        批量要多个 photo 得改它的契约）。单张失败不拖垮整批：跳过的张数进
+        ``X-Arcam-Batch-Failed`` 头（**只放数字**——HTTP 头是 latin-1，中文
+        原因放进去会 UnicodeEncodeError 直接 500，v1.6 踩过），具体原因写进
+        zip 里的 ``_errors.txt``（UTF-8，只在有失败时才加，不污染全成功的产物）。
         """
         data = self._read_json()
         params, explicit, _scale = self._params_of(data)
@@ -1500,7 +1533,10 @@ class Handler(BaseHTTPRequestHandler):
             "env": {"height_m": float(env.height_m),           # type: ignore[attr-defined]
                     "pitch_deg": float(env.pitch_deg),         # type: ignore[attr-defined]
                     "roll_deg": float(env.roll_deg),           # type: ignore[attr-defined]
-                    "coverage": round(coverage, 4),
+                    # 与 CLI lidar inspect 同口径（js_to_fixed：ROUND_HALF_UP）。
+                    # round() 是银行家舍入，0.56785 在两侧会一个吐 0.5679 一个吐
+                    # 0.5678——同一帧深度两个入口报两个数（v2.0.0 复核发现）
+                    "coverage": js_to_fixed(coverage, 4),
                     "inliers": int(plane.inliers),
                     "rms": float(plane.rms)},
             "frame": {"width": int(frame.depth_m.shape[1]),

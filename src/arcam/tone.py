@@ -71,13 +71,16 @@ def _percentile(hist: np.ndarray, tot: int) -> tuple[int, int]:
     return lo, hi
 
 
-def tone_stats(layer_rgba01: np.ndarray, bg_rgb01: np.ndarray) -> dict | None:
-    """toneMatchedLayer 的诊断量（原版 ``window.__tone``，index.html:3617-3619）。
+def _tone_prefix(layer_rgba01: np.ndarray, bg_rgb01: np.ndarray) -> dict | None:
+    """tone_stats / tone_matched_layer 共用的前 5 步（index.html:3506-3570）。
 
-    与 :func:`tone_matched_layer` 走同一套前 5 步计算，只是不改像素、只报数。
-    返回 None 的条件与原版的三个自守卫完全一致。``sc`` 按原版 ``+sc.toFixed(3)``
-    的口径走 :func:`arcam.numeric.js_to_fixed`（SPEC §1.4：禁止用 Python 的
-    ``round``/格式化串代替 ``toFixed``）。
+    量化、包围盒、两个均值、亮度 P5/P95 直方图只算**一遍** —— 原先
+    :func:`tone_matched_layer` 先调 :func:`tone_stats` 再把整段原样重算
+    （3024×4032 照片帧上实测 1.26 s → 0.70 s）。⚠ tone_stats 的返回值是
+    **取整后**的诊断量（js_round 过的均值），像素路径不能用，所以这里原样
+    返回未取整的中间量，两个入口各取所需。
+
+    三个自守卫（n<500 / 环带<4 / bn<500）任一不过 → None；形状不符 → ValueError。
     """
     layer = _to_u8(layer_rgba01)
     if layer.ndim != 3 or layer.shape[2] != 4:
@@ -89,9 +92,9 @@ def tone_stats(layer_rgba01: np.ndarray, bg_rgb01: np.ndarray) -> dict | None:
 
     a = layer[..., 3]
     m = a >= TONE_ALPHA_ON
-    if not m.any():
-        return None
     ys, xs = np.nonzero(m)
+    if ys.size == 0:
+        return None
     x0, x1 = int(xs.min()), int(xs.max())
     y0, y1 = int(ys.min()), int(ys.max())
     n = int(xs.size)
@@ -134,12 +137,34 @@ def tone_stats(layer_rgba01: np.ndarray, bg_rgb01: np.ndarray) -> dict | None:
     range_b = max(8, bHi - bLo)
     k_tone = TONE_K_DARK if range_b < 90 else TONE_K_LIT
     t_range = range_m + (range_b - range_m) * k_tone
-    sc = t_range / range_m
+    t_lo = mLo + (bLo - mLo) * k_tone
     return {
-        "model": [js_round(mr), js_round(mg), js_round(mb)],
-        "bg": [js_round(br), js_round(bgc), js_round(bb)],
-        "k": TONE_K, "kTone": k_tone, "mLo": mLo, "mHi": mHi,
-        "bLo": bLo, "bHi": bHi, "sc": js_to_fixed(sc, 3), "n": n, "bn": bn,
+        "layer": layer, "bg": bg, "m": m, "rgb": rgb, "n": n,
+        "mr": mr, "mg": mg, "mb": mb,
+        "rx": rx, "ry": ry, "rw": rw, "rh": rh,
+        "breg": breg, "valid": valid, "bn": bn, "br": br, "bgc": bgc, "bb": bb,
+        "mLo": mLo, "mHi": mHi, "bLo": bLo, "bHi": bHi, "k_tone": k_tone,
+        "t_lo": t_lo, "sc": t_range / range_m,
+    }
+
+
+def tone_stats(layer_rgba01: np.ndarray, bg_rgb01: np.ndarray) -> dict | None:
+    """toneMatchedLayer 的诊断量（原版 ``window.__tone``，index.html:3617-3619）。
+
+    与 :func:`tone_matched_layer` 走同一套前 5 步计算（:func:`_tone_prefix`），
+    只是不改像素、只报数。返回 None 的条件与原版的三个自守卫完全一致。``sc``
+    按原版 ``+sc.toFixed(3)`` 的口径走 :func:`arcam.numeric.js_to_fixed`
+    （SPEC §1.4：禁止用 Python 的 ``round``/格式化串代替 ``toFixed``）。
+    """
+    p = _tone_prefix(layer_rgba01, bg_rgb01)
+    if p is None:
+        return None
+    return {
+        "model": [js_round(p["mr"]), js_round(p["mg"]), js_round(p["mb"])],
+        "bg": [js_round(p["br"]), js_round(p["bgc"]), js_round(p["bb"])],
+        "k": TONE_K, "kTone": p["k_tone"], "mLo": p["mLo"], "mHi": p["mHi"],
+        "bLo": p["bLo"], "bHi": p["bHi"], "sc": js_to_fixed(p["sc"], 3),
+        "n": p["n"], "bn": p["bn"],
     }
 
 
@@ -166,44 +191,21 @@ def tone_matched_layer(layer_rgba01: np.ndarray, bg_rgb01: np.ndarray) -> np.nda
     Returns:
         新 RGBA float64 (H,W,4) 或 None。
     """
-    st = tone_stats(layer_rgba01, bg_rgb01)
-    if st is None:
+    p = _tone_prefix(layer_rgba01, bg_rgb01)
+    if p is None:
         return None
 
-    layer = _to_u8(layer_rgba01)
-    bg = _to_u8(bg_rgb01)
-    h, w = layer.shape[0], layer.shape[1]
+    layer = p["layer"]
     a = layer[..., 3]
-    m = a >= TONE_ALPHA_ON
-    ys, xs = np.nonzero(m)
-    x0, x1 = int(xs.min()), int(xs.max())
-    y0, y1 = int(ys.min()), int(ys.max())
-    n = int(xs.size)
-    rgb = layer[..., :3].astype(np.float64)
-    mr, mg, mb = (float(rgb[..., i][m].sum()) / n for i in range(3))
-
-    pad = js_round(max(x1 - x0, y1 - y0) * 0.2) + 8
-    rx = max(0, x0 - pad)
-    ry = max(0, y0 - pad)
-    rw = min(w, x1 + pad) - rx
-    rh = min(h, y1 + pad) - ry
-    gy = np.arange(ry, ry + rh)
-    gx = np.arange(rx, rx + rw)
-    inside = ((gx[None, :] >= x0) & (gx[None, :] <= x1) &
-              (gy[:, None] >= y0) & (gy[:, None] <= y1))
-    breg = bg[ry:ry + rh, rx:rx + rw, :].astype(np.float64)
-    valid = ~inside
-    bn = int(valid.sum())
-    br, bgc, bb = (float(breg[..., i][valid].sum()) / bn for i in range(3))
-
-    mLo, mHi = st["mLo"], st["mHi"]
-    bLo, bHi = st["bLo"], st["bHi"]
-    range_m = max(8, mHi - mLo)
-    range_b = max(8, bHi - bLo)
-    k_tone = st["kTone"]
-    t_range = range_m + (range_b - range_m) * k_tone
-    t_lo = mLo + (bLo - mLo) * k_tone
-    sc = t_range / range_m
+    m = p["m"]
+    rgb = p["rgb"]
+    mr, mg, mb = p["mr"], p["mg"], p["mb"]
+    rx, ry, rw, rh = p["rx"], p["ry"], p["rw"], p["rh"]
+    breg = p["breg"]
+    br, bgc, bb = p["br"], p["bgc"], p["bb"]
+    mLo = p["mLo"]
+    t_lo = p["t_lo"]
+    sc = p["sc"]
 
     out = layer.copy()
     # 4) 均值平移 + 范围重映射（只动 alpha>=8 的像素；alpha 一步都没动）

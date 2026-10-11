@@ -79,7 +79,6 @@
                w: h * (opts.charAspect || 0.6), h: h };
     }
     // ground：足底 pb 与头顶 pt 的投影（与 groundPlacement 同式）
-    var SHOTS = { "全身": 1.00, "膝上": 0.72, "腰上": 0.47, "胸上": 0.28, "头肩": 0.20 };
     var k = SHOTS[opts.shot || "全身"];
     var yb = (1.0 - k) * subj.hp;
     var pb = project(subj.x, yb - cam.h, subj.d, cam);
@@ -238,6 +237,8 @@
   }
 
   // ── compositionHints（index.html:1890-1937，11 条全并列）─────────
+  // 景别表全文件只此一份（currentPlacementOf 共用；webui 没有 arcam-core，
+  // docs 侧那份改为从 arcam-core.js import —— 两边都不许再出现第二份）
   var SHOTS = { "全身": 1.00, "膝上": 0.72, "腰上": 0.47, "胸上": 0.28, "头肩": 0.20 };
 
   function compositionHints(cam, placement, W, H, shot, mode) {

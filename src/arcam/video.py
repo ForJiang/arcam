@@ -50,6 +50,7 @@ __all__ = [
     "FRAME_FMT",
     "FRAME_SUFFIXES",
     "MP4_NAME",
+    "GIF_NAME",
     "load_track",
     "save_track",
     "sample_track",
@@ -72,6 +73,12 @@ MP4_NAME = "video.mp4"
 
 GIF_NAME = "video.gif"
 """``render_track(gif=True)`` 追加写入的动画 GIF 文件名（纯 PIL）。"""
+
+#: 帧序列的 PNG 压缩级别（PIL 的 0-9）。实测（1080×1920 合成图，min of 7）：
+#: level 6 = 225~302 ms / 0.87 MB，level 3 = 126~152 ms / 0.98 MB，level 1 =
+#: 51 ms / 1.79 MB。帧序列是 mp4/gif 的备料，解码像素与级别无关（PNG 无损），
+#: 取 3（写盘快约一半、体积 +13%）；level 1 再快 17% 但体积翻倍，不划算。
+_FRAME_PNG_LEVEL = 3
 
 FRAME_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 """背景帧目录认得的图片后缀。"""
@@ -531,12 +538,19 @@ def encode_jpeg(arr: np.ndarray, quality: int = 95) -> bytes:
     return buf.getvalue()
 
 
-def save_png(arr: np.ndarray, path) -> None:
-    """存 PNG（帧序列/立绘层/抠图输出都走这里）。"""
+def save_png(arr: np.ndarray, path, *, compress_level: int = 6) -> None:
+    """存 PNG（帧序列/立绘层/抠图输出都走这里）。
+
+    ``compress_level`` 只影响编码速度与文件大小，**不影响像素**（PNG 无损）。
+    默认 6 = PIL 默认值，render/char-layer/matte 的出图行为逐字节不变；
+    :func:`render_track` 的帧序列传 :data:`_FRAME_PNG_LEVEL`（帧序列是给
+    mp4/gif 备料的中间产物，实测压缩 level 3 比 6 快一半以上、体积只大 13%，
+    见该常量注释）。
+    """
     p = Path(path)
     if p.parent and not p.parent.exists():
         p.parent.mkdir(parents=True, exist_ok=True)
-    _to_pil(arr).save(p, format="PNG")
+    _to_pil(arr).save(p, format="PNG", compress_level=compress_level)
 
 
 # ---------- 背景（单图 / 帧目录） ----------
@@ -590,7 +604,10 @@ def _write_gif(frame_paths: list[Path], path: Path, fps: float) -> None:
     所以每帧独立 ``quantize``（Fast OCTree）。``duration`` 取 1000/fps 毫秒
     （GIF 以 1/100s 为单位，PIL 会自行取整）；``loop=0`` 无限循环。
     """
-    duration_ms = max(20, int(round(1000.0 / max(fps, 0.001))))
+    # 帧延时（毫秒）。取整走 js_round（项目统一口径：平分向 +∞，不用内置 round
+    # 的银行家舍入）。GIF 自身以 1/100 s 为单位、PIL 会再量化一次，所以这里
+    # 差 1 ms 不影响成品（实测 fps=8 → 125 ms → 落盘 12 cs = 120 ms）。
+    duration_ms = max(20, js_round(1000.0 / max(fps, 0.001)))
     frames: list[Image.Image] = []
     for p in frame_paths:
         with Image.open(p) as im:
@@ -672,13 +689,15 @@ def render_track(bg_source: str | Path | np.ndarray, track: PoseTrack,
             else:
                 assert bg_files is not None
                 src01 = _fit_rgb01(_read_image(bg_files[min(i, len(bg_files) - 1)]), track)
+            # with_char_layer=False：逐帧只要出图，第二遍 _engine（立绘层）纯白烧
             shot = compose_shot(
                 src01, char, pose.subject(), pose.camera(track.width, track.height),
                 frame_key=track.frame_key, mode=pose.mode, size_pct=pose.size_pct,
                 char_scale=pose.char_scale, tone=tone, shot=pose.shot,
+                with_char_layer=False,
             ).shot
             frame_path = out / (FRAME_FMT % (i + 1))
-            save_png(shot, frame_path)
+            save_png(shot, frame_path, compress_level=_FRAME_PNG_LEVEL)
             written.append(frame_path)
             if writer is not None:
                 try:

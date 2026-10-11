@@ -111,7 +111,13 @@ class GridPath:
 # ─────────────────────── 工具 ───────────────────────
 
 def _to_pil(img: np.ndarray) -> Image.Image:
-    """(H,W,3) uint8 → PIL RGB（带 alpha 的入参丢掉 alpha；浮点入参按 01 口径量化）。"""
+    """(H,W,3) uint8 → PIL RGB（带 alpha 的入参丢掉 alpha；浮点入参按 01 口径量化）。
+
+    ⚠ 浮点分支用 ``arr.max() <= 1.0`` 判域：本模块的入参全部来自 compose 的
+    uint8 出图（cli ``--overlay`` 传的就是 :func:`arcam.cli._to_u8` 的产物），
+    浮点分支只是防御。若将来真有"全像素 ≤1.0 的 0-255 浮点图"进来会被多除一次
+    255 —— 那种图按定义就是近黑，观感退化但不抛，属可接受边界。
+    """
     arr = np.asarray(img)
     if arr.dtype != np.uint8:
         arr = np.clip(arr * 255.0 if arr.max() <= 1.0 else arr, 0, 255).astype(np.uint8)
@@ -129,6 +135,14 @@ def _flat(rgba: tuple[float, float, float, float],
     地平线红 255,120,120、骨色 255,212,121）乘完被 PIL 一律夹成纯白 —— HUD
     只剩线型、颜色全丢。黑底近似保留（原版 canvas 浮层下是视频/照片，HUD 是
     辅助线，压暗观感一致）。
+
+    ⚠ 取整用内置 :func:`round`（银行家舍入）而**不是** :func:`arcam.numeric.js_round`
+    —— 这里不是 JS ``Math.round`` 的对译点（原版是 canvas 自己合成的，源码里
+    没有对应取整调用），v1.9.0 修颜色域时按银行家舍入定了字节值并被
+    ``test_hud.test_flat_composites_byte_rgb_not_float`` 钉死（如
+    ``_flat(_GRID_MINOR) == (81, 202, 230)``：225·0.9 = 202.5 → 202）。
+    换成 js_round 会得 (81, 203, 230)、HUD 像素随之改变，属于数值口径变动，
+    不许"顺手统一"。
     """
     r, g, b, a = rgba
     return (int(round(r * a + bg[0] * (1 - a))),

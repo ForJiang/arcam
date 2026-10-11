@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import math
+import random
+
 from arcam import frames
-from arcam.numeric import Rect, js_round
+from arcam.numeric import Rect, js_round, js_to_fixed
 
 
 def test_view_rect_is_whole_canvas_offline():
@@ -133,3 +136,77 @@ def test_js_round_trap_value_below_half():
      ulp 变粗，2.0+0.49999999999999994 直接被吸收成 2.5，仍是平分进 1 得 3。）"""
     assert js_round(0.49999999999999994) == 0
     assert js_round(2.0 + 0.49999999999999994) == 3   # = 2.5，平分向 +∞
+
+
+# ───────────────── js_to_fixed（numeric.py，scene.json 的取整入口） ─────────────────
+# toFixed 只被 scene.py / tone.py 消费（每枪一次，不在逐像素热路径），边界语义就近钉住。
+# 判据：node 实跑 ``(x).toFixed(n)`` 的数字值，与 Python 侧逐值比。
+
+def test_js_to_fixed_negative_half_matches_ecma():
+    """负半分：ECMA-262 先取 ``x = -x`` 再对幅值找最近的 n —— 半**远离零**，
+    与 ``ROUND_HALF_UP`` 同向。这一条曾在本模块 docstring 里被误记成「已冻结偏离①」，
+    按 node 实测更正（``(-0.125).toFixed(2) === "-0.13"``、``(-0.135).toFixed(2) === "-0.14"``）。"""
+    for value, digits, want in ((-0.125, 2, -0.13), (-0.135, 2, -0.14), (-2.5, 0, -3.0),
+                                (-0.5, 0, -1.0), (-0.001, 2, -0.0), (0.125, 2, 0.13),
+                                (2.5, 0, 3.0), (-99.5, 0, -100.0)):
+        got = js_to_fixed(value, digits)
+        assert got == want and math.copysign(1.0, got) == math.copysign(1.0, want), (value, digits, got)
+
+
+def test_js_to_fixed_repr_shortest_string_is_a_frozen_deviation():
+    """已冻结偏离（红线：toFixed 口径不许动，SPEC §1.4）：按 ``repr`` 最短串取整，
+    不按 double 的精确二进制值。
+
+    ``2.675`` 的二进制实为 2.674999…，规范该给 ``"2.67"``，这里给 2.68。
+    受影响字段：2 位的 centerPixel/sizePixel/focalPx、3 位的
+    pitchDeg/rollDeg/rotationDeg（实测 ``js_to_fixed(0.1235,3)=0.124`` vs JS 0.123）。
+    这条测试是**钉住偏离本身**，谁「顺手修」它就会红。"""
+    assert js_to_fixed(2.675, 2) == 2.68          # JS: 2.67
+    assert js_to_fixed(-2.675, 2) == -2.68        # JS: -2.67
+    assert js_to_fixed(1.005, 2) == 1.01          # JS: 1.00
+    assert js_to_fixed(-0.15, 1) == -0.2          # JS: -0.1
+    assert js_to_fixed(0.1235, 3) == 0.124        # JS: 0.123
+    # 非平分区间与 JS 完全一致（这些是 scene.json 的常见值）
+    for value, digits, want in ((0.0625, 3, 0.063), (0.0005, 3, 0.001), (1e-07, 3, 0.0),
+                                (8.675, 2, 8.68), (12.345, 2, 12.35), (-0.7875, 2, -0.79)):
+        assert js_to_fixed(value, digits) == want, (value, digits)
+
+
+def test_js_to_fixed_non_finite_passthrough():
+    """非有限入参原样返回：JS 的 ``(NaN).toFixed(n)`` 得字符串 ``"NaN"``、
+    ``+"NaN"`` 回解析成 NaN（``Infinity`` 同理）；``Decimal('NaN').quantize``
+    会抛 ``InvalidOperation``（scene 的 pitchDeg/rotationDeg 上游可能是非有限角）。"""
+    assert math.isnan(js_to_fixed(float('nan'), 2))
+    assert js_to_fixed(float('inf'), 2) == float('inf')
+    assert js_to_fixed(float('-inf'), 3) == float('-inf')
+    assert js_to_fixed(1e21, 2) == 1e21           # >= 1e21 时 JS 走 toString，数值相同
+
+
+# ───────────────── clampn（numeric.py，光照/摆位的钳位入口） ─────────────────
+
+def test_clampn_matches_original_math_min_max_for_sorted_bounds():
+    """原版逐字是 ``Math.min(b, Math.max(a, x))``（index.html:1161）。
+
+    两端有序（本项目全部调用点都是）时与比较链逐值相同 —— 这条把等价性钉住，
+    免得有人「优化」成另一套口径。"""
+    from arcam.numeric import clampn
+    rng = random.Random(20261011)
+    for _ in range(20000):
+        lo = rng.uniform(-50.0, 0.0)
+        hi = rng.uniform(0.0, 50.0)          # lo <= hi：有序
+        x = rng.uniform(-100.0, 100.0)
+        want = min(hi, max(lo, x))           # = 原版 Math.min(b, Math.max(a, x))
+        assert clampn(x, lo, hi) == want, (x, lo, hi)
+    # NaN 两侧都透传（Math.min/max 与比较链同为 NaN）
+    assert math.isnan(clampn(float('nan'), 0.0, 1.0))
+
+
+def test_clampn_unsorted_bounds_diverges_from_original_is_unreachable():
+    """两端无序（a > b）时与原版不同：原版退化成常数 b，本式在 x < a 时给 a。
+
+    当前调用点全部有序（auto_fix_x ±20、free 分支 [0,1]、光照 LIGHT_GAIN_MIN/MAX …），
+    该分歧不可达 —— 这条测试是**文档化**这个边界，不是鼓励使用它。"""
+    from arcam.numeric import clampn
+    assert clampn(0.0, 6.0, 0.5) == 6.0          # 本式：x < a → a
+    assert min(0.5, max(6.0, 0.0)) == 0.5        # 原版：恒为 b
+    assert clampn(10.0, 6.0, 0.5) == 0.5         # x > b 时两式一致

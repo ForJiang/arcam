@@ -178,6 +178,36 @@ def test_project_null_becomes_json_null() -> None:
     assert d["character"] is None
 
 
+def test_project_null_for_non_finite_angles_is_json_null() -> None:
+    """非有限 pitch/roll → project 收口 None → footPixel/headPixel 落 null。
+
+    原版 JS 的 project() 在非有限角下得 {u:NaN,v:NaN}，``JSON.stringify`` 把 NaN
+    写成 null；Python 的 math.sin/cos 对 ±inf 会抛 ValueError，已按「不抛」策略收口
+    （geometry.py:80-88）。这条同时钉住 json.dumps 不吐非标准 ``NaN`` 字面量。"""
+    cam = Camera(320, 240, 1.6, 23.0, float("nan"), float("inf"))
+    d = build_scene(RECT_A, None, SUBJ_A, cam, frame_key="满幅",
+                    char_rgba01=None, char_name="", mode="ground")
+    assert d["subject"]["footPixel"] is None
+    assert d["subject"]["headPixel"] is None
+    assert d["character"] is None
+    # 有限角对照：footPixel 是真 {u,v}
+    ok = build_scene(RECT_A, None, SUBJ_A, CAM_A, frame_key="满幅",
+                     char_rgba01=None, char_name="", mode="ground")
+    assert set(ok["subject"]["footPixel"]) == {"u", "v"}
+
+
+def test_rect_public_surface_is_x_y_w_h_x2_y2() -> None:
+    """Rect 的对外面：x/y/w/h + x2/y2 两个派生边界。
+
+    cx/cy（中心点）已删 —— 全仓库（src / tests / docs / webui，含 .py/.js/.mjs/.md/
+    .html/.json）零引用，属死代码。中心一律由调用方写 ``R.x + R.w/2``（原版 JS 同）。"""
+    r = Rect(10.0, 20.0, 100.0, 50.0)
+    assert (r.x, r.y, r.w, r.h) == (10.0, 20.0, 100.0, 50.0)
+    assert (r.x2, r.y2) == (110.0, 70.0)
+    assert not hasattr(r, "cx") and not hasattr(r, "cy")
+    assert set(Rect.__dataclass_fields__) == {"x", "y", "w", "h"}
+
+
 # ───────────────────────── character 分支 ─────────────────────────
 def test_character_none_when_no_sprite() -> None:
     d = build_scene(RECT_A, None, SUBJ_A, CAM_A, frame_key="1:1",
@@ -272,6 +302,40 @@ def test_save_and_load_roundtrip(tmp_path) -> None:
     # JSON 解析回来字段顺序不变
     assert list(json.loads(text)) == list(d)
     assert json.loads(text)["character"]["centerPixel"] == d["character"]["centerPixel"]
+
+
+def test_save_scene_non_finite_floats_become_json_null(tmp_path) -> None:
+    """非有限浮点落 ``null`` —— ``JSON.stringify`` 的既定行为，Python 默认吐
+    ``NaN``/``Infinity`` 字面量（不合法 JSON，原版工具读不回）。有限值逐字节不动。"""
+    from arcam.scene import _json_safe
+    d = scene_a()
+    d["camera"]["pitchDeg"] = float("nan")
+    d["subject"]["footPixel"] = {"u": float("inf"), "v": float("nan")}
+    d["character"]["centerPixel"] = [float("nan"), 12.5]
+    safe = _json_safe(d)
+    assert safe["camera"]["pitchDeg"] is None
+    assert safe["subject"]["footPixel"] == {"u": None, "v": None}
+    assert safe["character"]["centerPixel"] == [None, 12.5]
+    # 有限值一个字节都不动（键序也保持）
+    assert [k for k in safe] == [k for k in d]
+    assert safe["image"] == d["image"] and safe["ground"] == d["ground"]
+    assert safe["character"]["sizePixel"] == d["character"]["sizePixel"]
+    # 落盘文本里不出现 NaN / Infinity 字面量
+    p = tmp_path / "nan.json"
+    save_scene(d, p)
+    text = p.read_text(encoding="utf-8")
+    assert "NaN" not in text and "Infinity" not in text
+    assert '"pitchDeg": null' in text and '"u": null' in text
+    # 读得回来（json.load 不炸）
+    assert load_scene(p)["camera"]["pitchDeg"] is None
+
+
+def test_save_scene_finite_roundtrip_is_byte_identical(tmp_path) -> None:
+    """有限配方的落盘文本与 json.dumps 原样一致：_json_safe 对有限值是恒等变换。"""
+    d = scene_a()
+    p = tmp_path / "ok.json"
+    save_scene(d, p)
+    assert p.read_text(encoding="utf-8") == json.dumps(d, indent=2, ensure_ascii=False)
 
 
 def test_save_scene_chinese_keys_are_not_escaped(tmp_path) -> None:

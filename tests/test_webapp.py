@@ -127,10 +127,8 @@ def _as(target) -> Client:
     return target if isinstance(target, Client) else Client(target)
 
 
-def request(target, method: str, path: str, body=None, headers=None,
-            timeout: float = 60.0):
+def request(target, method: str, path: str, body=None, headers=None):
     """一发请求 → (status, headers, body bytes)。target 可以是端口或 Client。"""
-    _ = timeout                                # Client 自带 60s 超时
     return _as(target).request(method, path, body, headers)
 
 
@@ -660,6 +658,30 @@ class TestExport:
         assert status == 200
         assert Image.open(io.BytesIO(raw)).size == (192, 256)
 
+    def test_layer_and_bundle_ignore_base_only(self, server, uploaded):
+        """3D 模式下前端会把 base_only=true 带进 export（app.js:197），而
+        doExport3D 只拦截 png/bundle（app.js:424）——「下载立绘层」会落到本端点。
+
+        回归（v1.9 审计复现）：base_only 让 compose_shot 不画立绘，
+        char_layer 全透明，用户下到一张全透明的「立绘层」却收着 HTTP 200、
+        没有任何报字（静默错产物）。layer/bundle 要的就是立绘层本身，与预览的
+        3D 分工无关，端点须显式关掉 base_only。
+        """
+        params = {**FULL_PARAMS, "base_only": True}
+        status, _, raw = post_json(uploaded, "/api/export",
+                                   {"params": params, "target": "layer"})
+        assert status == 200
+        layer = np.asarray(Image.open(io.BytesIO(raw)))
+        assert layer.shape[2] == 4 and int(layer[..., 3].max()) > 0, \
+            "base_only 下的立绘层不该全透明"
+
+        status, _, raw = post_json(uploaded, "/api/export",
+                                   {"params": params, "target": "bundle"})
+        assert status == 200
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            character = np.asarray(Image.open(io.BytesIO(zf.read("character.png"))))
+        assert int(character[..., 3].max()) > 0, "bundle 的 character.png 不该全透明"
+
 
 # ---------------------------------------------------------------- 4.5 修图三端点
 
@@ -1136,12 +1158,12 @@ class TestConcurrency:
 
 
 class TestLightingSwitches:
-    """光影三开关（v1.3.0）：light/grain/shadow 进 params 并真改变出图。"""
+    """光影三开关（v1.3.0）：light/grain/shadow 进 params 并真改变出图。
 
-    def test_defaults_present(self):
-        from arcam.webapp import PARAM_DEFAULTS
-        for k in ("light", "grain", "shadow"):
-            assert PARAM_DEFAULTS[k] is True, k
+    schema 默认值与校验表 membership 的断言在 :class:`TestParamSchema`
+    （``test_lighting_gates_present_in_schema_and_validation``，严格更强：
+    同时钉 PARAM_DEFAULTS 与 _BOOL_FIELDS），此处只留下「真的改变出图」。
+    """
 
     def test_shadow_off_changes_pixels(self, server, uploaded):
         """关阴影 → 出图像素变（贴地模式默认铺阴影）。"""
@@ -1202,12 +1224,9 @@ class TestBatchEndpoint:
 
     @staticmethod
     def _data_uri(path: Path) -> str:
-        import base64
         return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode()
 
     def test_batch_zip_per_photo(self, server, uploaded, tmp_path):
-        import base64, io, zipfile
-        from PIL import Image
         port = _port(server)
         # 两张不同的照片 dataURI
         uris = []
@@ -1249,8 +1268,6 @@ class TestBatchEndpoint:
 
     def test_batch_partial_failure_header(self, server, uploaded, tmp_path):
         """一张坏图不拖垮整批：zip 仍出，X-Arcam-Batch-Failed 记明细。"""
-        import io, zipfile
-        from PIL import Image
         port = _port(server)
         good = np.full((64, 96, 3), 120, np.uint8)
         p = tmp_path / "good.png"
@@ -1268,3 +1285,31 @@ class TestBatchEndpoint:
         # 头只放数字（中文进头会 UnicodeEncodeError → 500，v1.6 踩过）
         assert headers.get("X-Arcam-Batch-Failed") == "1"
         assert "1 ok, 1 failed" in headers.get("X-Arcam-Batch", "")
+
+
+# ---------------------------------------------------------------- 8. CLI 入口
+
+class TestWebCommandEntry:
+    """``arcam web``（webapp.main）的启动参数错误路径：人话报错、退出 1。
+
+    回归（v1.9 审计复现）：``--port 99999`` 让 ``socket.bind`` 抛
+    **OverflowError**（不是 OSError），旧实现的 ``except OSError`` 兜不住，
+    用户看到裸 traceback 而不是「换个端口」的人话。
+    """
+
+    def test_port_out_of_range_returns_1_with_human_message(self, capsys):
+        from arcam.webapp import main
+        for port in (99999, -1, 70000):
+            assert main(["--port", str(port), "--no-open"]) == 1, port
+        err = capsys.readouterr().err
+        assert "0-65535" in err and "--port" in err
+
+    def test_port_in_use_returns_1_with_human_message(self, capsys):
+        from arcam.webapp import main
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as taken:
+            taken.bind(("127.0.0.1", 0))
+            taken.listen(1)
+            port = int(taken.getsockname()[1])
+            assert main(["--port", str(port), "--no-open"]) == 1
+        err = capsys.readouterr().err
+        assert "起不来服务" in err and "端口" in err

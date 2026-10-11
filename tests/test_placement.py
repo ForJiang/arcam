@@ -177,6 +177,23 @@ def test_ground_none_cases():
     assert ground_placement(_char(), _subj(d=2000.0), _cam()) is None
 
 
+@pytest.mark.parametrize("subj", [
+    Subject(1.65, float('nan'), 0.0),      # S.d = NaN
+    Subject(1.65, 4.0, float('nan')),      # S.x = NaN
+    Subject(float('nan'), 4.0, 0.0),       # S.Hp = NaN
+    Subject(1.65, float('inf'), 0.0),
+])
+def test_ground_non_finite_subject_returns_none(subj):
+    """非有限 subj 字段 → span 变 NaN，``not (span >= 2.0)`` 必须剔除而不是放行。
+
+    ``span < 2.0`` 对 NaN 是 False（放行），NaN 会漏进 js_round 的 math.floor 抛
+    「cannot convert float NaN to integer」（CLI ``--d/--hp/--x nan`` 实跑复现过）。"""
+    assert ground_placement(_char(), subj, _cam()) is None
+    assert ground_placement(_char(), subj, _cam(pitch=12.0, roll=8.0)) is None
+    # 经公开分派入口同样收口
+    assert current_placement(_char(), subj, _cam()) is None
+
+
 # ─────────────── free_placement（index.html:2946-2980） ───────────────
 
 def test_free_default_position_and_size():
@@ -389,6 +406,21 @@ def test_auto_fix_zero_canvas():
     assert auto_fix_x(_char(), _subj(), _cam(w=0, h=0)) == pytest.approx((0.0, 'nochar'), abs=1e-9)
 
 
+def test_auto_fix_zero_height_canvas_matches_original():
+    """H=0 但 W>0：原版只判 ``!cv.width``（2997），会继续算完并落一个 S.x。
+
+    离线版曾写成 ``not cam.width or not cam.height``，比原版多砍一刀 ——
+    H=0 时静默返回 'nochar'（用户按了没反应），而 focal_px / project / place /
+    ground_placement 全都明确支持 H=0（见 test_geometry 的退化画布用例）。
+    实测对齐：1920×0、x=0.3、pitch=0 → ('moved:50', 2.1094237467877974e-15)，
+    与原版 autoFix 的 S.x 逐位相同（node 实跑核对）。"""
+    new_x, status = auto_fix_x(_char(), _subj(x=0.3), _cam(w=1920, h=0))
+    assert status == 'moved:50'
+    assert new_x == pytest.approx(2.1094237467877974e-15, abs=1e-20)
+    # W=0 仍然早退（原版同一个判据）
+    assert auto_fix_x(_char(), _subj(), _cam(w=0, h=1080)) == pytest.approx((0.0, 'nochar'), abs=1e-9)
+
+
 # ───────────── snap_to_edge（index.html:2874-2902） ─────────────
 
 def test_snap_bar1_top_clamps_free_axis():
@@ -446,6 +478,24 @@ def test_snap_nan_rot_normalises_to_zero_like_js():
                             edge_bar=2, rect=_full())
     assert cf is not None and cf0 is not None
     assert (cf.u, cf.v) == pytest.approx((cf0.u, cf0.v), abs=0.0)
+
+
+@pytest.mark.parametrize("bad_rot", [float('inf'), float('-inf'), None, False])
+def test_snap_non_finite_rot_never_raises(bad_rot):
+    """±Infinity / None 与 NaN 同口径归一成 0，不许把 math.cos(inf) 炸成 ValueError。
+
+    ``not inf`` 在 Python 里是 False（NaN 那条归一漏掉它），原版 JS 的
+    ``Math.cos(Infinity)`` 得 NaN 不抛；这里统一收口成 rot=0 的结果。"""
+    c = SpritePlacement(960.0, 648.0, 388.8, 648.0, 0.0)
+    for bar in (1, 2, 3, 4):
+        want = snap_to_edge(c, bar, _full(), 0.6, 0.0)
+        got = snap_to_edge(c, bar, _full(), 0.6, bad_rot)
+        assert (got.u, got.v, got.w, got.h, got.rot) == \
+            pytest.approx((want.u, want.v, want.w, want.h, want.rot), abs=0.0), bar
+    # 经 current_placement 入口同样不炸（rot_deg=None 走「跟随 cam.roll」兜底）
+    cf = current_placement(_char(), _subj(), _cam(), mode='free', rot_deg=bad_rot,
+                           edge_bar=2, rect=_full())
+    assert cf is not None
 
 
 def test_snap_big_sprite_not_pinned_to_center():

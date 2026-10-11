@@ -326,6 +326,23 @@ def test_render_tone_flag_runs(tmp_path: Path) -> None:
         assert p.is_file()
 
 
+def test_save_png_compress_level_pixels_identical(tmp_path: Path) -> None:
+    """compress_level 只影响编码速度/体积，解码像素必须逐位相同（PNG 无损）。
+
+    render_track 的帧序列走 level 3（实测比默认 6 快一半、体积 +13%），这条钉住
+    "换级别不改像素"，防止将来有人把它换成有损路径。
+    """
+    from arcam.video import save_png
+    arr = np.zeros((40, 30, 3), np.uint8)
+    arr[10:20, 5:25] = (200, 60, 180)
+    a, b = tmp_path / "a.png", tmp_path / "b.png"
+    save_png(arr, a)
+    save_png(arr, b, compress_level=1)
+    with Image.open(a) as im1, Image.open(b) as im2:
+        assert np.array_equal(np.asarray(im1), np.asarray(im2))
+    assert a.stat().st_size > 0 and b.stat().st_size > 0
+
+
 def test_render_accepts_float01_background(tmp_path: Path) -> None:
     """float64 [0,1] 背景（image_to_rgb01 的产物）也要对：曾静默多除一次 255。
 

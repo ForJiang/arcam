@@ -350,13 +350,24 @@ def test_html_parses_tags_balanced_ids_complete():
 
 
 def test_js_dom_references_resolve():
-    files = _files()
-    html, js = files["index.html"], files["app.js"]
-    ids = _ids_of(html)
-    refs = _js_dom_refs(js)
-    assert refs, "app.js 里没解析到任何 DOM id 引用（正则或写法变了？）"
-    missing = sorted(refs - ids)
-    assert not missing, f"app.js 引用了不存在的 DOM id: {missing}"
+    """每个 .js 引用的全部 DOM id 都必须能在 index.html 找到（两侧、全部模块）。
+
+    2026-10-11 W5 审计补宽：原来只查 app.js —— live.js/hud.js/matte-tools.js/
+    mmd.js/i18n.js 里的 id 引用（`$('cam-video')` 这类）没有任何门禁盯着，
+    「JS 引了但 HTML 没有」正好是静默失效高发类，故按目录扫全部 .js。
+    """
+    for label, folder in (("webui", WEBUI), ("docs", DOCS)):
+        html = (folder / "index.html").read_text(encoding="utf-8")
+        ids = _ids_of(html)
+        for js in sorted(folder.glob("*.js")):
+            src = js.read_text(encoding="utf-8")
+            refs = _js_dom_refs(src)
+            # app.js 是页面主脚本，必须有 id 引用；hud.js 这类纯绘制模块
+            # （ctx 由调用方传进来）一个 id 都不碰是正常的，不强制非空
+            assert refs or js.name != "app.js", \
+                f"{label}/{js.name} 里没解析到任何 DOM id 引用（正则或写法变了？）"
+            missing = sorted(refs - ids)
+            assert not missing, f"{label}/{js.name} 引用了不存在的 DOM id: {missing}"
 
 
 def test_state_fields_all_written():
@@ -549,6 +560,33 @@ def test_batch_wired_once():
         "file-photos 的 change 只能绑一次（双绑 = 批量跑两遍）"
     assert js.count("fetch('/api/batch'") == 1, "/api/batch 应只有一个 fetch 点"
     assert "function doBatch(files)" in js, "doBatch 是批量出图的唯一实现"
+
+
+def test_frame_read_css_both_sides():
+    """取景框读数样式两版都要有（v1.9.0 W5 审计实修：docs 侧整条漏掉）。
+
+    踩过的坑：docs/index.html:267 有 `<span class="frame-read">`、app.js 的
+    updateFrameRead 每帧刷它，但 docs/style.css 没有对应规则 —— span 掉回
+    正文 13px/正文色且可换行，与本地版观感不一致（SITE-SPEC §3 要求两版
+    控件一致）。这里两版都钉死，防再次漂移。
+    """
+    for label, folder in (("webui", WEBUI), ("docs", DOCS)):
+        css = (folder / "style.css").read_text(encoding="utf-8")
+        assert re.search(r"\.frame-read\s*\{", css), \
+            f"{label}/style.css 缺 .frame-read 规则（frame-read span 会掉回正文样式）"
+
+
+def test_docs_hud_shots_single_source():
+    """docs/hud.js 的景别表必须来自 arcam-core.js（单一来源）。
+
+    webui 版没有 arcam-core（后端渲染），那份自带 SHOTS 是固有差异；docs 侧
+    再本地抄一份就是两份真值 —— 改一处漏一处，两侧景别口径悄悄分叉。
+    """
+    hud = (DOCS / "hud.js").read_text(encoding="utf-8")
+    assert re.search(r'import\s*\{[^}]*\bSHOTS\b[^}]*\}\s*from\s*"\./arcam-core\.js"', hud), \
+        "docs/hud.js 未从 arcam-core.js import SHOTS"
+    assert not re.search(r"\bvar\s+SHOTS\s*=\s*\{", hud), \
+        "docs/hud.js 又本地定义了一份 SHOTS（应收敛到 arcam-core.js 的 import）"
 
 
 def test_css_tokens_and_responsive():

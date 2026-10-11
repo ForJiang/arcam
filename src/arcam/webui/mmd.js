@@ -22,7 +22,7 @@ window.ARCAM_MMD = (function () {
   // ── 引擎与场景 ──────────────────────────────────────────────────────
   let THREE = null, GLTFLoader = null;
   let renderer = null, scene = null, camera = null, glCanvas = null;
-  let post = null, postCtx = null, grainTile = null, grainCv = null;
+  let post = null, postCtx = null, grainTile = null;
   let root = null, mixer = null;
 
   // ── 模型状态 ────────────────────────────────────────────────────────
@@ -243,9 +243,7 @@ window.ARCAM_MMD = (function () {
     }
     // ⚠ 强度必须设在**缓存判断之外**：关掉 IBL 会把它置 0，再打开时签名没变、
     //   命中缓存提前 return —— 于是强度永远停在 0，看着就是"开关没反应"（踩过）。
-    it: {
-      if (sig === envSig) { if (scene.environment) scene.environmentIntensity = L.ibl ? L.iblIntensity : 0; return; }
-    }
+    if (sig === envSig) { if (scene.environment) scene.environmentIntensity = L.ibl ? L.iblIntensity : 0; return; }
     envSig = sig;
     envTex.needsUpdate = true;
     if (!pmrem) pmrem = new THREE.PMREMGenerator(renderer);
@@ -817,7 +815,7 @@ window.ARCAM_MMD = (function () {
   }
 
   // ── 颗粒（和 2D 那条路一个道理：跟着**环境**亮度走，不跟立绘自己走）──
-  const GRN_MAX = 6.5, GRN_MIN = 0.7, GRN_COMP_MAX = 3.2;
+  const GRN_MAX = 6.5, GRN_MIN = 0.7;
   // ── 景深用的便宜模糊 ────────────────────────────────────────────────
   let blurA = null, blurB = null;
   /** 在 **1/2 分辨率**上做分离式 box blur（累加绘制：N 个带 alpha 的平移拷贝之和），
@@ -989,8 +987,11 @@ window.ARCAM_MMD = (function () {
     postCtx.clearRect(0, 0, W, H);
     postCtx.drawImage(src, 0, 0, W, H);
     const amp = Math.min(GRN_MAX, Math.max(GRN_MIN, GRN_MAX * (1 - (o.env.lum || 0.42) * 1.35)));
-    // 缩放补偿：颗粒是在画面尺度上铺的，人物越小越要补（2D 那条路踩过的坑）
-    const comp = Math.min(GRN_COMP_MAX, Math.max(1, (o.hp * 380) / Math.max(40, o.f * o.hp / Math.max(1, o.d))));
+    // ⚠ 缩放补偿**没有接上**：上游 mmd.js:1062-1074 同款算了 comp 却不用
+    //   （globalAlpha 只吃 amp）——3D 颗粒不做「人物越小越补」，如实保留上游
+    //   行为。2D 那条路的补偿在 arcam-lighting.js 的 bakeLit 里
+    //   （clampN(1/litScaleBucket(), 1, 3.2)），与这里不对拍；要接上需先做
+    //   真实模型视觉对拍（无 E2E 不可验），故记为待办，不是漏写。
     // ⚠ 必须用 **source-atop**，不能用 overlay：
     //   这一层要盖在实拍画面上，只有人物（和影子）该有像素；overlay 会把 alpha 也算进混合，
     //   于是整块画布被抬到 alpha≈10% —— 等于给实拍画面蒙了一层雾，而且影子测量全被它淹掉。

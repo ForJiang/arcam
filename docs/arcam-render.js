@@ -67,9 +67,9 @@
  *     zeros((1,1,4))）：drawSprite 直接略过该次 no-op drawImage；其余尺寸一律画
  *     （原版也无条件画）。Python 的跳过判据是「层内 alpha 最大值 > 0」（要读像素），
  *     这里用尺寸近似，视觉等价。
- *   · 阴影色量化 q(v) = js_round(clampN(v,0,1)*255/6)*6：numpy uint8 是**回绕**
- *     （258 → 2），Uint8ClampedArray 是钳位（258 → 255）。按 Python 逐字回绕
- *     （% 256），否则极亮/极暖的环境色下阴影色会对不上。
+ *   · 阴影色量化 q(v) = js_round(clampN(v,0,1)*255/6)*6 后**钳到 255**：原版
+ *     index.html:3096/3107 落 Uint8ClampedArray，语义是钳位（258 → 255）而不是
+ *     numpy uint8 的回绕（258 → 2）。Python 侧 v2.0.0 已改成钳位，这里同口径。
  *   · jsFixed 不直接用 toFixed：toFixed 按二进制真值舍入，当最短回绕串恰为 .5
  *     结尾的 tie 而真值略低时会向下（(2.675).toFixed(2)='2.67'，Python 的
  *     Decimal(repr(v)) 给 2.68）；scene.json 坐标一旦偶合该 tie 就差半个最小位。
@@ -222,9 +222,11 @@ function shadowColor(ambient) {
     rb = Math.sqrt(Math.max(0.05, envR) / Math.max(0.05, envB));   // 暖冷比只施加一半
   }
   const lumS = clampN(lum, 0.04, 1.0) * SH_DARK;
-  // q(v) = js_round(clampN(v,0,1)*255/6)*6（量化到 6 的倍数）；
-  // numpy uint8 回绕（258→2），Uint8ClampedArray 钳位（258→255）——按 Python 回绕
-  const q = (v) => (jsRound(clampN(v, 0.0, 1.0) * 255.0 / 6.0) * 6) % 256;
+  // q(v) = js_round(clampN(v,0,1)*255/6)*6（量化到 6 的倍数），再钳到 255。
+  // ⚠ 原版 index.html:3096/3107 落的是 Uint8ClampedArray —— 语义是**钳位**
+  //   （258→255），不是回绕（258→2）。Python 侧 v2.0.0 已从 numpy uint8 回绕改成
+  //   钳位（极暖环境阴影不再翻黑），JS 孪生同改；早年的 % 256 是对原版的误译。
+  const q = (v) => Math.min(255, jsRound(clampN(v, 0.0, 1.0) * 255.0 / 6.0) * 6);
   return [q(lumS * rb), q(lumS), q(lumS / rb)];
 }
 

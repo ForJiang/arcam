@@ -432,12 +432,14 @@ GitHub Pages 只伺服静态文件、跑不了 Python 服务，所以把 focal/p
   .venv/bin/python tools/lidar-e2e-smoke.py
   ```
 
-当前 **440 passed / 1 skipped**（1 skip 为 onnxruntime 已装时 CLI 抠图 E2E 由
+当前 **659 passed / 1 skipped**（1 skip 为 onnxruntime 已装时 CLI 抠图 E2E 由
 P4 覆盖的既定跳过；可选依赖 pillow-heif/OpenEXR/imageio 装全后 HEIC/EXR 深度
-与 mp4 路径全部真跑）。v1.1.1（2026-10-10）为全项目审计 + 补验版本：修 18 个
-功能障碍（free 模式 rot_basis/edge_bar 整条渲染链断链、char-layer --frame 静默
-失效、lidar serve 一帧不收、视频背景双重除法、Pages 抠图阈值 1 ulp 翻面、
-HEIC 量程预检 0 值误判、web listen backlog 竞态等），明细见 `CHANGELOG.md`。
+与 mp4 路径全部真跑）。历轮全项目审计：v1.1.1 修 18 个功能障碍（free 模式
+rot_basis/edge_bar 整条渲染链断链、char-layer --frame 静默失效、lidar serve
+一帧不收、视频背景双重除法、Pages 抠图阈值 1 ulp 翻面、HEIC 量程预检 0 值误判、
+web listen backlog 竞态等）；v1.8.0 修 12 个；v1.10.0 修 14 个（multi 立绘
+纯白、非有限角炸链、HUD 外第二处字节域错位、CLI nan 静默出图等），明细见
+`CHANGELOG.md`。
 
 源码溯源：每个公开函数的 docstring 都注明对应 JS 的 `index.html:<line>` /
 `cutout.js:<line>`；契约全集在 `docs/SPEC.md`，原版逐字事实在

@@ -177,6 +177,50 @@ def _strided_frame(frame: LiDARFrame) -> LiDARFrame:
     )
 
 
+def _rms_of(resid: np.ndarray, mask: np.ndarray) -> float:
+    """内点残差 RMS。掩码为空返回 ``inf``（防御分支：调用方保证 ≥3 内点，不可达）。
+
+    不返回 NaN：任何与 NaN 的比较都静默为假（``rms < 门限`` 恒不成立），
+    「没有内点」会被下游当成"拟合成功但残差可疑"或者反过来静默放行；用 inf
+    表达至少让所有门限显式失败。（顺带：``json.dumps`` 对 NaN 和 inf 都吐非
+    标准字面量，但调用方保证 ≥3 内点，这条分支实际不可达——防御性口径。）
+    """
+    if not mask.any():
+        return float("inf")
+    return float(np.sqrt(np.mean(resid[mask] ** 2)))
+
+
+def _refine_plane(points: np.ndarray, normal: np.ndarray, d: float, tol_m: float,
+                  up: np.ndarray) -> tuple[np.ndarray, float, int, float]:
+    """内点集 SVD 精修：返回 ``(法向, offset, 内点数, rms)``。
+
+    - 候选模型内点 <3 → 原样返回（无法定义平面）；
+    - **精修后内点 <3 → 回退 RANSAC 候选模型**（:func:`fit_ground_plane`
+      docstring 承诺的兜底，旧实现漏写）：SVD 对近共线内点集给出的法向可能把
+      内点全甩出 ``tol_m``，此时续用精修模型会让 rms 变成空集均值（NaN）。
+      候选模型是 2000 次迭代的最优者、其内点必然 ≥3（三个采样点自身即在平面
+      上），回退它至少保证四元组自洽。实际数据上该分支不可达（地面 RANSAC
+      的最优模型内点常以千计），是防御性守卫。
+    """
+    resid = points @ normal + d
+    mask = np.abs(resid) <= tol_m
+    sel = points[mask]
+    if int(sel.shape[0]) < 3:
+        return normal, d, int(mask.sum()), _rms_of(resid, mask)
+    center = sel.mean(axis=0)
+    _, _, vt = np.linalg.svd(sel - center, full_matrices=False)
+    n = vt[2]
+    n = n / np.linalg.norm(n)
+    if float(n @ up) < 0.0:
+        n = -n
+    d2 = -float(n @ center)
+    resid2 = points @ n + d2
+    mask2 = np.abs(resid2) <= tol_m
+    if int(mask2.sum()) < 3:                      # 精修把内点甩没了 → 回退候选模型
+        return normal, d, int(mask.sum()), _rms_of(resid, mask)
+    return n, d2, int(mask2.sum()), _rms_of(resid2, mask2)
+
+
 def fit_ground_plane(frame: LiDARFrame, *, max_slope_deg: float = 60.0,
                      ransac_iters: int = 2000, tol_m: float = 0.02) -> GroundPlane:
     """RANSAC 拟合地平面（深度相机坐标，y 向下、z 前向），LIDAR-SPEC §3。
@@ -247,26 +291,7 @@ def fit_ground_plane(frame: LiDARFrame, *, max_slope_deg: float = 60.0,
             f'（{frame.source or "未标注来源"}）'
         )
 
-    def _refine(normal: np.ndarray, d: float) -> tuple[np.ndarray, float, int, float]:
-        """内点集 SVD 精修：返回 (法向, offset, 内点数, rms)；内点 <3 时原样返回。"""
-        resid = points @ normal + d
-        mask = np.abs(resid) <= tol_m
-        sel = points[mask]
-        if int(sel.shape[0]) < 3:
-            return normal, d, int(mask.sum()), float(np.sqrt(np.mean(resid[mask] ** 2)))
-        center = sel.mean(axis=0)
-        _, _, vt = np.linalg.svd(sel - center, full_matrices=False)
-        n = vt[2]
-        n = n / np.linalg.norm(n)
-        if float(n @ up) < 0.0:
-            n = -n
-        d2 = -float(n @ center)
-        resid2 = points @ n + d2
-        mask2 = np.abs(resid2) <= tol_m
-        rms = float(np.sqrt(np.mean(resid2[mask2] ** 2)))
-        return n, d2, int(mask2.sum()), rms
-
-    normal, d, inliers, rms = _refine(best_n, best_d)
+    normal, d, inliers, rms = _refine_plane(points, best_n, best_d, tol_m, up)
     return GroundPlane(
         normal=(float(normal[0]), float(normal[1]), float(normal[2])),
         offset=float(d),

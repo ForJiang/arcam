@@ -16,6 +16,7 @@ from arcam.matte_tools import (
     auto_prepare_char,
     auto_trim,
     content_bounds,
+    _flood_solid,
     cut_solid_bg,
     is_half_body,
     soften_edge,
@@ -352,3 +353,36 @@ def test_soften_enters_byte_domain():
     out, _ = soften_edge(a, erode=0, feather=2)
     # 常数场均值不变；出口应是 128/255 而不是浮点 0.5 的再模糊
     assert np.allclose(out[..., 3], 128.0 / 255.0)
+
+
+def test_flood_judges_in_byte_domain():
+    """泛洪判定在**字节域**（cutout.js 读 getImageData 的字节；v2.0.0 对拍修复）。
+
+    为什么值得一条钉子：01 域判定（``tol/255``、avg 也 /255）在**字节精确**的
+    输入上与字节域全等——普通夹具根本区分不出两种实现；只有把像素放到阈值
+    边界的**非字节精确浮点**上才会分叉（原实测：全身立绘 3/1573296 像素被翻）。
+    所以这条用例故意用非字节精确输入，并在两侧（字节域 vs 01 域）给出不同结果，
+    钉住当前口径是字节域那个。
+    """
+    # 底色 100/255 附近、容差 tol=32（字节）。avg 由四角定，取四角同色 100
+    # → avg=100（字节）；阈值边界 sum|Δ| = 96 的像素：3 通道各 +32
+    a = np.zeros((9, 9, 4))
+    a[..., :3] = 100.0 / 255.0
+    a[..., 3] = 1.0
+    # 非字节精确的「阈值边界」色：132.4/255。字节域 rint 回环成 132
+    # （sum|Δ| = 96 = tol*3，放行）；01 域按浮点算是 3×32.4/255 > 96/255
+    # （拒）—— 两种域结论相反，这条钉子才区分得开（原实测分歧就是 1 ulp 级）
+    edge = 132.4 / 255.0
+    a[4, 4, :3] = edge
+    a[4, 4, 3] = 1.0
+    # 字节域判定：rint 回环后 = 132，sum|Δ| = 96 <= tol*3 → 算底色
+    out, ratio = _flood_solid(a, 32.0, 0.0)
+    assert out is not None, "字节域判定下这块应被当成底色（sum|Δ|=96 <= 96）"
+    assert out[4, 4, 3] == 0.0, "阈值边界像素在字节域判定下应被抠掉"
+    # 对照：直接按 01 域手算同一输入，结论应当相反（这就是修复前/Python 旧行为）
+    tol01 = 32.0 / 255.0
+    avg01 = 100.0 / 255.0
+    d01 = (abs(a[4, 4, 0] - avg01) + abs(a[4, 4, 1] - avg01)
+           + abs(a[4, 4, 2] - avg01))
+    assert d01 > tol01 * 3.0, (
+        "这条用例的前提是两种域结论相反；若 01 域也放行，换成更贴边界的浮点色")

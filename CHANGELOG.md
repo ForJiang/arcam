@@ -2,6 +2,72 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.10.0] — 2026-10-11
+
+全项目审计第三轮（五分区并行 + 对抗复核 + 浏览器全链实测）：修 14 个问题，
+删 3 处死代码，性能三处（视频逐帧 -39% 等）。
+
+### 修复（BUG）
+
+- **`arcam multi` 立绘被输出成纯白/品红**（cli.py `_paste_layer`）：
+  `compose_char_layer` 出的是 uint8 0..255，被赋值进 float64 数组后当 [0,1] 喂给
+  `compose._over`——alpha=255 被当成 1.0 的 255 倍，source-over 算出
+  `base·(1−255) + rgb·255` 再 clip，1472 个不透明像素全变色。按 dtype 归一化 +
+  本色比较的回归测试（旧测试只断言"与照片不同"，白块也能过）。
+- **非有限角把渲染链炸成 traceback**（geometry/placement/numeric/scene）：
+  `--pitch inf` 抛 ValueError、NaN 穿过比较 Guard 到 `js_round` 报
+  「cannot convert float NaN to integer」、`snap_to_edge` 的 rot=±inf 崩、
+  `js_to_fixed(NaN)` 抛 InvalidOperation、`save_scene` 吐不合法的 JSON NaN 字面量。
+  统一收口：project/place 返 None、rot 归一、scene 落 null。
+- **HUD 之外的第二处字节域错位**（sprite.py 阴影层）：落字节用 numpy uint8 **回绕**，
+  极暖环境阴影色 258 回绕成 2（原版 Uint8ClampedArray 是钳位 258→255）；
+  shadow_opacity>2.4 的 alpha 越界同理。两侧（Python + docs/arcam-render.js）同修。
+- **CLI 浮点旗标放行 nan/inf**（cli.py）：放行只会出一张**没有立绘**的图还零提示
+  （静默失效本类）；webapp 对同批键本就 400。12 个旗标入口人话报错 exit 2。
+- **`--vary`/`--spec` 枚举值零校验**（cli.py）：`shot=bogus`、`frame=bogus`、
+  `edge_bar=9` 全部 exit 0 静默回落到原版 JS 兜底。改为与顶层旗标同源的枚举表。
+- **`/api/export` 在 base_only 下返回全透明立绘层**（webapp.py）：3D 模式点
+  「下载立绘层」静默拿到一张透明图。
+- **`arcam web --port 99999` 裸 OverflowError**；**plane 精修分支空内点集产出
+  NaN rms**（改 inf + 补承诺的 docstring 回退）。
+- **lidar inspect 覆盖率取整两侧口径分叉**：CLI 用 js_to_fixed、webapp 用 round()
+  （银行家舍入），0.56785 一个吐 0.5679 一个吐 0.5678。webapp 同步。
+- **泛洪抠底的阈值判定域**（matte_tools.py）：01 域每通道 /255 的 ulp 让阈值边界
+  像素翻面（实测全身立绘 3/1573296 像素、占比差 1.9e-6）。改字节域判定，与
+  docs/matte-tools.js 逐位一致（42 张图对拍，ratio 浮点相等、alpha 字节全等）。
+- **webui 批量出图双触发**（v1.9.0 修了 docs 侧、漏了 webui 侧）：init 内联防
+  change + bindBatch 各绑一份，选一次文件跑两遍、下两个 zip。
+- **重复 `id="file-photos"`**（两个 index.html）：两个隐藏 input 同 id，
+  getElementById 只认第一个，第二个是死 markup。两侧各删一个。
+
+### 删除（死代码）
+
+- `Rect.cx`/`Rect.cy`（全仓零引用，8 行）；`_bilinear_rgba_premul` 的
+  `premul=None` 不可达分支（唯一调用点恒传）；mmd.js 两侧的 `comp`/
+  `GRN_COMP_MAX`/`grainCv`（删除后两侧仍逐字节相同、行为零变化）。
+
+### 优化（先测后改，输出逐位一致）
+
+- **视频逐帧 -39%**：`compose_shot` 默认跑两遍 `_engine`（第二遍只为出立绘层），
+  新增 `with_char_layer` 开关，video/CLI render/watch/contact-sheet/batch/multi
+  的 scene 遍都传 False——114.3→69.6 ms/帧，shot 逐位相同。
+- `composite_sprite` 4K+1509×1000 **716→522ms（+27%）**；`tone_matched_layer`
+  3M px **469→356ms（+24%）**。
+- 帧序列 PNG 压缩 level 6→3：写盘 225–302→126–152ms（约一半），体积 +13%
+  （帧序列是 mp4/gif 备料，PNG 无损、解码像素逐位相同）。
+- `_downscale01` 分块量化：峰值内存 585→96MB（swap 下单次 10.8s→0.36s）。
+
+### 备注
+
+- W1 用「从原版 index.html 原文抽函数 + Node 跑参考值」的口径对拍了 **94,439
+  个向量**（绕开同源移植件，直接对原版），有限输入零漂移。
+- 全套 **659 passed / 1 skipped**（进场 597）；golden-diff 500 向量 bad=0。
+- 文档口径同步：SPEC §1 补非有限输入条目、WEB-SPEC §1 补 /api/batch 行、
+  SPEC.md 修孤儿引用 `js_fixed_str`；README 的 golden 向量口径。
+- 浏览器实测：docs 页（含极暖环境阴影路径）三档哈希互异；webui 页控件齐、
+  `ARCAM_MMD` 全 API 就位。
+
+
 ## [1.9.0] — 2026-10-11
 
 新功能批次（五分区并行 + 对抗复核 + 浏览器全链实测）：颗粒强度可调、网页版真烘光、

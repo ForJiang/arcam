@@ -23,15 +23,22 @@ CLI 把立绘合成进照片/视频帧，并在位姿轨道下逐帧渲染。sce
    `[0,1]`。存/取用 `numpy.clip` 后 `*255+0.5` 再 `astype(uint8)`。
 3. **角度**：公开 API 一律**度**（对应原版 `S.pitch/S.roll/S.feq`），函数内部转弧度。
 4. **取整**：一律 `arcam.numeric.js_round`（JS `Math.round` 半向 +∞）。**禁止用内置
-   `round()`**（银行家舍入）。`toFixed` 语义用 `js_to_fixed` / `js_fixed_str`。
+   `round()`**（银行家舍入）。`toFixed` 语义用 `js_to_fixed`（ROUND_HALF_UP）。
 5. **坐标约定**（index.html:1048，见 artifact A §1.3）：
    世界 Y 向上、地面 `y=0`、Z 朝观察者；相机 `(0, S.h, 0)`；画布 v 向下、主点
    `(W/2, H/2)`；`pitch>0` 俯视、`roll>0` 画面顺时针。
 6. **溯源**：每个公开函数的 docstring 必须注明对应 JS 的 `index.html:<line>` /
    `cutout.js:<line>`（从 artifact 里抄）。
-7. **风格**：公开函数完整类型标注；模块级 docstring 一段；不写实现过程注释，只写
+7. **非有限输入**（v2.0.0 起）：`pitch/roll/feq` 传 inf/nan → `project`/`place`
+   返回 None（对应原版 JS 侧 NaN 传播后比较全假、落位解不出的收口），**不再抛
+   ValueError**；`snap_to_edge` 的 `rot=±inf` 归一成 0；`js_to_fixed` 对 nan 抛
+   `InvalidOperation`（无法表示，调用方先挡）；`scene.json` 不写 NaN 字面量
+   （`save_scene` 落 null）。CLI 侧 12 个浮点旗标在入口就拒 nan/inf（argparse
+   类型函数，人话报错 exit 2）——放行只会出一张没有立绘的图还零提示；
+   webapp 对同批键 400，两边同口径。
+8. **风格**：公开函数完整类型标注；模块级 docstring 一段；不写实现过程注释，只写
    「为什么」与「原版行为约束」；禁止 print 调试；禁止 `# noqa`。
-8. **文件互斥**：只创建/修改本契约 §2 分配给你的文件。需要共享类型时 import 自
+9. **文件互斥**：只创建/修改本契约 §2 分配给你的文件。需要共享类型时 import 自
    `numeric.py` / `geometry.py`，不得自建副本。
 
 ## 2. 模块划分与归属（互斥分区）

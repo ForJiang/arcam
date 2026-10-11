@@ -99,21 +99,24 @@ def _flood_solid(rgba01: np.ndarray, tol: float,
                  feather: float) -> tuple[np.ndarray | None, float]:
     """纯色底泛洪的单一内部实现（cutout.js:16-98 逐行对译）。
 
-    ``tol`` 按原版口径传**字节值**（0-255 空间，cutout.js:23 的默认 32）——原版
-    读的是 canvas 像素字节；本模块进出是 [0,1]，所以在入口换算成
-    ``tol/255``（判定 ``sum|Δ| <= tol*3`` 换算后为 ``tol*3/255``）。传 01 空间的
-    值会把门限放大 255 倍、整图放行。
+    ``tol`` 按原版口径传**字节值**（0-255 空间，cutout.js:23 的默认 32）。颜色判定
+    （四角一致性 + 泛洪距离）一律在**字节域**做（cutout.js:33-49 读的就是
+    ``getImageData`` 的字节）：入口把 ``[0,1]`` 量化回字节再比，``tol`` 原样当字节
+    门限。⚠ 早年在 01 域算（``tol/255``、avg 也 /255）：每通道 /255 的 ulp 会让
+    阈值边界上的像素翻面——实测全身立绘 3/1573296 像素被翻、抠掉占比差 1.9e-6
+    （v2.0.0 与 docs/matte-tools.js 对拍发现）。字节域复算与原版逐位相同。
+    模块进出仍是 [0,1]（柔化/alpha 段不变），只有判定段换域。
 
     返回 ``(新数组 or None, 抠掉占比)``：不是纯色底 / 没抠掉东西 → ``(None, 0.0)``。
     :func:`cut_solid_bg` 与 :func:`auto_prepare_char` 共用它——逻辑只许有一份。
     """
     arr = rgba01
-    tol01 = tol / 255.0
     h, w = int(arr.shape[0]), int(arr.shape[1])
     if not w or not h:
         return None, 0.0
-    rgb = arr[..., :3]
     alpha = arr[..., 3]
+    # 字节域判定（见 docstring 的 ⚠）：rint 回环对字节来源的输入是精确的
+    rgb = np.rint(np.clip(arr[..., :3], 0.0, 1.0) * 255.0)
 
     # 四角取样（cutout.js:33-36）：索引顺序 [左上, 右上, 左下, 右下]
     corners = ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1))
@@ -124,9 +127,9 @@ def _flood_solid(rgba01: np.ndarray, tol: float,
     if bool(np.all(corner_a < 10.0 / 255.0)):
         return None, 0.0
     avg = corner_rgb.mean(axis=0)                                    # (3,)
-    if float(np.abs(corner_rgb - avg).max()) > tol01:
+    if float(np.abs(corner_rgb - avg).max()) > tol:
         return None, 0.0                                             # 四角不一致
-    lim = tol01 * 3.0
+    lim = tol * 3.0
 
     # 从四条边框整圈起手（cutout.js:69-72）——不从四角点：那一个像素可能压在角色身上。
     # ⚠ 栈用动态 list 而非原版的定长 Int32Array(w*h)：JS 的 typed array 越界写入是
@@ -183,13 +186,17 @@ def _flood_solid(rgba01: np.ndarray, tol: float,
 
 def cut_solid_bg(rgba01: np.ndarray, *, tol: float = _CUT_TOL,
                  feather: float = _CUT_FEATHER) -> float | None:
-    """纯色底抠图（cutout.js:16-98 的 1:1 对译）。返回抠掉占比；不是纯色底 → None。
+    """纯色底抠图的**占比探针**（cutout.js:16-98 的 1:1 对译）。返回抠掉占比；不是纯色底 → None。
 
     四角颜色一致（平涂底）就从**边框整圈**往里泛洪，把连通的底色刷成透明，
     再对 alpha 做一次 3×3 均值柔化收边。``tol`` 是**字节值**（0-255，原版默认
-    32）：四角 RGB 与四角均值的最大逐通道偏差 > ``tol/255`` → None；flood 内按
-    ``sum|Δ| <= tol*3/255``。四角 alpha 全 < 10/255（已透明底）→ None。
-    要拿处理后的图用 :func:`auto_prepare_char`。
+    32），颜色判定（四角一致性 + 泛洪距离）在**字节域**做（入口把 [0,1] 量化回
+    字节）：四角 RGB 与四角均值的最大逐通道偏差 > ``tol`` → None；flood 内按
+    ``sum|Δ| <= tol*3``。四角 alpha 全 < 10/255（已透明底）→ None。
+
+    ⚠ 只回占比、**不返回处理后的图**（原版 cutSolidBg 是就地改画布再回占比，
+    离线侧没有画布句柄）。要拿抠好的图：:func:`auto_prepare_char` 走整链，
+    或 :func:`arcam.cli` 的 ``prep`` 子命令分步执行（webapp ``/api/prep`` 同）。
     """
     _out, ratio = _flood_solid(_as_rgba01(rgba01), tol, feather)
     return ratio if _out is not None else None
@@ -314,6 +321,10 @@ def lens_blur(rgba01: np.ndarray, k: float = 0.62) -> np.ndarray:
     半向 +∞）—— 用 Python 内置 ``round``（半数取偶）在 ``w·k`` 恰好落在
     .5 时会小一档（实测 w=75/k=0.62 → 46.5：内置 46、JS 47），整张图糊得
     不一样（364/6000 像素变、最大差 2.16/255）。
+
+    ⚠ 预乘值喂给 PIL 前的量化走 ``np.round``（半数取偶 = Uint8ClampedArray
+    存回语义）；浏览器在 drawImage 内部预乘、量化时点不可见，这一处与
+    滤波核一样属 SPEC §5 已记录偏离（JS 孪生走 canvas，同样对不齐）。
     """
     from PIL import Image
     arr = _as_rgba01(rgba01)

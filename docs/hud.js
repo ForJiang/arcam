@@ -3,7 +3,7 @@
 // index.html:1043-1057），供 webui 预览浮层实时绘制；出图不带 HUD。
 // ES module：从 arcam-core.js 静态 import（docs 侧 core 是 module、不挂 window）。
 // 加载完把绘制原语挂到 window.arcamHud 供 app.js（module，晚于本文件执行）使用。
-import { focalPx, project as projectRaw, frameRect } from "./arcam-core.js";
+import { focalPx, project as projectRaw, frameRect, SHOTS } from "./arcam-core.js";
 
 window.arcamHud = (function () {
   "use strict";
@@ -66,7 +66,7 @@ window.arcamHud = (function () {
       return { u: (opts.freeP || [0.5, 0.6])[0] * cam.W, v: (opts.freeP || [0.5, 0.6])[1] * cam.H,
                w: h * (opts.charAspect || 0.6), h: h };
     }
-    var SHOTS = { "全身": 1.00, "膝上": 0.72, "腰上": 0.47, "胸上": 0.28, "头肩": 0.20 };
+    // ground：足底 pb 与头顶 pt 的投影（与 groundPlacement 同式）
     var k = SHOTS[opts.shot || "全身"];
     var yb = (1.0 - k) * subj.hp;
     var pb = project(subj.x, yb - cam.h, subj.d, cam);
@@ -225,7 +225,7 @@ window.arcamHud = (function () {
   }
 
   // ── compositionHints（index.html:1890-1937，11 条全并列）─────────
-  var SHOTS = { "全身": 1.00, "膝上": 0.72, "腰上": 0.47, "胸上": 0.28, "头肩": 0.20 };
+  // SHOTS 从 arcam-core.js import（单一来源；webui 版没有 core，那份自带一份）
 
   function compositionHints(cam, placement, W, H, shot, mode) {
     if (W < 8 || H < 8) return [];

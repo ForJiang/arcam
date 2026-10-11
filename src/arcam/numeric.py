@@ -32,7 +32,17 @@ def js_round(value: float) -> int:
 
 
 def clampn(value: float, lo: float, hi: float) -> float:
-    """JS clampN(v, a, b)：先夹范围。两端不排序（原版同样不排序）。
+    """JS ``clampN(v, a, b)``：先夹范围。
+
+    原版逐字是 ``Math.min(b, Math.max(a, x))``（index.html:1161）。两端有序
+    （``a <= b``，本项目全部调用点都是）时两式逐值相同，这里写成比较链是省掉
+    两次内置函数调用的等价形式（``clampn`` 在光照 LUT / 阴影量化里逐字节跑）。
+
+    ⚠ 两端**无序**（``a > b``）时两式不同：原版退化成常数 ``b``（``Math.max``
+    先抬到 ``a``、``Math.min`` 再压回 ``b``），本式在 ``x < a`` 时给 ``a``。
+    当前调用点全部有序（``auto_fix_x`` 的 ±20、``free`` 分支的 [0,1]、光照的
+    LIGHT_GAIN_MIN/MAX 等），该分歧不可达；真要传无序边界请按原版写
+    ``min(hi, max(lo, value))``。
     """
     return lo if value < lo else (hi if value > hi else value)
 
@@ -44,14 +54,29 @@ def js_to_fixed(value: float, digits: int) -> float:
     配方里差 0.01。返回 float（JSON 序列化由调用方 str() 时决定位数，
     本函数只保证数值与 JS 一致）。
 
-    ⚠ 与 ECMA-262 的 ``toFixed`` 有两处**已冻结**的偏离（红线：toFixed 口径
+    ⚠ 与 ECMA-262 的 ``toFixed`` 有**一处**已冻结的偏离（红线：toFixed 口径
     不许动，docs/SPEC.md §1.4 与 docs/AUDIT-CHARTER.md §3）：
-    ① 平分时半**远离零**，JS 取较大者（负半分向 +∞，如 ``(-0.125).toFixed(2)``
-       在 JS 得 ``"-0.12"``，这里给 ``-0.13``）；
-    ② 按 ``repr`` 最短串而非精确二进制值取整（2.675 的二进制实为 2.674999…，
-       JS 得 ``"2.67"``，这里给 ``"2.68"``）。
+    ① 按 ``repr`` 最短串而非**精确二进制值**取整。规范第 5 步用 double 的精确
+       数学值找最近的 n/10^f，而这里用 ``repr`` 的最短十进制串：``2.675`` 的
+       二进制实为 2.674999…，JS 得 ``"2.67"``，这里给 ``2.68``；
+       ``(-0.15).toFixed(1)`` 同样 —— JS 得 ``-0.1``，这里给 ``-0.2``
+       （受影响的是 2 位的 centerPixel/sizePixel/focalPx 与 3 位的
+       pitchDeg/rollDeg/rotationDeg，实测见 tests/test_frames.py）。
     非平分区间两者一致，scene.json 的实测值几乎不触平。改动前先读红线。
+
+    ✅ **不**是偏离的一项（曾在此误记为偏离①，已按 node 实测更正）：
+    平分方向。规范先取 ``x = -x`` 再对**幅值**找最近的 n，即半**远离零**
+    （``(-0.125).toFixed(2)`` 在 JS 得 ``"-0.13"``、``(-0.135).toFixed(2)``
+    得 ``"-0.14"``），与 ``ROUND_HALF_UP`` 逐字同向；负零也一致
+    （``(-0.001).toFixed(2)`` → ``"-0.00"`` → ``float('-0.0')``）。
+
+    ✅ 非有限入参原样返回：JS 的 ``(NaN).toFixed(n)`` 得字符串 ``"NaN"``、
+    ``+"NaN"`` 回解析成 NaN（``Infinity`` 同理），而 ``Decimal('NaN').quantize``
+    会抛 ``InvalidOperation``。``pitchDeg``/``rotationDeg`` 等字段的上游可能是
+    非有限角（见 :func:`arcam.geometry.project` 的同款收口），这里一并兜住。
     """
+    if not math.isfinite(value):
+        return value
     quant = Decimal(1).scaleb(-digits)
     return float(Decimal(repr(value)).quantize(quant, rounding=ROUND_HALF_UP))
 
@@ -68,16 +93,10 @@ class Rect:
 
     @property
     def x2(self) -> float:
+        """右边界（x + w）。原版 JS 一律手写 ``R.x + R.w``，离线版收成属性。"""
         return self.x + self.w
 
     @property
     def y2(self) -> float:
+        """下边界（y + h）。原版 JS 一律手写 ``R.y + R.h``，离线版收成属性。"""
         return self.y + self.h
-
-    @property
-    def cx(self) -> float:
-        return self.x + self.w / 2
-
-    @property
-    def cy(self) -> float:
-        return self.y + self.h / 2

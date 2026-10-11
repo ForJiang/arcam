@@ -159,14 +159,34 @@ def save_scene(scene: dict, path: Any, *, indent: int = 2) -> None:
     ``ensure_ascii=False`` —— 画幅/景别是中文 key，JS 的 ``JSON.stringify``
     原样写 UTF-8，Python 这边也不转 ``\\uXXXX``。
 
+    非有限浮点（NaN / ±Infinity）落 ``null`` —— ``JSON.stringify`` 的既定行为
+    （``JSON.stringify({u: NaN})`` → ``{"u":null}``）。Python 的 ``json.dumps``
+    默认吐 ``NaN``/``Infinity`` 字面量，那不是合法 JSON，原版工具读不回。
+    有限值一个字节都不动。
+
     Args:
         scene: :func:`build_scene` 的产物。
         path: 目标路径（``str`` 或 ``Path``）。
         indent: 缩进，默认 2（与原版一致）。
     """
-    text = json.dumps(scene, indent=indent, ensure_ascii=False)
+    text = json.dumps(_json_safe(scene), indent=indent, ensure_ascii=False)
     with open(Path(path), "w", encoding="utf-8") as f:
         f.write(text)
+
+
+def _json_safe(node: Any) -> Any:
+    """把非有限 float 换成 None（= JS ``JSON.stringify`` 的 NaN/Infinity → null）。
+
+    只可能在非有限入参（``--x/--d/--hp/--h/--pitch/--roll`` 传 ``nan``/``inf``）
+    下出现；正常配方走不到这个分支，逐字节不变。
+    """
+    if isinstance(node, float):
+        return node if math.isfinite(node) else None
+    if isinstance(node, dict):
+        return {k: _json_safe(v) for k, v in node.items()}
+    if isinstance(node, (list, tuple)):
+        return [_json_safe(v) for v in node]
+    return node
 
 
 def load_scene(path: Any) -> dict:

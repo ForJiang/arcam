@@ -390,6 +390,62 @@ def test_fit_deterministic() -> None:
     assert a.rms == pytest.approx(b.rms)
 
 
+# ── _refine_plane 精修兜底（fit_ground_plane docstring 承诺的分支）────────────
+
+def test_refine_plane_returns_candidate_when_too_few_inliers() -> None:
+    """候选模型内点 <3 → 原样返回（三点才能定义平面，谈不上精修）。"""
+    from arcam.plane import _refine_plane
+
+    up = np.array([0.0, -1.0, 0.0])
+    tol = 0.02
+    pts = np.array([[0.0, 0.0, 5.0],        # 在候选平面 y=0 上（2 个内点）
+                    [1.0, 0.0, 5.0],
+                    [0.0, 50.0, 5.0]])      # 离平面 50m：外点
+    normal = np.array([0.0, -1.0, 0.0])
+    n, d, inliers, rms = _refine_plane(pts, normal, 0.0, tol, up)
+    assert inliers == 2
+    assert (n == normal).all() and d == 0.0        # 候选模型原样带回
+    assert rms == pytest.approx(0.0)
+
+
+def test_refine_plane_empty_inlier_set_rms_is_inf_not_nan() -> None:
+    """空内点集 → rms=inf（不是 NaN）：NaN 会污染 /api/lidar/inspect 的 JSON。
+
+    构造：候选平面方程给错符号（offset=-1.55 而地面在深度系 y=+1.55），一个内点
+    都没有——旧实现在这里算空集均值，抛 RuntimeWarning 并产出 NaN。
+    """
+    from arcam.plane import _refine_plane
+
+    up = np.array([0.0, -1.0, 0.0])
+    rng = np.random.default_rng(0)
+    pts = np.stack([rng.uniform(-3, 3, 64), 1.55 + rng.normal(0, 0.002, 64),
+                    rng.uniform(1, 8, 64)], axis=1)
+    n, d, inliers, rms = _refine_plane(pts, np.array([0.0, -1.0, 0.0]), -1.55,
+                                       0.02, up)
+    assert inliers == 0
+    assert rms == float('inf') and math.isfinite(d)
+
+
+def test_refine_plane_refines_noisy_ground() -> None:
+    """正常路径：y=1.55（深度系，y 向下故地面在 +h）平面 + σ=2mm 噪 → 精修回收。"""
+    from arcam.plane import _refine_plane
+
+    up = np.array([0.0, -1.0, 0.0])
+    rng = np.random.default_rng(0)
+    pts = np.stack([rng.uniform(-3, 3, 400), 1.55 + rng.normal(0, 0.002, 400),
+                    rng.uniform(1, 8, 400)], axis=1)
+    n, d, inliers, rms = _refine_plane(pts, np.array([0.0, -1.0, 0.0]), 1.55,
+                                       0.02, up)
+    assert inliers == 400
+    assert d == pytest.approx(1.55, abs=0.005)       # 精修后的 offset 仍等于相机高
+    assert n[1] == pytest.approx(-1.0, abs=1e-3)     # 法向仍朝天
+    assert rms < 0.005
+
+    # 「精修后内点 <3 → 回退候选模型」分支：几何上不可达（内点都在 tol 内时最小二乘
+    # 面只会更贴数据；共线/重合退化集上 SVD 面仍包含这些点），故不做触发用例——
+    # 守卫本身由上面两个分支与 _rms_of 的 inf 口径覆盖。
+
+
 def test_depth_stats() -> None:
     """E5 诊断：覆盖率与内点比例。"""
     frame, _ = _synth_scene(1.55, 12.0, 8.0)

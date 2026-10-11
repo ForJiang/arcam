@@ -101,7 +101,8 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
                  shadow: bool = True, grain: bool = True,
                  sample_light: bool = True,
                  shadow_az: float = 0.0, shadow_opacity: float = 1.0,
-                 grain_scale: float = 1.0) -> ComposedShot:
+                 grain_scale: float = 1.0,
+                 with_char_layer: bool = True) -> ComposedShot:
     """composeShot 六步（index.html:3673-3701）。
 
     ① ``R = frameRect(frame_key)``
@@ -139,6 +140,10 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
             :data:`_ENV_OVERRIDE_KEYS`）。显式值优先于深度测出值（LIDAR-SPEC §0）；
             仅 ``depth`` 或本参数非空时参与合并。argparse 侧由 CLI 负责只把用户
             真显式给过的键放进来（compose 侧不解析 argv）。
+        with_char_layer: 要不要第二遍出立绘层（``char_layer``）。``False`` 时
+            跳过第二遍 ``_engine``、``char_layer`` 为 None —— 只要出图的调用方
+            （video 逐帧、CLI render/watch）省掉这遍白烧（实测占单帧 47%）。
+            素材包/导出要两层对应，保持默认 ``True``。
 
     Returns:
         ComposedShot（``env`` 字段带回本遍实际用到的 CameraEnv，诊断用）。
@@ -155,14 +160,18 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
         depth=depth, shadow=shadow, grain=grain, sample_light=sample_light,
         shadow_az=shadow_az, shadow_opacity=shadow_opacity,
         grain_scale=grain_scale)
-    # 立绘层与照片**同一个裁切框**：同一份 frame_key、同一套光，两张图才逐像素对应
-    _, _, layer_rgba = _engine(
-        None, char_rgba01, subj, cam, frame_key,
-        light=light_used, mode=mode, size_pct=size_pct, char_scale=char_scale,
-        rot_basis=rot_basis, tone=False, shot=shot, edge_bar=edge_bar,
-        depth=depth, shadow=shadow, grain=grain, sample_light=sample_light,
-        shadow_az=shadow_az, shadow_opacity=shadow_opacity,
-        grain_scale=grain_scale)
+    # 立绘层与照片**同一个裁切框**：同一份 frame_key、同一套光，两张图才逐像素对应。
+    # with_char_layer=False（video 逐帧/CLI 出图）整遍跳过：第二遍 _engine 与第一遍
+    # 同构图，只为出那张透明底立绘层，只要 shot 的调用方纯白烧（实测 47%）。
+    layer_rgba = None
+    if with_char_layer:
+        _, _, layer_rgba = _engine(
+            None, char_rgba01, subj, cam, frame_key,
+            light=light_used, mode=mode, size_pct=size_pct, char_scale=char_scale,
+            rot_basis=rot_basis, tone=False, shot=shot, edge_bar=edge_bar,
+            depth=depth, shadow=shadow, grain=grain, sample_light=sample_light,
+            shadow_az=shadow_az, shadow_opacity=shadow_opacity,
+            grain_scale=grain_scale)
     return ComposedShot(shot=shot_rgba[..., :3], rect=rect,
                         light=light_used, char_layer=layer_rgba, env=env)
 

@@ -117,7 +117,7 @@ def ground_placement(char_rgba: np.ndarray | None, subj: Subject, cam: Camera,
     if pb is None or pt is None:
         return None
     span = math.hypot(pb[0] - pt[0], pb[1] - pt[1])
-    if span < 2.0:
+    if not (span >= 2.0):      # NaN 稳健形式（NaN >= 2.0 为 False → 剔除），同 geometry.project
         return None
     h = span * char_scale
     ux = (pt[0] - pb[0]) / span
@@ -210,8 +210,8 @@ def auto_fix_x(char_rgba: np.ndarray | None, subj: Subject, cam: Camera, *,
     """
     free_p = _free_p_of(kw.get('free_p'))
     keep_x = subj.lateral_m if mode != 'free' else float(free_p[0])
-    if not cam.width or not cam.height:
-        return (keep_x, 'nochar')          # 原版 !cv.width 分支（0×0 时 JS 同样落这里）
+    if not cam.width:
+        return (keep_x, 'nochar')          # 原版 !cv.width 分支（2997，只判宽）
     c0 = current_placement(char_rgba, subj, cam, mode=mode, **kw)
     if c0 is None:
         return (keep_x, 'nochar')
@@ -269,11 +269,13 @@ def snap_to_edge(c: SpritePlacement, bar: int, rect: Rect, aspect: float,
     h = c.h
     if not (h > 0):
         return c
-    if not rot or math.isnan(rot):
+    if not rot or not math.isfinite(rot):
         # 原版 ``if(!rot) rot=0`` 的 JS 假值集含 NaN（!NaN === true）；Python 的
         # ``not nan`` 是 False，NaN 会漏到 _rotate_bar 里把 js_round 的 math.floor
-        # 炸成 ValueError（公开 API 的 rot/rot_deg 由调用方数据算出，NaN 可达）。
-        # 这里显式补齐 NaN 归一。
+        # 炸成 ValueError。±Infinity 同理：``not inf`` 也是 False，会漏到
+        # ``math.cos(inf)`` 上抛 ValueError（原版 Math.cos(±Infinity) 得 NaN 不抛）。
+        # rot/rot_deg 是公开 API 参数（CLI 未暴露，由调用方数据算出），非有限值
+        # 从 API 侧可达，这里显式补齐归一。
         rot = 0.0
     w = h * aspect
     ac = abs(math.cos(rot))

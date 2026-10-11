@@ -1,5 +1,7 @@
 // 实时相机层 —— index.html:3899-4037 的浏览器侧移植（FEATURE-SPEC §4）。
-// docs（Pages）版：与 webui 版同源；快门帧经 window.arcamPagesSetPhoto 交给 app.js。
+// docs（Pages）版：与 webui 版逐字同源（仅本行抬头注释不同）；快门帧由调用方
+// 直接收（app.js 的 bindLive：arcamLive.shoot() → toBlob → setPhoto(File)），
+// 中间没有 window.arcamPagesSetPhoto 之类的钩子。
 // 摄像头 / 陀螺仪 / 快门 / 变焦；桌面端无传感器时保留手拖参数。
 (function () {
   "use strict";

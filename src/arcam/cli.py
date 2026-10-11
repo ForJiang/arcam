@@ -42,13 +42,14 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+from PIL import UnidentifiedImageError as PILUnidentifiedImageError
 
 from arcam.compose import _merge_env, _over, compose_char_layer, compose_shot
 from arcam.frames import frame_rect
 from arcam.geometry import Camera
 from arcam.i18n import LANGS, TXT, t
 from arcam.matting import anime_cut
-from arcam.numeric import js_round
+from arcam.numeric import js_round, js_to_fixed
 from arcam.placement import FRAMES, SHOTS, Subject, current_placement
 from arcam.scene import build_scene, save_scene
 from arcam.video import (
@@ -95,24 +96,24 @@ def _add_placement(p: argparse.ArgumentParser) -> None:
     ``--depth`` 的路径由 :func:`_pose` 把 None 还原成 S 默认值，行为与从前一致。
     """
     g = p.add_argument_group("摆放参数（默认值 = 原版 S 的默认值，index.html:921–937）")
-    g.add_argument("--x", type=float, default=None, metavar="米",
+    g.add_argument("--x", type=_finite, default=None, metavar="米",
                    help="人物横向偏移（S.x，+右，默认 0）")
-    g.add_argument("--d", type=float, default=None, metavar="米",
+    g.add_argument("--d", type=_finite, default=None, metavar="米",
                    help="人物到相机的纵向距离（S.d，默认 4）")
-    g.add_argument("--h", type=float, default=None, metavar="米",
+    g.add_argument("--h", type=_finite, default=None, metavar="米",
                    help="相机离地高（S.h，默认 1.6）")
-    g.add_argument("--hp", type=float, default=1.65, metavar="米",
+    g.add_argument("--hp", type=_finite, default=1.65, metavar="米",
                    help="人物身高（S.Hp，默认 1.65）")
-    g.add_argument("--feq", type=float, default=23.0, metavar="mm",
+    g.add_argument("--feq", type=_finite, default=23.0, metavar="mm",
                    help="等效 35mm 焦距（S.feq，默认 23）")
-    g.add_argument("--pitch", type=float, default=None, metavar="度",
+    g.add_argument("--pitch", type=_finite, default=None, metavar="度",
                    help="俯角（S.pitch，低头为正，默认 0）")
-    g.add_argument("--roll", type=float, default=None, metavar="度",
+    g.add_argument("--roll", type=_finite, default=None, metavar="度",
                    help="滚转角（S.roll，画面顺时针，默认 0）")
     g.add_argument("--shot", default="全身", choices=list(SHOTS), metavar="景别",
                    help="景别：" + "，".join(f"{k}={v}" for k, v in SHOTS.items())
                         + "（下沿离地高度/身高，默认 全身）")
-    g.add_argument("--char-scale", type=float, default=1.0, metavar="倍",
+    g.add_argument("--char-scale", type=_finite, default=1.0, metavar="倍",
                    help="立绘倍率（S.charScale，只乘投影跨度，默认 1）")
     g.add_argument("--frame", default="满幅", choices=list(FRAMES), metavar="画幅",
                    help="出图画幅（FRAMES 中文 key，默认 满幅=整块画布）")
@@ -120,7 +121,7 @@ def _add_placement(p: argparse.ArgumentParser) -> None:
                    help="立绘对正基准：world 跟世界竖直 / frame 永远画面竖直（S.rotBasis）")
     g.add_argument("--mode", default="ground", choices=("ground", "free"),
                    help="摆放模式：ground 贴地 / free 自由半身（S.mode）")
-    g.add_argument("--size-pct", type=float, default=60.0, metavar="%",
+    g.add_argument("--size-pct", type=_finite, default=60.0, metavar="%",
                    help="自由模式立绘占画面高度百分比（S.sizePct，默认 60）")
     g.add_argument("--edge-bar", type=int, default=0, choices=(0, 1, 2, 3, 4),
                    metavar="0-4", help="框条吸附（S.edgeBar，0 不吸/1 上/2 下/3 左/4 右，"
@@ -128,12 +129,13 @@ def _add_placement(p: argparse.ArgumentParser) -> None:
     g.add_argument("--tone", action="store_true",
                    help="色调匹配（原版 TONE_ON，只有照片路径生效，index.html:3690）")
     g.add_argument("--no-light", action="store_true",
-                   help="关掉环境光烘焙（bakeLit；只出原色立绘）")
+                   help="关掉环境光烘焙（bakeLit；只出原色立绘）。char-layer/multi 没有"
+                        "照片可采光、本来就不烘；bundle 与网页导出的立绘层跟随照片光）")
     g.add_argument("--no-grain", action="store_true",
                    help="关掉颗粒匹配（ bakeLit 里的颗粒那一段，光仍烘）")
     g.add_argument("--no-shadow", action="store_true",
                    help="关掉接触阴影（原版 LIGHT_SHD，index.html:1144）")
-    g.add_argument("--shadow-az", type=float, default=0.0, metavar="度",
+    g.add_argument("--shadow-az", type=_finite, default=0.0, metavar="度",
                    help="阴影光线方位角（默认 0 = 影子正落脚下，与原版一致；非 0 = "
                         "斜射拖偏。原版 2D 阴影无方向，这是离线侧新增控制）")
     g.add_argument("--shadow-opacity", type=_nonneg, default=1.0, metavar="倍",
@@ -141,6 +143,19 @@ def _add_placement(p: argparse.ArgumentParser) -> None:
     g.add_argument("--grain-scale", type=_nonneg, default=1.0, metavar="倍",
                    help="颗粒强度倍率（默认 1.0 = 原版逐位一致；乘在 bakeLit 的 gAmp 上，"
                         "只改颗粒那段，曲线/白平衡/饱和不动；0 = 不撒颗粒）")
+
+
+def _finite(value: float) -> float:
+    """argparse ``type=``：有限浮点（nan/inf 报用法错误 exit 2）。
+
+    为什么入口就拦：``--pitch nan`` 之类放行的话，渲染链的 NaN 守卫（v2.0.0 加）
+    会让落位解不出 —— 出一张**没有立绘**的图、退出码 0、零提示，正是「静默失效」
+    本类。webapp 对同一批键本就 400（「不是有限数」），CLI 不能另立一套口径。
+    """
+    v = float(value)
+    if not math.isfinite(v):
+        raise argparse.ArgumentTypeError(f"应是有限数，得到 {value!r}")
+    return v
 
 
 def _nonneg(value: float) -> float:
@@ -152,15 +167,27 @@ def _nonneg(value: float) -> float:
     对同两键本就 400，CLI 不能另立一套口径。
     """
     v = float(value)
+    if not math.isfinite(v):
+        raise argparse.ArgumentTypeError(f"应是有限数，得到 {value!r}")
     if v < 0.0:
         raise argparse.ArgumentTypeError(f"应 >= 0，得到 {v:g}")
     return v
 
 
 def _add_lang(p: argparse.ArgumentParser) -> None:
-    """语言开关（FEATURE-SPEC §3）：只影响人话输出，不改任何数值行为。"""
+    """语言开关（FEATURE-SPEC §3）：只影响人话输出，不改任何数值行为。
+
+    ⚠ 覆盖面（v2.0.0 审计实测，避免"旗标收了但没处用"的误导）：当前只有
+    ``prep`` / ``batch`` 的提示与 ``--overlay`` 的 HUD 文案（horizon 标签、
+    三行读数）真的跟它走；``multi`` / ``contact-sheet`` / ``recipe`` 收下但
+    输出里没有可翻的条目（语言表与 webui/docs 两侧 i18n.js 同源，加键要动
+    那两个文件，属编排者分区）；``render`` / ``char-layer`` / ``bundle`` /
+    ``video`` / ``matte`` 等则连这个旗标都没有。help 文本按此如实写。
+    """
     p.add_argument("--lang", default="zh", choices=list(LANGS), metavar="语言",
-                   help="人话输出语言：zh 中文 / en English（默认 zh；数值行为不变）")
+                   help="人话输出语言：zh 中文 / en English（默认 zh；数值行为不变。"
+                        "目前覆盖 prep/batch 的提示与 --overlay 的 HUD 文案，"
+                        "其余命令的输出暂无英文条目）")
 
 
 #: ``--overlay`` 的合法层名与 **canonical 叠放次序**（grid → horizon → figure →
@@ -283,13 +310,14 @@ def build_parser() -> argparse.ArgumentParser:
     rp.set_defaults(func=cmd_recipe_apply)
     _add_lang(p)
 
-    p = sub.add_parser("watch", help="监视文件夹：素材或轨道变了就自动重出图",
-                       description="盯着 PHOTO（或 --track 轨道文件），改动落地后自动重跑出图——"
-                                   "调参时不用反复敲命令。Ctrl-C 退出；--once 只跑一遍（等于带日志的 render）。")
+    p = sub.add_parser("watch", help="监视文件夹：素材变了就自动重出图",
+                       description="盯着 PHOTO 与 CHAR，改动落地后自动重跑出图——"
+                                   "调参时不用反复敲命令。Ctrl-C 退出；--once 只跑一遍"
+                                   "（等于带日志的 render）。")
     p.add_argument("photo", metavar="PHOTO", help="要监视的照片（改了它就重渲）")
     p.add_argument("char", metavar="CHAR", help="立绘（改了它也重渲）")
     _add_out(p)
-    p.add_argument("--interval", type=float, default=1.0, metavar="秒",
+    p.add_argument("--interval", type=_finite, default=1.0, metavar="秒",
                    help="轮询间隔（默认 1.0；文件系统事件在各平台可靠性不一，轮询最稳）")
     p.add_argument("--once", action="store_true", help="只跑一遍就退出（不进入监视循环）")
     p.add_argument("--overlay", default=None, type=_overlay_layers,
@@ -442,11 +470,11 @@ def build_parser() -> argparse.ArgumentParser:
                     "render --depth）。默认把帧写进 --out 目录（frame_%%06d.depth，"
                     "ARCD 格式，内参外参齐备）；--push 给端口时改为推给正在跑的 "
                     "arcam lidar serve。噪声由 (seed, index) 播种 → 同参同帧可复现。")
-    pg.add_argument("--h", type=float, default=1.6, metavar="米",
+    pg.add_argument("--h", type=_finite, default=1.6, metavar="米",
                     help="相机离地高（真值，默认 1.6）")
-    pg.add_argument("--pitch", type=float, default=12.0, metavar="度",
+    pg.add_argument("--pitch", type=_finite, default=12.0, metavar="度",
                     help="俯角（真值，默认 12）")
-    pg.add_argument("--roll", type=float, default=8.0, metavar="度",
+    pg.add_argument("--roll", type=_finite, default=8.0, metavar="度",
                     help="滚转角（真值，默认 8）")
     pg.add_argument("--width", type=int, default=256, metavar="PX",
                     help="深度帧宽（默认 256）")
@@ -474,10 +502,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="监听地址（默认 127.0.0.1，只绑本机回环，不做网络暴露）")
     p.add_argument("--port", type=int, default=8765, metavar="端口",
                    help="监听端口（默认 8765；被占用时换个端口）")
-    p.add_argument("--no-open", action="store_true",
-                   help="不自动打开浏览器（自己贴地址）")
-    p.add_argument("--open", action="store_true",
-                   help="自动打开浏览器（默认行为；启动器显式传入）")
+    # --open 与 --no-open 互斥：--open 是"默认行为"的显式写法（启动器
+    # 启动AR取景器.command 固定传 `arcam web --open --port`，见 WEB-SPEC §4），
+    # 两个一起给没有可执行语义。放进互斥组后它才真正被 parser 读到——否则
+    # 就是"解析了但没人读"的摆设旗标（v2.0.0 审计：61 个参数里唯一一个）。
+    open_group = p.add_mutually_exclusive_group()
+    open_group.add_argument("--open", action="store_true",
+                            help="自动打开浏览器（默认行为；启动器显式传入）")
+    open_group.add_argument("--no-open", action="store_true",
+                            help="不自动打开浏览器（自己贴地址）")
     p.set_defaults(func=cmd_web)
     return parser
 
@@ -489,6 +522,19 @@ def _need(path, what: str) -> Path:
     if not p.is_file():
         raise CliError(f"找不到{what}：{p}")
     return p
+
+
+def _to_u8(arr) -> np.ndarray:
+    """compose 出图 → uint8 字节域（render / watch / multi / contact-sheet 共用）。
+
+    compose_shot 出的是 uint8 (0..255)，浮点口径也收（clip + 四舍五入到字节）
+    —— 与 :func:`arcam.video._to_pil` 的量化时点一致，避免双重量化把图洗白
+    （v1.9.0 overlay 回归钉：曾按浮点口径又乘 255 再 clip，整图均值差 128）。
+    """
+    a = np.asarray(arr)
+    if a.dtype == np.uint8:
+        return a
+    return np.clip(a.astype(np.float64) * 255.0 + 0.5, 0, 255).astype(np.uint8)
 
 
 #: 原版 S 的默认值（index.html:921-937）—— 这些开关 argparse 默认 None，
@@ -646,22 +692,19 @@ def cmd_render(args) -> int:
               f"roll={env.roll_deg:.2f}°{suffix}")
     else:
         cam_eff, subj_eff = cam, subj
-    shot = compose_shot(src01, char01, subj, cam, **kw)
+    shot = compose_shot(src01, char01, subj, cam, with_char_layer=False, **kw)
     out = Path(args.out)
-    # compose_shot 出 uint8 (0..255)；浮点口径也收（clip+四舍五入到字节），
-    # 与 video._to_pil 的量化时点一致，避免双重量化把图洗白。
-    base_arr = np.asarray(shot.shot)
-    if base_arr.dtype == np.uint8:
-        img_u8 = base_arr
-    else:
-        img_u8 = np.clip(base_arr.astype(np.float64) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    img_u8 = _to_u8(shot.shot)
     overlay_layers = _overlay_layers(args.overlay)
     overlay_note = ""
+    # overlay 的构图提示与 scene.json 记的都是**本遍实际落位**：算一次两处共用
+    # （v1.5 审计的教训是这两处各漏过参数，重复计算还容易改一处漏一处）
+    placement = (_placement(char01, subj_eff, cam_eff, args)
+                 if overlay_layers or args.scene else None)
     if overlay_layers:
         # HUD 按 canonical 序逐层叠（原版出图不带 HUD，这是排查构图的显式开关）
         img_u8, overlay_note = _apply_overlay(
-            img_u8, args, cam_eff, subj_eff, width, height,
-            placement=_placement(char01, subj_eff, cam_eff, args))
+            img_u8, args, cam_eff, subj_eff, width, height, placement=placement)
     save_png(img_u8, out)
     # 提示里列**实际叠的层序**（canonical 序，不是用户书写序）；单层时与从前逐字相同
     print(f"已出图 {out}（{width}×{height}）"
@@ -672,7 +715,7 @@ def cmd_render(args) -> int:
         if scene_path.parent and not scene_path.parent.exists():
             scene_path.parent.mkdir(parents=True, exist_ok=True)
         save_scene(_scene_dict(args, char01, subj_eff, cam_eff, shot.rect,
-                               _placement(char01, subj_eff, cam_eff, args)), scene_path)
+                               placement), scene_path)
         print(f"配方 {scene_path}（version 1，与原版 scene.json 同构）")
     return 0
 
@@ -685,14 +728,16 @@ def cmd_render(args) -> int:
 RECIPE_ROOT = Path(os.environ.get("ARCAM_RECIPES",
                                   str(Path.home() / ".arcam" / "recipes")))
 
+#: 摆放参数键 —— 配方库（:data:`_RECIPE_FLAGS`）与 ``--vary``（contact-sheet）
+#: 共用同一份键集合：新增摆放参数只改这里，两处不会漂移。
+_PLACEMENT_KEYS = (
+    "h", "hp", "d", "x", "feq", "pitch", "roll", "shot", "char_scale",
+    "frame", "mode", "rot_basis", "size_pct", "edge_bar",
+)
+
 #: 配方字段 → CLI 旗标（apply 打印用；None = 不该出现在 CLI 里的内部字段）
-_RECIPE_FLAGS = {
-    "h": "--h", "hp": "--hp", "d": "--d", "x": "--x", "feq": "--feq",
-    "pitch": "--pitch", "roll": "--roll", "shot": "--shot",
-    "char_scale": "--char-scale", "frame": "--frame", "mode": "--mode",
-    "rot_basis": "--rot-basis", "size_pct": "--size-pct",
-    "edge_bar": "--edge-bar",
-}
+#: 键序 = :data:`_PLACEMENT_KEYS`，旗标名机械可推（``_`` → ``-``）。
+_RECIPE_FLAGS = {k: "--" + k.replace("_", "-") for k in _PLACEMENT_KEYS}
 
 
 def _recipe_path(name: str) -> Path:
@@ -818,9 +863,55 @@ def cmd_recipe_apply(args) -> int:
 #: 对比网格上限（笛卡尔积格数；防 --vary 给太宽把内存/时间炸掉）
 _SHEET_MAX_CELLS = 24
 
+#: ``--vary`` / ``--spec`` 的枚举型键 → 合法值。与 build_parser 里对应旗标的
+#: argparse ``choices`` **同源同口径**：顶层旗标有 choices 挡着，这两个字符串
+#: 路径没有。漏校验的后果不是报错，而是静默回落到原版 JS 兜底 ——
+#: ``SHOTS.get(shot) or SHOTS['全身']``（placement.py:113）、
+#: ``FRAMES[key] || 0``（未知名当"自由"不裁，frames.py:41）、
+#: ``rot_basis != 'frame'`` 即 world（placement.py:181）、
+#: ``edge_bar ∉ 1..4`` 时 snap_to_edge 原样返回不吸附。
+#: v2.0.0 审计实测：``--vary shot=bogus`` / ``--spec frame=bogus`` 退出码 0、
+#: 出图与默认值无差——正是"参数解析了但没人读"的经典形态，故在此拦成人话错误。
+_VARY_ENUMS: dict[str, tuple[str, ...]] = {
+    "shot": tuple(SHOTS), "frame": tuple(FRAMES),
+    "mode": ("ground", "free"), "rot_basis": ("world", "frame"),
+}
+
+#: ``--edge-bar`` 旗标的 choices（0 不吸/1 上/2 下/3 左/4 右）——同上，
+#: 字符串路径也要挡，否则 9 会被 snap_to_edge 安静地当成"不吸附"。
+_VARY_EDGE_BARS = (0, 1, 2, 3, 4)
+
+
+def _coerce_placement_value(key: str, raw: str, where: str):
+    """摆放参数字符串 → typed 值（``--vary`` / ``--spec`` 共用）。
+
+    枚举键照 :data:`_VARY_ENUMS` 校验、``edge_bar`` 照 :data:`_VARY_EDGE_BARS`
+    校验，数字键转 float（edge_bar 转 int）。转换失败报"哪个键、哪个值"的
+    人话错误，不把 Python 的 ``could not convert string to float`` 直接抛给用户。
+    """
+    if key in _VARY_ENUMS:
+        if raw not in _VARY_ENUMS[key]:
+            raise CliError(f"{where} {key} 取值 {raw!r} 不合法"
+                           f"（可用：{'/'.join(_VARY_ENUMS[key])}）")
+        return raw
+    try:
+        value = int(raw) if key == "edge_bar" else float(raw)
+    except ValueError:
+        kind = "整数" if key == "edge_bar" else "数字"
+        raise CliError(f"{where} {key} 取值 {raw!r} 不是{kind}") from None
+    if key == "edge_bar" and value not in _VARY_EDGE_BARS:
+        raise CliError(f"{where} edge_bar 取值 {raw!r} 不合法"
+                       f"（可用：{'/'.join(str(b) for b in _VARY_EDGE_BARS)}）")
+    return value
+
 
 def _parse_vary(items: list[str]) -> list[tuple[str, list[str]]]:
-    """--vary K=V,V,V → [(key, [values...])]；键必须在摆放参数里。"""
+    """--vary K=V,V,V → [(key, [values...])]；键必须在摆放参数里。
+
+    取值在这里就校验（合法但不转类型）：标签条要照用户原样打印（``d=3`` 而不是
+    ``d=3.0``），类型转换留给 contact-sheet 里的 ``_coerce``（同一个
+    :func:`_coerce_placement_value`，两处口径一致）。
+    """
     axes: list[tuple[str, list[str]]] = []
     seen: set[str] = set()
     for item in items:
@@ -828,11 +919,9 @@ def _parse_vary(items: list[str]) -> list[tuple[str, list[str]]]:
             raise CliError(f"--vary 要 K=V,V 形式，收到 {item!r}")
         key, raw = item.split("=", 1)
         key = key.strip()
-        valid = {"x", "d", "h", "hp", "feq", "pitch", "roll", "shot",
-                 "char_scale", "frame", "mode", "size_pct", "edge_bar",
-                 "rot_basis"}
-        if key not in valid:
-            raise CliError(f"--vary 的键 {key!r} 不是摆放参数（可用：{'/'.join(sorted(valid))}）")
+        if key not in _PLACEMENT_KEYS:
+            raise CliError(f"--vary 的键 {key!r} 不是摆放参数"
+                           f"（可用：{'/'.join(_PLACEMENT_KEYS)}）")
         if key in seen:
             # 同一个参数扫两轴：笛卡尔积照算，但后一轴把前一轴的值整个覆写，
             # 格子成倍重复而标签看不出问题——直接拦掉
@@ -841,6 +930,8 @@ def _parse_vary(items: list[str]) -> list[tuple[str, list[str]]]:
         values = [v.strip() for v in raw.split(",") if v.strip()]
         if not values:
             raise CliError(f"--vary {key} 没给取值")
+        for v in values:                       # 现在就校验，别等渲染到一半才炸
+            _coerce_placement_value(key, v, "--vary")
         axes.append((key, values))
     return axes
 
@@ -891,10 +982,10 @@ def _render_one(args, photo_p: Path, char01, out: Path, overlay_note: list) -> i
     height, width = src01.shape[:2]
     cam, subj = _pose(args, width, height)
     kw = _compose_kw(args)
-    shot = compose_shot(src01, char01, subj, cam, **kw)
-    base_arr = np.asarray(shot.shot)
-    img_u8 = base_arr if base_arr.dtype == np.uint8 else \
-        np.clip(base_arr.astype(np.float64) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    # with_char_layer=False：单张出图不需要立绘层（素材包走 cmd_bundle 的另一条路），
+    # 省掉 compose_shot 里同构图的第二遍 _engine
+    shot = compose_shot(src01, char01, subj, cam, with_char_layer=False, **kw)
+    img_u8 = _to_u8(shot.shot)
     if getattr(args, "overlay", None):
         img_u8, note = _apply_overlay(img_u8, args, cam, subj, width, height,
                                       placement=_placement(char01, subj, cam, args))
@@ -987,14 +1078,11 @@ def _parse_spec(text: str) -> dict:
         if k not in _MULTI_SPEC_KEYS:
             raise CliError(f"spec 键 {k!r} 不认识（可用：{'/'.join(sorted(_MULTI_SPEC_KEYS))}）")
         key = _MULTI_SPEC_KEYS[k]
-        if key in ("shot", "frame", "mode", "rot_basis"):
-            out[key] = v.strip()
-        elif key == "tone":
+        if key == "tone":
             out[key] = v.strip().lower() in ("1", "true", "yes", "on")
-        elif key == "edge_bar":
-            out[key] = int(v)
         else:
-            out[key] = float(v)
+            # 与 --vary 同一个 coercion：枚举/edge_bar 校验 + 人话数字错误
+            out[key] = _coerce_placement_value(key, v.strip(), "spec")
     return out
 
 
@@ -1018,15 +1106,25 @@ def _paste_layer(base_rgb01: np.ndarray, layer_rgba01: np.ndarray, rect) -> np.n
     character.png 一致），不是整幅。满幅时两者恰好同尺寸、偏移 (0,0)，非满幅时
     不按偏移贴就会形状不匹配——v1.5 审计修复前 ``multi --frame 4:5`` 直接 numpy
     广播报错（且报的是内部形状，不是人话）。
+
+    ⚠ 进来的层是 **uint8 0..255**（compose_char_layer / compose_shot.char_layer
+    的产物），:func:`arcam.compose._over` 要的是 float64 [0,1]。早直接把 uint8
+    赋值进 float 数组：alpha=255 被当成 1.0 的 255 倍，source-over 算出
+    ``base·(1−255) + rgb·255`` → 再乘 255 clip → **整块立绘变纯白**（实测 1990
+    个不透明像素全是 255,255,255，而立绘本色 235,60,200）。浮点入参（[0,1]）
+    按原样过，与 :func:`arcam.video._fit_rgb01` 的 dtype 分流同一口径。
     """
     height, width = base_rgb01.shape[:2]
+    layer = np.asarray(layer_rgba01)
+    if not np.issubdtype(layer.dtype, np.floating):
+        layer = layer.astype(np.float64) / 255.0
     full = np.zeros((height, width, 4), dtype=np.float64)
     ox, oy = js_round(rect.x), js_round(rect.y)
-    h, w = int(layer_rgba01.shape[0]), int(layer_rgba01.shape[1])
+    h, w = int(layer.shape[0]), int(layer.shape[1])
     x0, y0 = max(0, ox), max(0, oy)
     x1, y1 = min(width, ox + w), min(height, oy + h)
     if x1 > x0 and y1 > y0:
-        full[y0:y1, x0:x1] = layer_rgba01[y0 - oy:y1 - oy, x0 - ox:x1 - ox]
+        full[y0:y1, x0:x1] = layer[y0 - oy:y1 - oy, x0 - ox:x1 - ox]
     return _over(base_rgb01, full)
 
 
@@ -1068,8 +1166,7 @@ def cmd_multi(args) -> int:
     out_img = base
     for layer, rect, _name in layers:
         out_img = _paste_layer(out_img, layer, rect)
-    img_u8 = np.clip(out_img * 255.0 + 0.5, 0, 255).astype(np.uint8) \
-        if out_img.dtype != np.uint8 else np.asarray(out_img)
+    img_u8 = _to_u8(out_img)
     out = Path(args.out)
     if out.parent and not out.parent.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1079,7 +1176,8 @@ def cmd_multi(args) -> int:
         # scene.json 记第一张的落位（多主体的配方格式原版没有，如实记主体一）
         char01 = image_to_rgba01(_need(args.chars[0], "立绘 1"))
         cam, subj = _pose(args, width, height)
-        shot = compose_shot(src01, char01, subj, cam, **_compose_kw(args))
+        shot = compose_shot(src01, char01, subj, cam, with_char_layer=False,
+                             **_compose_kw(args))
         save_scene(_scene_dict(args, char01, subj, cam, shot.rect,
                                _placement(char01, subj, cam, args),
                                char_name=Path(args.chars[0]).name),
@@ -1202,11 +1300,9 @@ def cmd_contact_sheet(args) -> int:
     base_params = _compose_kw(args)
 
     def _coerce(key: str, v: str):
-        if key in ("shot", "frame", "mode", "rot_basis"):
-            return v
-        if key == "edge_bar":
-            return int(v)
-        return float(v)
+        # 取值在 _parse_vary 里已校验过，这里只做类型转换——调同一个函数，
+        # 保证 --vary 与 --spec 两条字符串路径的枚举/数字口径永远一致
+        return _coerce_placement_value(key, v, "--vary")
 
     cells = []
     for combo in combos:
@@ -1238,9 +1334,8 @@ def cmd_contact_sheet(args) -> int:
                 subj = Subject(subj.height_m, float(v), subj.lateral_m)
             elif key == "x":
                 subj = Subject(subj.height_m, subj.distance_m, float(v))
-        shot = compose_shot(src01, char01, subj, cam, **kw)
-        img = np.clip(shot.shot * 255.0 + 0.5, 0, 255).astype(np.uint8) \
-            if shot.shot.dtype != np.uint8 else np.asarray(shot.shot)
+        shot = compose_shot(src01, char01, subj, cam, with_char_layer=False, **kw)
+        img = _to_u8(shot.shot)
         label = "  ".join(f"{k}={v}" for k, v in combo.items())
         cells.append((img, label))
 
@@ -1253,7 +1348,9 @@ def cmd_contact_sheet(args) -> int:
     for img, label in cells:
         h, w = img.shape[:2]
         cw = cell_w
-        ch = max(1, int(round(h * (cw / w))))
+        # 单元格高按画幅等比：取整走 js_round（项目统一口径，不用内置 round 的
+        # 银行家舍入——平分时两者结论不同）
+        ch = max(1, js_round(h * (cw / w)))
         im = Image.fromarray(img, "RGB").resize((cw, ch), Image.BILINEAR)
         scaled.append((im, label))
         cell_h = max(cell_h, ch)
@@ -1345,7 +1442,8 @@ def cmd_batch(args) -> int:
                     'x': subj.lateral_m})
             else:
                 kw_eff = kw
-            shot = compose_shot(src01, char01, subj, cam, **kw_eff)
+            shot = compose_shot(src01, char01, subj, cam, with_char_layer=False,
+                                 **kw_eff)
             stem = f"shot_{photo.stem}"
             if args.ext == "jpg":
                 out_path = out_dir / f"{stem}.jpg"
@@ -1547,7 +1645,13 @@ def cmd_video(args) -> int:
     char_p = _need(args.char, "立绘")
     char01 = image_to_rgba01(char_p)
     out_dir = Path(args.out)
-    frames = render_track(args.bg, track, char01, out_dir, tone=args.tone, gif=args.gif)
+    try:
+        frames = render_track(args.bg, track, char01, out_dir, tone=args.tone, gif=args.gif)
+    except PILUnidentifiedImageError as e:
+        # --bg 指到非图片（视频文件最常见）：PIL 的原话是 "cannot identify image
+        # file"，用户看不出"该拿帧目录来"。补一句用法提示再退出 1。
+        raise CliError(f"{e}\n（--bg 只收单张图片或帧目录；视频请先解成帧目录，"
+                       "如 ffmpeg -i in.mp4 frames/frame_%06d.png）") from None
     extras = []
     mp4 = out_dir / MP4_NAME
     if mp4.is_file():
@@ -1682,7 +1786,7 @@ def cmd_lidar_inspect(args) -> int:
         "source": frame.source,
         "width": width,
         "height": height,
-        "coverage": round(coverage, 4),
+        "coverage": js_to_fixed(coverage, 4),
         "inliers": int(plane.inliers),
         "rms": float(plane.rms),
         "height_m": float(env.height_m),
@@ -1759,15 +1863,17 @@ def cmd_lidar_serve(args) -> int:
 
 
 def cmd_web(args) -> int:
-    """web 子命令：转交 :func:`arcam.webapp.main`（契约 = docs/WEB-SPEC.md §1）。
+    """web 子命令：转交 :func:`arcam.webapp.main`（契约 = docs/WEB-SPEC §1）。
 
     webapp 懒加载：其他子命令不为一个本地网页服务多付 import 成本；``--host``
-    ``--port`` ``--no-open`` 原样翻译成 webapp.main 的 argv。端口占用 / 起不来
-    服务由 webapp.main 打人话并返回 1（与 CLI 退出码约定一致）。
+    ``--port`` 原样翻译成 webapp.main 的 argv，``--no-open`` 透传、``--open``
+    是默认行为（webapp.main 自己没有 ``--open``，只有 ``--no-open``；两者的
+    互斥在 build_parser 的 mutex 组里挡掉）。端口占用 / 起不来服务由
+    webapp.main 打人话并返回 1（与 CLI 退出码约定一致）。
     """
     from arcam import webapp
     argv = ["--host", str(args.host), "--port", str(args.port)]
-    if args.no_open:
+    if args.no_open and not args.open:      # 互斥组保证两者不会同时为真
         argv.append("--no-open")
     return webapp.main(argv)
 

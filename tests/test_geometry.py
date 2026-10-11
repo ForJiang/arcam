@@ -391,3 +391,67 @@ def test_camera_is_frozen():
     cam = _cam()
     with pytest.raises(Exception):
         cam.pitch_deg = 5.0  # type: ignore[misc]
+
+
+# ───────────────────── 非有限角（NaN / ±inf）收口 ─────────────────────
+# CLI 的 --pitch/--roll 走 argparse ``type=float``，``inf``/``nan`` 字面量解析得进来
+# （``p.parse_args(['--pitch','inf']).pitch`` → inf）。原版 JS 的 Math.sin/cos 对
+# 非有限输入返回 NaN 不抛；Python 的 math 对 ±inf 抛 ValueError。按 focal_px / place
+# 对退化画布既定的「不抛」策略收口为 None（geometry.py:80-88 / 120-128）。
+
+@pytest.mark.parametrize("pitch,roll", [
+    (float("inf"), 0.0), (float("-inf"), 0.0), (float("nan"), 0.0),
+    (0.0, float("inf")), (0.0, float("-inf")), (0.0, float("nan")),
+    (float("inf"), float("inf")), (12.0, float("inf")), (float("nan"), 8.0),
+])
+def test_project_place_non_finite_angles_return_none(pitch, roll):
+    """非有限 pitch/roll 不许抛 ValueError（原版 JS 不抛），收口 None。"""
+    cam = _cam(pitch=pitch, roll=roll)
+    assert project(0.3, -1.0, 4.0, cam) is None
+    assert project(0.0, 0.0, 4.0, cam) is None
+    assert place(960.0, 700.0, cam) is None
+
+
+def test_non_finite_angle_scene_pixels_are_null():
+    """非有限角下 scene.json 的 footPixel/headPixel 落 null，不是 NaN 字面量。
+
+    JS 侧 project() 得 {u:NaN,v:NaN}，``JSON.stringify`` 把 NaN 写成 null；
+    Python 若让 NaN 泄进 dict，``json.dumps`` 会吐非标准的 ``NaN`` 字面量，
+    原版工具读不回。"""
+    from arcam.numeric import Rect
+    from arcam.placement import Subject
+    from arcam.scene import build_scene
+    cam = _cam(pitch=float("nan"))
+    d = build_scene(Rect(0.0, 0.0, 1920.0, 1080.0), None, Subject(1.65, 4.0, 0.0), cam,
+                    frame_key="满幅", char_rgba01=None, char_name="", mode="ground")
+    assert d["subject"]["footPixel"] is None
+    assert d["subject"]["headPixel"] is None
+    # 有限角对照：同一相机只把 pitch 换回 0，footPixel 必须是真 {u,v}
+    d2 = build_scene(Rect(0.0, 0.0, 1920.0, 1080.0), None, Subject(1.65, 4.0, 0.0), _cam(),
+                     frame_key="满幅", char_rgba01=None, char_name="", mode="ground")
+    assert set(d2["subject"]["footPixel"]) == {"u", "v"}
+
+
+@pytest.mark.parametrize("x,y,d,expect_none", [
+    # Zc 仍有限 → 照算，u/v 被非有限 x 传染（node 实跑原版：u=NaN v=NaN）
+    (float("nan"), -1.0, 4.0, False),
+    (float("inf"), -1.0, 4.0, False),
+    # Zc=NaN → not (zc > 0.05) 剔除，返回 None（原版给 NaN，由 save_scene 落 null）
+    (0.3, float("nan"), 4.0, True),
+    (0.3, -1.0, float("nan"), True),
+    # Zc=Inf > 0.05 → 照算，但 yc = Inf*sin(0) = NaN → u/v=NaN（原版同）
+    (0.3, -1.0, float("inf"), False),
+])
+def test_project_non_finite_point_never_raises(x, y, d, expect_none):
+    """非有限坐标不许抛异常，口径与原版 JS 逐位一致（node 实跑核对，见 parametrize 注释）。
+
+    两种收口都不是「静默放行」：NaN 一路漏进 js_round 的 math.floor 会报一句与源头
+    无关的「cannot convert float NaN to integer」（CLI ``--x/--d/--hp/--h nan`` 实跑
+    复现过），真正的兜底在 ground_placement 的 span 判据（见 test_placement）。"""
+    got = project(x, y, d, _cam())
+    if expect_none:
+        assert got is None
+    else:
+        assert got is not None and not math.isfinite(got[0])
+    # 俯仰+滚转下同样不抛
+    assert project(x, y, d, _cam(pitch=12.0, roll=8.0)) is not None or True

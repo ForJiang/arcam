@@ -12,6 +12,10 @@
 - ``place`` 在 ``focal_px(cam) == 0``（0×0 画布或 ``feq_mm=0``）时返回 None：JS 的
   ``/0`` 得 Infinity/NaN 传播、Python 会抛 ``ZeroDivisionError``，按 focal_px 对退化
   画布既定的「不抛」策略收口（同 :func:`focal_px` 的零维画布分流）。
+- 非有限角（``pitch_deg``/``roll_deg`` 为 NaN 或 ±inf，CLI ``--pitch inf`` 解析得进来）
+  时 ``project``/``place`` 返回 None：JS 的 ``Math.sin/cos`` 对非有限输入得 NaN 不抛，
+  Python 的 math 对 ±inf 抛 ``ValueError``。收口为 None 后 scene.json 的
+  ``footPixel``/``headPixel`` 落 ``null``，与 JS ``JSON.stringify(NaN)`` → ``null`` 一致。
 - 主点固定在画布中心 ``(W/2, H/2)``，无主点偏移（artifact §1.6）。
 """
 
@@ -73,8 +77,20 @@ def project(x: float, y: float, d: float, cam: Camera) -> tuple[float, float] | 
     """
     p = cam.pitch_deg * _DEG2RAD
     r = cam.roll_deg * _DEG2RAD
+    if not (math.isfinite(p) and math.isfinite(r)):
+        # 非有限角（NaN 或 ±inf；CLI 的 ``--pitch/--roll`` 走 argparse ``float``，
+        # ``inf``/``nan`` 字面量解析得进来）→ 原版 JS 的 Math.sin/cos 返回 NaN
+        # 不抛，Python 的 math 对 ±inf 抛 ValueError。按 focal_px / place 对退化
+        # 画布既定的「不抛」策略收口为 None；scene.json 的 footPixel/headPixel 随之
+        # 落 null，与 JS ``JSON.stringify(NaN)`` → null 一致。
+        return None
     zc = -y * math.sin(p) + d * math.cos(p)
-    if zc <= 0.05:
+    if not (zc > 0.05):
+        # 写成 ``not (zc > 0.05)`` 而不是 ``zc <= 0.05``：两者对有限值逐值等价，
+        # 但 zc 为 NaN 时前者 True（剔除）、后者 False（放行）。非有限的 x/y/d
+        # （CLI 的 ``--x/--d/--hp/--h nan`` 经 argparse float 解析得进来）会让 zc
+        # 变 NaN，放行后会一路漏进 js_round 的 math.floor，报一句与源头无关的
+        # 「cannot convert float NaN to integer」。同口径见 place / ground_placement。
         return None
     yc = -y * math.cos(p) - d * math.sin(p)
     xr = x * math.cos(r) - yc * math.sin(r)
@@ -101,20 +117,22 @@ def place(u: float, v: float, cam: Camera) -> tuple[float, float] | None:
     p = cam.pitch_deg * _DEG2RAD
     r = cam.roll_deg * _DEG2RAD
     focal = focal_px(cam)
-    if focal == 0.0:
-        # 零维画布（0×0）或 feq=0 → F=0，project 全部塌缩到主点、逆解无定义。
-        # 原版 JS 的 /0 得 Infinity/NaN 传播（不抛异常），Python 会抛
-        # ZeroDivisionError —— 按 focal_px 对退化画布既定的「不抛」策略收口为 None。
+    if focal == 0.0 or not (math.isfinite(p) and math.isfinite(r)):
+        # 零维画布（0×0）或 feq=0 → F=0，project 全部塌缩到主点、逆解无定义；
+        # 非有限角同理（NaN/±inf，见 :func:`project` 的同款收口）。
+        # 原版 JS 的 /0 与 Math.sin(±inf) 得 Infinity/NaN 传播（不抛异常），
+        # Python 会抛 ZeroDivisionError / ValueError —— 按 focal_px 对退化
+        # 画布既定的「不抛」策略收口为 None。
         return None
     up = u - cam.width / 2.0
     vp = v - cam.height / 2.0
     a = (up / focal) * math.cos(r) + (vp / focal) * math.sin(r)
     b = -(up / focal) * math.sin(r) + (vp / focal) * math.cos(r)
     den = math.sin(p) + b * math.cos(p)
-    if abs(den) < 1e-6:
+    if not (abs(den) >= 1e-6):     # NaN 稳健形式，同 project 的 zc 判据
         return None
     d = cam.height_m * (math.cos(p) - b * math.sin(p)) / den
-    if d <= 0.05:
+    if not (d > 0.05):             # 同上
         return None
     zc = cam.height_m * math.sin(p) + d * math.cos(p)
     x = a * zc

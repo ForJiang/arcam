@@ -30,6 +30,7 @@ def main(argv: list[str] | None = None) -> int      # 'arcam web' 子命令入�
 | `GET /static/*` | 静态 | — | `webui/` 下文件 |
 | `POST /api/upload` | 上传照片/立绘/深度 | multipart：字段 `photo`/`char`/`depth` | `{ok, kind, width, height, fg?}`；坏图/超大（>64MB）→ 400 `{ok:false,error}` |
 | `POST /api/render` | 预览渲染 | JSON：`{params}`（§2 schema）+ `{scale:≤1}` | `{ok, image:"data:image/png;base64,...", scene:{...}, env:{...}\|null, ms}` |
+| `POST /api/batch` | 批量出图 | JSON：`{photos:[dataURI…]（≤12）, params}` | zip 下载（单张失败不拖垮整批，明细进 zip 的 `_errors.txt`；成功/失败张数走 `X-Arcam-Batch` 响应头——头是 latin-1，中文原因只能进 zip） |
 | `POST /api/export` | 成品下载 | JSON：`{params, target:"png"\|"layer"\|"bundle"}` | 二进制下载（Content-Disposition attachment）；target 语义同 CLI render/char-layer/bundle |
 | `POST /api/matte` | 抠图 | JSON：`{source:"char"\|"photo"}` | `{ok, image:dataURI, fg, ms}`；模型缺失 → `{ok:false,error:"…下载指引…"}`（不 500） |
 | `POST /api/lidar/inspect` | 深度诊断 | multipart：字段 `depth` | `{ok, env:{height_m,pitch_deg,roll_deg,coverage,inliers,rms}, frame:{width,height}}`；随后 `/api/render` 可用 `params.depth_uploaded=true` 走深度驱动 |

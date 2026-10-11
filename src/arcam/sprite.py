@@ -51,7 +51,7 @@ _WARP_CHUNK = 128                  # warp 分块行数（限制内存，不影�
 
 # ── 图像通道规整 ───────────────────────────────────────────────────────
 def _to_float01(img: np.ndarray, channels: int) -> np.ndarray:
-    """uint8 → float64 [0,1]；float64 原样（clip 到 [0,1]）。
+    """uint8 → float64 [0,1]；float 入参夹到 [0,1]（口径不变，只是按 dtype 抄近路）。
 
     **总是返回新数组**（调用方拿到手就可以就地改，不会写回入参）——
     ``composite_sprite`` 靠这条把「规整」和「拷贝画布」合成一步。
@@ -60,25 +60,40 @@ def _to_float01(img: np.ndarray, channels: int) -> np.ndarray:
     if arr.ndim != 3 or arr.shape[2] != channels:
         raise ValueError(f"expected (H,W,{channels}) image, got {arr.shape}")
     if arr.dtype == np.uint8:
-        out = arr.astype(np.float64)
-        out /= 255.0
-        return out
+        # 一趟 ufunc 完成「升精度 + 归一」（astype 再 /= 是两趟整幅扫描）；
+        # uint8→float64 精确、除法与先 cast 再除逐位相同
+        return arr / 255.0
+    if arr.dtype == np.float64:
+        # 夹取与拷贝合成一趟（clip 一定返回新数组）—— 4K 画布上省一整遍读写
+        return np.clip(arr, 0.0, 1.0)
     out = np.array(arr, dtype=np.float64, copy=True)
     np.clip(out, 0.0, 1.0, out=out)
     return out
 
 
 # ── 逆映射双线性 warp（drawImage + rotate 的离线等价）───────────────────
-def _bilinear_rgba_premul(src01: np.ndarray, fx: np.ndarray, fy: np.ndarray,
-                          premul: np.ndarray | None = None) -> np.ndarray:
-    """在 RGBA 源上按连续坐标 (fx, fy) 双线性采样；**预乘**滤波后解除预乘。
+def _premul_source(src01: np.ndarray) -> np.ndarray:
+    """源 → (H,W,4) **预乘**数组：``concat(RGB·alpha, alpha)``。
 
-    边缘按夹取（canvas 滤波的常见实现）；源外由调用方先把坐标夹进 [0, n-1]。
-    ``premul`` 可传入预算好的 ``src01[..., :3] * src01[..., 3:4]`` —— 分块
-    warp 下它是**与块无关**的常量，每块重算一遍等于白烧（实测 1509×1000 源
-    + 4K 画布：单次 composite_sprite 0.51 s → 0.36 s）。
+    分块 warp 下它与块无关、每幅源只算一次（见 :func:`_bilinear_rgba_premul`）。
+    拼成一张 4 通道而不是「RGB 一张 + alpha 两张」：每个角点一次 fancy-gather
+    就拿齐 4 通道，比 gather×2 + concatenate 少两轮全块拷贝。
     """
-    sh, sw = src01.shape[:2]
+    src_pm = np.empty((src01.shape[0], src01.shape[1], 4), dtype=np.float64)
+    np.multiply(src01[..., :3], src01[..., 3:4], out=src_pm[..., :3])
+    src_pm[..., 3] = src01[..., 3]
+    return src_pm
+
+
+def _bilinear_rgba_premul(src_pm: np.ndarray, fx: np.ndarray, fy: np.ndarray) -> np.ndarray:
+    """在**预乘** RGBA 源上按连续坐标 (fx, fy) 双线性采样；滤波后解除预乘。
+
+    ``src_pm`` 是 :func:`_premul_source` 的产物（预乘 RGB + alpha 拼成的
+    (H,W,4)）。边缘按夹取（canvas 滤波的常见实现）；源外由调用方先把坐标夹进
+    [0, n-1]。预乘源**与块无关**，提到分块循环外算一次（每块重算等于白烧：
+    实测 1509×1000 源 + 4K 画布，单次 composite_sprite 0.51 s → 0.36 s）。
+    """
+    sh, sw = src_pm.shape[:2]
     x0 = np.floor(fx)
     y0 = np.floor(fy)
     wx = (fx - x0)[..., None]
@@ -87,14 +102,9 @@ def _bilinear_rgba_premul(src01: np.ndarray, fx: np.ndarray, fy: np.ndarray,
     x1i = np.clip((x0 + 1).astype(np.int64), 0, sw - 1)
     y0i = np.clip(y0.astype(np.int64), 0, sh - 1)
     y1i = np.clip((y0 + 1).astype(np.int64), 0, sh - 1)
-    if premul is None:
-        premul = src01[..., :3] * src01[..., 3:4]
 
-    def gather(yy: np.ndarray, xx: np.ndarray) -> np.ndarray:
-        return np.concatenate([premul[yy, xx], src01[yy, xx, 3:4]], axis=-1)
-
-    top = gather(y0i, x0i) * (1.0 - wx) + gather(y0i, x1i) * wx
-    bot = gather(y1i, x0i) * (1.0 - wx) + gather(y1i, x1i) * wx
+    top = src_pm[y0i, x0i] * (1.0 - wx) + src_pm[y0i, x1i] * wx
+    bot = src_pm[y1i, x0i] * (1.0 - wx) + src_pm[y1i, x1i] * wx
     out = top * (1.0 - wy) + bot * wy
     a = out[..., 3:4]
     safe = a > 1e-9
@@ -103,23 +113,27 @@ def _bilinear_rgba_premul(src01: np.ndarray, fx: np.ndarray, fy: np.ndarray,
 
 
 def _warp_rect(src01: np.ndarray, lx0: float, ly0: float, rw: float, rh: float,
-               rot: float, cu: float, cv: float, out_hw: tuple[int, int]) -> np.ndarray:
+               rot: float, cu: float, cv: float, out_hw: tuple[int, int]) -> tuple[np.ndarray, tuple[int, int, int, int]]:
     """把 src01 贴到旋转后的局部矩形 ``[lx0, lx0+rw] × [ly0, ly0+rh]``（相对锚点）。
 
     等价于 canvas 的 ``translate(cu,cv); rotate(rot); drawImage(src, lx0, ly0, rw, rh)``：
     对画布每个像素中心做逆旋转 + 逆缩放，双线性采样源（一次重采样、亚像素精度）。
     局部矩形外 / 画布外 → 全透明。
+
+    返回 ``(层, span)``：span = ``(ya0, ya1, xa0, xa1)`` 是**有墨水可能**的
+    画布包围盒（层只写这一块、盒外恒全透明）。:func:`_over` 拿它当扫描范围，
+    4K 画布上不必通读一整幅全零层找 bbox。
     """
     h_out, w_out = out_hw
     out = np.zeros((h_out, w_out, 4), dtype=np.float64)
     if rw <= 0 or rh <= 0:
-        return out
+        return out, (0, 0, 0, 0)
     sh, sw = src01.shape[:2]
     if sw <= 0 or sh <= 0:
-        return out
+        return out, (0, 0, 0, 0)
     ca, sa = math.cos(rot), math.sin(rot)
-    # 预乘只跟源有关、跟块无关：提到循环外算一次（分块 warp 每块都重算就是白烧）
-    premul = src01[..., :3] * src01[..., 3:4]
+    # 预乘源只跟源有关、跟块无关：提到循环外算一次（分块 warp 每块都重算就是白烧）
+    src_pm = _premul_source(src01)
     corners = ((lx0, ly0), (lx0 + rw, ly0), (lx0 + rw, ly0 + rh), (lx0, ly0 + rh))
     rxs = [cu + px * ca - py * sa for px, py in corners]
     rys = [cv + px * sa + py * ca for px, py in corners]
@@ -128,7 +142,7 @@ def _warp_rect(src01: np.ndarray, lx0: float, ly0: float, rw: float, rh: float,
     ya0 = max(0, int(math.floor(min(rys))) - 1)
     ya1 = min(h_out, int(math.ceil(max(rys))) + 1)
     if xa1 <= xa0 or ya1 <= ya0:
-        return out
+        return out, (ya0, ya0, xa0, xa0)
     for y0 in range(ya0, ya1, _WARP_CHUNK):
         y1 = min(ya1, y0 + _WARP_CHUNK)
         jj, ii = np.mgrid[y0:y1, xa0:xa1]
@@ -139,14 +153,15 @@ def _warp_rect(src01: np.ndarray, lx0: float, ly0: float, rw: float, rh: float,
         inside = ((lx >= lx0) & (lx <= lx0 + rw) & (ly >= ly0) & (ly <= ly0 + rh))
         fx = np.clip((lx - lx0) / rw * sw - 0.5, 0.0, sw - 1.0)
         fy = np.clip((ly - ly0) / rh * sh - 0.5, 0.0, sh - 1.0)
-        warped = _bilinear_rgba_premul(src01, fx, fy, premul)
+        warped = _bilinear_rgba_premul(src_pm, fx, fy)
         warped[..., 3] = np.where(inside, warped[..., 3], 0.0)
         rgb = np.where(warped[..., 3:4] > 0.0, warped[..., 0:3], 0.0)
         out[y0:y1, xa0:xa1] = np.concatenate([rgb, warped[..., 3:4]], axis=-1)
-    return out
+    return out, (ya0, ya1, xa0, xa1)
 
 
-def _over(dst_rgb: np.ndarray, layer_rgba: np.ndarray) -> np.ndarray:
+def _over(dst_rgb: np.ndarray, layer_rgba: np.ndarray,
+          span: tuple[int, int, int, int] | None = None) -> np.ndarray:
     """canvas source-over：透明浮层盖到不透明底上（Cr = Cs·αs + Cb·(1-αs)）。
 
     只在浮层**有墨水**（α>0）的包围盒里混合，并就地写回 ``dst_rgb``：
@@ -156,13 +171,19 @@ def _over(dst_rgb: np.ndarray, layer_rgba: np.ndarray) -> np.ndarray:
     实测单次 1189 ms → 118 ms。``dst_rgb`` 必须是调用方私有的副本
     （:func:`composite_sprite` 传的是 :func:`_to_float01` 的返回值，契约上
     就是新数组）。
+
+    ``span`` = ``(ya0, ya1, xa0, xa1)``：可选的**墨水搜索范围**。warp 出来的层
+    在 span 外 alpha 恒 0（:func:`_warp_rect` 只写自己那块包围盒），把扫描限制
+    在 span 里逐位相同，而 4K 画布上不必通读一整幅 265 MB 的全零层。
     """
-    ink = layer_rgba[..., 3] > 0.0
-    if not ink.any():
+    if span is None:
+        span = (0, layer_rgba.shape[0], 0, layer_rgba.shape[1])
+    ya0, ya1, xa0, xa1 = span
+    ys, xs = np.nonzero(layer_rgba[ya0:ya1, xa0:xa1, 3] > 0.0)
+    if ys.size == 0:
         return dst_rgb
-    ys, xs = np.nonzero(ink)
-    y0, y1 = int(ys.min()), int(ys.max()) + 1
-    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = ya0 + int(ys.min()), ya0 + int(ys.max()) + 1
+    x0, x1 = xa0 + int(xs.min()), xa0 + int(xs.max()) + 1
     box = (slice(y0, y1), slice(x0, x1))
     a = layer_rgba[box][..., 3:4]
     dst_rgb[box] = dst_rgb[box] * (1.0 - a) + layer_rgba[box][..., 0:3] * a
@@ -238,6 +259,11 @@ def contact_shadow_layer(char_rgba: np.ndarray, c: "SpritePlacement",
          ``a = sm[x]·fall·SH_ALPHA``，``a<=0.002`` 该像素透明，否则
          ``alpha = js_round(a·255)``，RGB = 阴影色。
 
+    出口按原版 ``Uint8ClampedArray`` 语义**钳到 [0,255]** 再落字节
+    （index.html:3096/3107：``o`` 是 ``createImageData(...).data``，赋值即钳）——
+    q() 在极暖环境（lumS·rb≥1，rb=√(r/b) 最大 √20）会吐出 258，原版存 255，
+    numpy 的 ``astype(uint8)`` 会回绕成 2（阴影一个通道从白翻成黑）。
+
     ``shadow_az``（度，默认 0 = 原版行为）：光线方位角。0 = 光在相机正后
     方（影子正落在脚下，与原版逐位一致）；非 0 = 斜射，影子沿背光方向拖偏
     （逐行横移轮廓，见 :func:`_shear_profile`）。**原版 2D 阴影是旋转对称的、
@@ -283,7 +309,10 @@ def contact_shadow_layer(char_rgba: np.ndarray, c: "SpritePlacement",
     out[..., 1] = col_g
     out[..., 2] = col_b
     out[..., 3] = alpha
-    return out.astype(np.uint8)
+    # Uint8ClampedArray 存回语义：钳到 [0,255]（index.html:3096/3107）。
+    # 两道都会越界：色通道 q() 极暖环境出 258（→255 而不是回绕成 2）；
+    # alpha 在 shadow_opacity > 2.4 时 a·255 超 255（→255 而不是回绕成小值）。
+    return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
 
 # ── 立绘落位合成（drawCharTo，index.html:3146-3166）─────────────────────
@@ -317,10 +346,10 @@ def composite_sprite(base_rgb01: np.ndarray, char_rgba01: np.ndarray, c: "Sprite
         layer01 = _to_float01(layer, 4)
         if layer01.shape[0] > 0 and layer01.shape[1] > 0 and float(layer01[..., 3].max()) > 0.0:
             sh_thick = c.w * SH_THICK
-            warped = _warp_rect(layer01, -c.w / 2.0, c.h / 2.0 - sh_thick * SH_PEAK,
-                                c.w, sh_thick, c.rot, c.u, c.v, (h_out, w_out))
-            out = _over(out, warped)
-    warped_char = _warp_rect(char01, -c.w / 2.0, -c.h / 2.0, c.w, c.h,
-                             c.rot, c.u, c.v, (h_out, w_out))
-    out = _over(out, warped_char)
+            warped, span = _warp_rect(layer01, -c.w / 2.0, c.h / 2.0 - sh_thick * SH_PEAK,
+                                      c.w, sh_thick, c.rot, c.u, c.v, (h_out, w_out))
+            out = _over(out, warped, span)
+    warped_char, span = _warp_rect(char01, -c.w / 2.0, -c.h / 2.0, c.w, c.h,
+                                   c.rot, c.u, c.v, (h_out, w_out))
+    out = _over(out, warped_char, span)
     return out

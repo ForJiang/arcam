@@ -345,3 +345,13 @@ button:hover { background: var(--btn-bg-hover); }
 }
 .lang-btn:hover { background: var(--btn-bg-hover, #f3f4f6); }
 #topbar { position: relative; }
+
+/* 取景框读数（原版 frameRead，index.html:355）——选完画幅就知道出图裁到多大。
+   与本地 webui 逐字同规格：docs/index.html:267 有这个 span、app.js 的
+   updateFrameRead 每帧刷它，少了这条规则会掉回正文 13px/正文色（v1.9.0 审计补）。 */
+.frame-read {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

@@ -12,10 +12,15 @@ import urllib.request
 
 REPO = sys.argv[1] if len(sys.argv) > 1 else "ForJiang/arcam"
 BRANCH = sys.argv[2] if len(sys.argv) > 2 else "main"
-TOKEN = subprocess.run(
+_fill = subprocess.run(
     ["git", "credential", "fill"], input="host=github.com\nprotocol=https\n",
     capture_output=True, text=True).stdout
-TOKEN = next(l.split("=", 1)[1].strip() for l in TOKEN.splitlines() if l.startswith("password="))
+# 没配 git 凭据时原来会在这里抛 StopIteration（一串看不懂的调用栈）—— 说人话
+_pw = [l.split("=", 1)[1].strip() for l in _fill.splitlines() if l.startswith("password=")]
+if not _pw or not _pw[0]:
+    sys.exit("拿不到 GitHub 令牌：git credential fill 没返回 password="
+             "（先 git credential approve，或改用 tools/push-to-github.sh 的 GITHUB_TOKEN）")
+TOKEN = _pw[0]
 API = f"https://api.github.com/repos/{REPO}"
 
 

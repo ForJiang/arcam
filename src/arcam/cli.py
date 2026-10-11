@@ -46,7 +46,7 @@ import numpy as np
 from arcam.compose import _merge_env, _over, compose_char_layer, compose_shot
 from arcam.frames import frame_rect
 from arcam.geometry import Camera
-from arcam.i18n import LANGS
+from arcam.i18n import LANGS, TXT, t
 from arcam.matting import anime_cut
 from arcam.numeric import js_round
 from arcam.placement import FRAMES, SHOTS, Subject, current_placement
@@ -68,6 +68,12 @@ from arcam.video import (
 ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
 """zip 内文件时间戳写死 1980-01-01 —— 原版 zipStore 同样写死 0x21（index.html:3309），
 同样输入永远出同样字节，确定性复现。"""
+
+#: ``lidar sim --push`` 的帧规格下限：``simulate_scene_server``（arcam.lidar_sim）
+#: 按 ``synth_ground_frame`` 的默认 256×192 / seed 0 合成，没有尺寸与种子参数。
+#: 与 build_parser 里 sim 组 ``--width/--height/--seed`` 的默认值一致——改了
+#: parser 默认值这里要同步（v1.8 审计：曾静默丢掉用户给的 --width/--height/--seed）。
+_SIM_PUSH_FIXED_SPEC = {"width": 256, "height": 192, "seed": 0}
 
 
 class CliError(Exception):
@@ -595,20 +601,9 @@ def cmd_render(args) -> int:
     overlay_note = ""
     if args.overlay:
         # HUD 只叠指定的一层（原版出图不带 HUD，这是排查构图的显式开关）
-        from arcam.hud import draw_figure, draw_grid, draw_horizon, draw_hud_text
-        canvas = img_u8.copy()
-        if args.overlay == "grid":
-            canvas = draw_grid(canvas, cam_eff, subj_eff.lateral_m)
-        elif args.overlay == "horizon":
-            canvas = draw_horizon(canvas, cam_eff, "地平线")
-        elif args.overlay == "figure":
-            canvas = draw_figure(canvas, cam_eff, subj_eff)
-        else:
-            canvas, hints = draw_hud_text(canvas, cam_eff, subj_eff, has_char=True,
-                                          canvas_size=(width, height))
-            if hints:
-                overlay_note = "；构图提示：" + "；".join(hints)
-        img_u8 = canvas
+        img_u8, overlay_note = _apply_overlay(
+            img_u8, args, cam_eff, subj_eff, width, height,
+            placement=_placement(char01, subj_eff, cam_eff, args))
     save_png(img_u8, out)
     print(f"已出图 {out}（{width}×{height}）"
           + (f"｜已叠 HUD 层：{args.overlay}{overlay_note}" if args.overlay else ""))
@@ -793,6 +788,40 @@ def _parse_vary(items: list[str]) -> list[tuple[str, list[str]]]:
 
 # ─────────────────────────── watch / multi / stats ───────────────────────────
 
+def _apply_overlay(img_u8: np.ndarray, args, cam: Camera, subj: Subject,
+                   width: int, height: int, placement=None) -> tuple[np.ndarray, str]:
+    """按 ``--overlay`` 叠一层 HUD 取景装饰，返回 (画后的图, 附加提示文案)。
+
+    原版出图**不带** HUD（index.html:3487-3490：那些只在实时预览的 draw() 里画），
+    这是排查构图的显式开关。四层（grid/horizon/figure/hud）各自 1:1 对译
+    :mod:`arcam.hud`；render 与 watch 共用本函数——曾有两份逐字重复的分支，
+    改一处漏一处（v1.8 审计收敛）。
+
+    ``hud`` 层的构图提示必须喂**本遍实际落位**（placement）与 ``--shot/--mode``：
+    不喂的话三分线/顶满/偏小/浮空那几条永远不触发（原版 compositionHints 读的
+    就是当前摆位）。``--lang`` 同时决定 HUD 文案语言（地平线标签走 i18n 的
+    ``horizon`` 键，中文下与原来的硬编码字符串逐字相同）。
+    """
+    from arcam.hud import draw_figure, draw_grid, draw_horizon, draw_hud_text
+    lang = getattr(args, "lang", "zh")
+    canvas = img_u8.copy()
+    note = ""
+    if args.overlay == "grid":
+        canvas = draw_grid(canvas, cam, subj.lateral_m)
+    elif args.overlay == "horizon":
+        canvas = draw_horizon(canvas, cam, t("horizon", lang=lang))
+    elif args.overlay == "figure":
+        canvas = draw_figure(canvas, cam, subj)
+    else:
+        canvas, hints = draw_hud_text(canvas, cam, subj, has_char=True,
+                                      canvas_size=(width, height), lang=lang,
+                                      shot=args.shot, mode=args.mode,
+                                      placement=placement)
+        if hints:
+            note = "；构图提示：" + "；".join(hints)
+    return canvas, note
+
+
 def _render_one(args, photo_p: Path, char01, out: Path, overlay_note: list) -> int:
     """render 的核心一遍（watch/multi 共用）：返回退出码。"""
     src01 = image_to_rgb01(photo_p)
@@ -804,20 +833,10 @@ def _render_one(args, photo_p: Path, char01, out: Path, overlay_note: list) -> i
     img_u8 = base_arr if base_arr.dtype == np.uint8 else \
         np.clip(base_arr.astype(np.float64) * 255.0 + 0.5, 0, 255).astype(np.uint8)
     if getattr(args, "overlay", None):
-        from arcam.hud import draw_figure, draw_grid, draw_horizon, draw_hud_text
-        canvas = img_u8.copy()
-        if args.overlay == "grid":
-            canvas = draw_grid(canvas, cam, subj.lateral_m)
-        elif args.overlay == "horizon":
-            canvas = draw_horizon(canvas, cam, "地平线")
-        elif args.overlay == "figure":
-            canvas = draw_figure(canvas, cam, subj)
-        else:
-            canvas, hints = draw_hud_text(canvas, cam, subj, has_char=True,
-                                          canvas_size=(width, height))
-            if hints:
-                overlay_note.append("；".join(hints))
-        img_u8 = canvas
+        img_u8, note = _apply_overlay(img_u8, args, cam, subj, width, height,
+                                      placement=_placement(char01, subj, cam, args))
+        if note:
+            overlay_note.append(note)
     save_png(img_u8, out)
     return 0
 
@@ -1033,7 +1052,7 @@ def cmd_stats(args) -> int:
         "js_files": len(js_files),
         "js_loc": js_loc,
         "public_api": len(arcam.__all__),
-        "i18n_entries": len(__import__("arcam.i18n", fromlist=["TXT"]).TXT),
+        "i18n_entries": len(TXT),
         "subcommands": subs,
     }
     if args.json:
@@ -1062,19 +1081,28 @@ def _subcommand_names() -> list[str]:
 
 
 def _project_version(root: Path) -> str:
-    """版本号：优先 importlib.metadata（安装态唯一可靠来源），
-    回落 pyproject.toml 解析（源码树直接跑时）；都不可得给 '?'。"""
+    """版本号：**源码树在就以 pyproject.toml 为准**，纯安装态才用 importlib.metadata。
+
+    可编辑安装（``pip install -e .``）的 metadata 停留在**安装那一刻**的版本：
+    实测 pyproject 已到 1.7.0、``importlib.metadata`` 还报 1.2.0，``stats``
+    于是把旧版本号当现版本打出来（v1.8 审计修复）。旁边找得到 pyproject 就说明
+    这是仓库检出（editable 或直接跑），repo 里的 pyproject 永远比 metadata 新；
+    真·wheel 安装旁边没有 pyproject，才回落到 metadata。都不可得给 '?'。
+    """
+    pyproject = root / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            txt = pyproject.read_text(encoding="utf-8")
+        except OSError:
+            txt = None
+        if txt is not None:
+            m = re.search(r'^version\s*=\s*"([^"]+)"', txt, re.M)
+            if m:
+                return m.group(1)
     try:
         from importlib.metadata import version as _pkg_version
         return _pkg_version("arcam")
     except Exception:
-        pass
-    try:
-        txt = (root / "pyproject.toml").read_text(encoding="utf-8")
-        m = re.search(r'^version\s*=\s*"([^"]+)"', txt, re.M)
-        if m:
-            return m.group(1)
-    except OSError:
         pass
     return "?"
 
@@ -1195,7 +1223,6 @@ def cmd_batch(args) -> int:
     匹配不到的照片走无深度路径（不报错——批量任务不该因一张缺深度整批失败）。
     单张失败只记一条继续跑，最后汇总（退出码 0 = 全部成功，1 = 有失败）。
     """
-    from arcam.i18n import t
     src_dir = Path(args.photo_dir)
     if not src_dir.is_dir():
         raise CliError(f"照片目录不存在：{src_dir}")
@@ -1356,20 +1383,27 @@ def cmd_prep(args) -> int:
     四步各有关断（--no-solid/--no-trim/--no-soften/--no-blur），关掉的步从
     auto_prepare_char 的动作链里摘掉——实现方式是逐步调用同模块的公开函数，
     顺序与原版一致；任一步抛错静默跳过（修图不能把"出图"搞挂）。
+
+    ⚠ 兜底（index.html:2435-2439）也必须在：动过手（抠或裁）且最终内容 bbox
+    任一边 < 8px → 整条回退原图、动作链清空。曾整条漏掉——5×5 的立绘会被
+    输出成 5×5 的"修好"的图，而 webapp /api/prep（走 auto_prepare_char）同
+    一张图回退原图，两条入口结论相反（v1.8 审计修复）。
     """
-    from arcam.i18n import t
-    from arcam.matte_tools import auto_trim, is_half_body, lens_blur, soften_edge
+    from arcam.matte_tools import (_MIN_CONTENT_SIDE, auto_trim, content_bounds,
+                                   is_half_body, lens_blur, soften_edge)
     char_p = _need(args.char, "立绘")
     char01 = image_to_rgba01(char_p)
     lang = args.lang
 
     arr = char01
     actions: list[str] = []
+    cut_done = trim_done = False
     if not args.no_solid:
         try:
             out, ratio = _flood(arr)
             if out is not None:
                 arr = out
+                cut_done = True
                 actions.append(t("note.autoCut", f"{ratio * 100:.0f}", lang=lang))
         except Exception:
             pass
@@ -1378,6 +1412,7 @@ def cmd_prep(args) -> int:
             res = auto_trim(arr)
             if res is not None:
                 arr = res[0]
+                trim_done = True
                 actions.append(t("note.autoTrim", lang=lang))
         except Exception:
             pass
@@ -1391,10 +1426,23 @@ def cmd_prep(args) -> int:
             pass
     if not args.no_blur:
         try:
-            arr = lens_blur(arr, 0.62)
-            actions.append(t("note.autoBlur", lang=lang))
+            blurred = lens_blur(arr, 0.62)
+            # 与 auto_prepare_char 同口径：没变化就不算做过这一步（不虚报动作）
+            if not np.array_equal(blurred, arr):
+                arr = blurred
+                actions.append(t("note.autoBlur", lang=lang))
         except Exception:
             pass
+
+    # ⑥ 兜底：裁完什么都不剩（或只剩一条缝）→ 整条回退原图（原版逐字）。
+    #    回退即"什么都没发生"：动作链清空，只留一条还原提示；半身判定在
+    #    回退后的原图上重算（auto_prepare_char 同一口径）。
+    if cut_done or trim_done:
+        bounds = content_bounds(arr)
+        if bounds is None or bounds[2] < _MIN_CONTENT_SIDE or bounds[3] < _MIN_CONTENT_SIDE:
+            arr = char01
+            actions.clear()
+            actions.append(t("note.chReset", lang=lang))
 
     half = is_half_body(arr)
     out = Path(args.out)
@@ -1478,8 +1526,15 @@ def cmd_check(args) -> int:
 
 
 def cmd_lidar_sim(args) -> int:
-    """合成深度帧（lidar_sim.synth_ground_frame）：落盘 .depth 或推给 serve。"""
-    from arcam.i18n import t
+    """合成深度帧（lidar_sim.synth_ground_frame）：落盘 .depth 或推给 serve。
+
+    三模态：``--json`` 只打印第一帧 meta；``--push`` 推给正在监听的 serve；
+    否则（默认或 ``--out``）落盘 ``frame_%06d.depth``。``--width/--height/
+    --seed`` 只作用于本命令自己合成的帧——``--push`` 走
+    :func:`arcam.lidar_sim.simulate_scene_server`，它按 ``synth_ground_frame``
+    的默认规格（256×192、seed 0）合成、不接受尺寸/种子参数，所以推流模式下
+    给非默认值直接人话报错，不静默丢参数（v1.8 审计修复）。
+    """
     from arcam.lidar_sim import synth_ground_frame
 
     if args.push is not None and args.out is not None:
@@ -1488,6 +1543,17 @@ def cmd_lidar_sim(args) -> int:
         raise CliError(f"--frames 至少 1（收到 {args.frames}）")
     if args.width < 8 or args.height < 8:
         raise CliError(f"深度帧尺寸太小：{args.width}×{args.height}（至少 8×8）")
+    if args.push is not None:
+        off = [k for k, v in _SIM_PUSH_FIXED_SPEC.items()
+               if getattr(args, k) != v]
+        if off:
+            raise CliError(
+                f"--push 推流模式下不支持 {'/'.join('--' + k for k in off)}："
+                f"推流由 arcam.lidar_sim.simulate_scene_server 按固定规格 "
+                f"{_SIM_PUSH_FIXED_SPEC['width']}×{_SIM_PUSH_FIXED_SPEC['height']}"
+                f"（seed {_SIM_PUSH_FIXED_SPEC['seed']}）合成。要自定义尺寸/种子"
+                "请用落盘模式（--out DIR 或缺省）再 arcam lidar inspect 验证，"
+                "或让 serve 侧支持尺寸参数")
 
     meta0, depth0 = synth_ground_frame(h=args.h, pitch_deg=args.pitch,
                                        roll_deg=args.roll, width=args.width,

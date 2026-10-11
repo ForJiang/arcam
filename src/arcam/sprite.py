@@ -69,10 +69,14 @@ def _to_float01(img: np.ndarray, channels: int) -> np.ndarray:
 
 
 # ── 逆映射双线性 warp（drawImage + rotate 的离线等价）───────────────────
-def _bilinear_rgba_premul(src01: np.ndarray, fx: np.ndarray, fy: np.ndarray) -> np.ndarray:
+def _bilinear_rgba_premul(src01: np.ndarray, fx: np.ndarray, fy: np.ndarray,
+                          premul: np.ndarray | None = None) -> np.ndarray:
     """在 RGBA 源上按连续坐标 (fx, fy) 双线性采样；**预乘**滤波后解除预乘。
 
     边缘按夹取（canvas 滤波的常见实现）；源外由调用方先把坐标夹进 [0, n-1]。
+    ``premul`` 可传入预算好的 ``src01[..., :3] * src01[..., 3:4]`` —— 分块
+    warp 下它是**与块无关**的常量，每块重算一遍等于白烧（实测 1509×1000 源
+    + 4K 画布：单次 composite_sprite 0.51 s → 0.36 s）。
     """
     sh, sw = src01.shape[:2]
     x0 = np.floor(fx)
@@ -83,7 +87,8 @@ def _bilinear_rgba_premul(src01: np.ndarray, fx: np.ndarray, fy: np.ndarray) -> 
     x1i = np.clip((x0 + 1).astype(np.int64), 0, sw - 1)
     y0i = np.clip(y0.astype(np.int64), 0, sh - 1)
     y1i = np.clip((y0 + 1).astype(np.int64), 0, sh - 1)
-    premul = src01[..., :3] * src01[..., 3:4]
+    if premul is None:
+        premul = src01[..., :3] * src01[..., 3:4]
 
     def gather(yy: np.ndarray, xx: np.ndarray) -> np.ndarray:
         return np.concatenate([premul[yy, xx], src01[yy, xx, 3:4]], axis=-1)
@@ -113,6 +118,8 @@ def _warp_rect(src01: np.ndarray, lx0: float, ly0: float, rw: float, rh: float,
     if sw <= 0 or sh <= 0:
         return out
     ca, sa = math.cos(rot), math.sin(rot)
+    # 预乘只跟源有关、跟块无关：提到循环外算一次（分块 warp 每块都重算就是白烧）
+    premul = src01[..., :3] * src01[..., 3:4]
     corners = ((lx0, ly0), (lx0 + rw, ly0), (lx0 + rw, ly0 + rh), (lx0, ly0 + rh))
     rxs = [cu + px * ca - py * sa for px, py in corners]
     rys = [cv + px * sa + py * ca for px, py in corners]
@@ -132,7 +139,7 @@ def _warp_rect(src01: np.ndarray, lx0: float, ly0: float, rw: float, rh: float,
         inside = ((lx >= lx0) & (lx <= lx0 + rw) & (ly >= ly0) & (ly <= ly0 + rh))
         fx = np.clip((lx - lx0) / rw * sw - 0.5, 0.0, sw - 1.0)
         fy = np.clip((ly - ly0) / rh * sh - 0.5, 0.0, sh - 1.0)
-        warped = _bilinear_rgba_premul(src01, fx, fy)
+        warped = _bilinear_rgba_premul(src01, fx, fy, premul)
         warped[..., 3] = np.where(inside, warped[..., 3], 0.0)
         rgb = np.where(warped[..., 3:4] > 0.0, warped[..., 0:3], 0.0)
         out[y0:y1, xa0:xa1] = np.concatenate([rgb, warped[..., 3:4]], axis=-1)
@@ -266,7 +273,9 @@ def contact_shadow_layer(char_rgba: np.ndarray, c: "SpritePlacement",
     fall = np.exp(-(dy * dy) / (2.0 * SH_SPREAD * SH_SPREAD))
     if shadow_az:
         sm = _shear_profile(sm, out_h, shadow_az)
-    a = sm[None, :] * fall[:, None] * (SH_ALPHA * shadow_opacity)
+    else:
+        sm = sm[None, :]                     # (1, w)：两支之后 sm 都是可广播行/整幅
+    a = sm * fall[:, None] * (SH_ALPHA * shadow_opacity)
     keep = (fall[:, None] >= 0.004) & (a > 0.002)
     alpha = np.where(keep, np.floor(a * 255.0 + 0.5), 0.0)
     out = np.zeros((out_h, w_px, 4), dtype=np.float64)

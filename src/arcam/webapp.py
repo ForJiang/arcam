@@ -16,6 +16,7 @@
     POST /api/prep                 立绘自动修图链（steps 子集；替换会话立绘）
     POST /api/trim                 只裁边（修图按钮组单步入口）
     POST /api/reset                还原到上传时的立绘
+    POST /api/batch                批量出图（JSON：photos dataURI 数组 + params）
     POST /api/lidar/inspect        深度帧诊断（multipart：字段 depth）
     POST /api/matte-result-as-char 把抠图结果设为当前立绘
 
@@ -1050,7 +1051,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 raise ApiError(404, f"未知路径 {path}",
                                "可用：GET / 、GET /static/* 、POST /api/upload|render|export|"
-                               "matte|prep|trim|reset|lidar/inspect|matte-result-as-char")
+                               "matte|prep|trim|reset|batch|lidar/inspect|matte-result-as-char")
         except ApiError as exc:
             self._send_error(exc)
         except Exception as exc:                    # 兜底：不吐 traceback 给浏览器

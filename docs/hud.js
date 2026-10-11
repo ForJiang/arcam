@@ -57,8 +57,7 @@ window.arcamHud = (function () {
     if (!plus || !minus) return { x: subj.x, snapped: best };
     var grad = (plus.u - minus.u) / 0.1;
     if (!isFinite(grad) || Math.abs(grad) < 1e-6) return { x: subj.x, snapped: best };
-    var nx = subj.x - (c0.u - targetU) / grad;
-    return { x: Math.max(-20, Math.min(20, nx)), snapped: best };
+    return { x: Math.max(-20, Math.min(20, subj.x - (c0.u - targetU) / grad)), snapped: best };
   }
 
   function currentPlacementOf(cam, subj, mode, sizePct, opts) {

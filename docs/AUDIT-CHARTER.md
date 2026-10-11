@@ -84,3 +84,35 @@ docs/tests/golden.json、.ai/、启动器、src/arcam/__init__.py 的导出表�
 - **docs 与 webui 的重复代码**（i18n 表、HUD 绘制、live 相机、matte-tools）能否收敛到
   单一来源（至少要有测试钉住两侧一致，已有的是 i18n 逐条比对）；
 - v1.3/v1.4 引入的注释是否与行为一致（过期注释一律修）。
+
+---
+
+# v1.8.0 审计轮次（2026-10-11）
+
+用户指令同前两轮。项目现状：23 个 Python 模块 / 9265 行、21 个测试文件 / 10073 行、
+14 个网页 JS / 8256 行、15 个子命令、561 passed / 1 skipped。分区在 v1.5.0 基础上
+按新增文件重划（互斥不变）：
+
+| Agent | 文件 |
+|---|---|
+| C1 核心数学 | src/arcam/{numeric,geometry,placement,frames,scene}.py + tests/test_{geometry,placement,frames,scene,golden_recompute}.py |
+| C2 合成修图 | src/arcam/{lighting,sprite,compose,tone,matting,matte_tools}.py + tests/test_{lighting,sprite,compose,tone,matting,matte_tools}.py |
+| C3 CLI 与文案 | src/arcam/{cli,video,__init__,__main__,hud,i18n}.py + tests/test_{cli,video,hud}.py |
+| C4 服务 LiDAR | src/arcam/{webapp,depth,plane,lidar_live,lidar_sim}.py + tests/test_{webapp,lidar_depth,lidar_plane,lidar_live,lidar_compose,integration}.py |
+| C5 前端站点 | src/arcam/webui/* + docs/{*.js,*.html,*.css,mmd.js,mmd/} + tools/ + tests/test_webui_static.py |
+
+本轮新增关注（v1.6/v1.7 新代码是重点）：
+- **3D 栈两侧一致性**：webui 与 docs 的 mmd.js/mmd/ 是否仍逐字节同源；importmap
+  路径（docs 相对 / webui 绝对）是否各自正确；`base_only` 在 webapp schema、
+  webui buildParams、docs composeParams 三处是否都真通达（v1.7 新参数）；
+  3D 导出路径（doExport3D / buildBundleZip 移植件）在 webui 侧是否与 docs 等价。
+- **`lidar sim` / 阴影两参 / batch 端点**（v1.6 新增）的错误路径与 i18n 覆盖。
+- **重复代码收敛**：webui/app.js 与 docs/app.js 的 3D 段、zip writer、参数记忆、
+  效果开关——哪些是真重复（可收敛/至少加一致性测试），哪些是两侧固有差异
+  （ES module vs classic script、后端渲染 vs 客户端合成）。
+- **测试文件已 10073 行**（超过源码）：查重复用例、可参数化合并的near-duplicate、
+  过期 fixture。测试只增不减，但near-duplicate 合并要在报告里列明。
+- 过期注释/文档引用（file:line 偏移、引用了已删函数的注释）。
+
+编排者直管（Agent 不许改）：pyproject.toml、README.md、CHANGELOG.md、docs/*.md、
+docs/tests/golden.json、.ai/、启动器、src/arcam/__init__.py 的导出表。

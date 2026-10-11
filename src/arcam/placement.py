@@ -74,8 +74,8 @@ def _char_size(char_rgba: np.ndarray | None) -> tuple[int, int] | None:
 def _free_p_of(value: tuple[float, float] | None) -> tuple[float, float]:
     """freeP 归一化：None → 模块级默认（对应 arcam-core.js ``freePU`` 的 None 兜底）。
 
-    ``current_placement`` / ``auto_fix_x`` 是公开 API，调用方传 ``free_p=None``
-    表示「用默认」；不收的话会在 ``free_p[0]`` 上抛 TypeError。
+    ``free_placement`` / ``current_placement`` / ``auto_fix_x`` 是公开 API，调用方传
+    ``free_p=None`` 表示「用默认」；不收的话会在 ``free_p[0]`` 上抛 TypeError。
     """
     return DEFAULT_FREE_P if value is None else value
 
@@ -146,10 +146,15 @@ def free_placement(char_rgba: np.ndarray | None, subj: Subject, cam: Camera,
     rot_deg（度）转弧度 —— 经 current_placement 分派时默认跟随 cam.roll_deg
     （原版 charRot，2930），rot_basis='frame' 时为 0；直接调用本函数的冻结默认是
     rot_deg=0.0（不随相机斜）。
+
+    ``free_p=None`` 与 :func:`current_placement` / :func:`auto_fix_x` 同口径：
+    回落 :data:`DEFAULT_FREE_P`（对应 arcam-core.js ``freePU`` 的 None 兜底），
+    不收会在 ``free_p[0]`` 上抛 TypeError。
     """
     size = _char_size(char_rgba)
     if size is None:
         return None
+    free_p = _free_p_of(free_p)
     aspect = size[0] / size[1]
     rot = rot_deg * _DEG2RAD
     u = free_p[0] * cam.width
@@ -264,7 +269,11 @@ def snap_to_edge(c: SpritePlacement, bar: int, rect: Rect, aspect: float,
     h = c.h
     if not (h > 0):
         return c
-    if not rot:
+    if not rot or math.isnan(rot):
+        # 原版 ``if(!rot) rot=0`` 的 JS 假值集含 NaN（!NaN === true）；Python 的
+        # ``not nan`` 是 False，NaN 会漏到 _rotate_bar 里把 js_round 的 math.floor
+        # 炸成 ValueError（公开 API 的 rot/rot_deg 由调用方数据算出，NaN 可达）。
+        # 这里显式补齐 NaN 归一。
         rot = 0.0
     w = h * aspect
     ac = abs(math.cos(rot))

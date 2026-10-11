@@ -442,9 +442,9 @@ function markTouched(key) {
 }
 
 function bindNumeric(key) {
-  var num = $('p-' + key + '-num');
-  var rng = $('p-' + key + '-rng');
-  var range = RANGES[key];
+  const num = $('p-' + key + '-num');
+  const rng = $('p-' + key + '-rng');
+  const range = RANGES[key];
   function commit(v) {
     // 数字框手输可能超量程：夹到滑块区间，保证请求合法 + 双控件镜像一致
     v = Math.min(range[1], Math.max(range[0], v));
@@ -508,13 +508,8 @@ function syncModeVisibility() {
 //: localStorage 键与原版一致（index.html:900）；?lang= 只影响当次加载。
 var LANG_KEY = 'arcam.lang';
 
-function currentLang() {
-  return window.ARCAM_LANG === 'en' ? 'en' : 'zh';
-}
-
 function applyLang() {
-  var lang = currentLang();
-  window.ARCAM_LANG = lang;
+  const lang = window.ARCAM_LANG === 'en' ? 'en' : 'zh';
   document.documentElement.lang = lang === 'en' ? 'en' : 'zh-CN';
   // [data-t] → textContent；HUD/常驻条下一帧自然跟上（hud.js 每帧拼）
   document.querySelectorAll('[data-t]').forEach(function (el) {
@@ -546,7 +541,7 @@ function initLang() {
   }
   applyLang();
   $('btn-lang').addEventListener('click', function () {
-    window.ARCAM_LANG = currentLang() === 'en' ? 'zh' : 'en';
+    window.ARCAM_LANG = window.ARCAM_LANG === 'en' ? 'zh' : 'en';
     try { localStorage.setItem(LANG_KEY, window.ARCAM_LANG); } catch (e) {}
     applyLang();
   });

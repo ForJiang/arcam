@@ -9,12 +9,6 @@
   var CUT_RATIO_MAX = 0.85;
   var CUT_TOL = 32.0;           // 字节口径（与 Python 侧一致，入口处 /255）
 
-  function rgba01(canvas) {
-    var g = canvas.getContext("2d", { willReadFrequently: true });
-    var im = g.getImageData(0, 0, canvas.width, canvas.height);
-    return { data: im.data, w: canvas.width, h: canvas.height };
-  }
-
   function boxBlur(a, w, h, r) {
     // (2r+1)² 盒式均值，越界不计入分母（与 Python _box_blur 同口径）
     var out = new Float64Array(a.length);

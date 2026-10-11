@@ -110,7 +110,7 @@ def test_frames_table_matches_spec():
 
 
 # ───────────────── js_round（numeric.py，frame_rect 原点的取整入口） ─────────────────
-# B1 分区没有 test_numeric.py；js_round 的用户可见效果集中在这里（原点取整），
+# C1 分区没有 test_numeric.py；js_round 的用户可见效果集中在这里（原点取整），
 # 边界语义就近钉住。数值口径本体由 test_golden_recompute 的 fixture 反向兜底。
 
 def test_js_round_matches_ecma_math_round():

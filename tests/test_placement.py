@@ -202,6 +202,20 @@ def test_free_no_char_returns_none():
     assert free_placement(None, _subj(), _cam()) is None
 
 
+def test_free_free_p_none_means_default():
+    """free_p=None = 「用默认」(0.5, 0.6)，与不传该键逐位一致（公开 API 兜底）。
+
+    对应 arcam-core.js ``freePU`` 的 ``freeP === null`` 分支；不收 None 的话会在
+    ``free_p[0]`` 上抛 TypeError（v1.8 C1 审计补：current_placement 早已收口，
+    直接调 free_placement 传 None 是同类最后一处漏网）。"""
+    c_none = free_placement(_char(), _subj(), _cam(), free_p=None)
+    c_default = free_placement(_char(), _subj(), _cam())
+    assert c_none is not None and c_default is not None
+    assert (c_none.u, c_none.v, c_none.w, c_none.h) == \
+        pytest.approx((c_default.u, c_default.v, c_default.w, c_default.h), abs=0.0)
+    assert c_none == c_default
+
+
 def test_free_snaps_to_bottom_edge():
     """edge_bar=2（下）、rot=0：bh = h = 648 → v = R.y + R.h - bh/2 = 1080 - 324 = 756；
     bw = w = 388.8 → u = fit(960, 194.4, 1725.6) = 960（已在界内）。"""
@@ -411,6 +425,27 @@ def test_snap_degenerate_h_and_unknown_bar_identity():
     c2 = SpritePlacement(960.0, 648.0, 388.8, 648.0, 0.3)
     assert snap_to_edge(c2, 0, _full(), 0.6, 0.0) is c2
     assert snap_to_edge(c2, 5, _full(), 0.6, 0.0) is c2
+
+
+def test_snap_nan_rot_normalises_to_zero_like_js():
+    """rot=NaN 必须按原版 ``if(!rot) rot=0`` 归一成 0，不许把 NaN 泄进 _rotate_bar。
+
+    JS 的假值集含 NaN（``!NaN === true``），Python 的 ``not nan`` 却是 False ——
+    漏归一会让 js_round 里的 math.floor(NaN) 抛 ValueError。rot/rot_deg 是公开
+    API 参数（CLI 未暴露，由调用方数据算出），NaN 从 API 侧可达；经
+    current_placement 的自由+贴边分派同样走这里。"""
+    c = SpritePlacement(960.0, 648.0, 388.8, 648.0, 0.0)
+    got = snap_to_edge(c, 2, _full(), 0.6, float('nan'))
+    want = snap_to_edge(c, 2, _full(), 0.6, 0.0)
+    assert (got.u, got.v, got.w, got.h, got.rot) == \
+        pytest.approx((want.u, want.v, want.w, want.h, want.rot), abs=0.0)
+    # 经 current_placement 的自由+贴边入口同样不炸（吸附结果 = rot 0 的那份）
+    cf = current_placement(_char(), _subj(), _cam(), mode='free', rot_deg=float('nan'),
+                           edge_bar=2, rect=_full())
+    cf0 = current_placement(_char(), _subj(), _cam(), mode='free', rot_deg=0.0,
+                            edge_bar=2, rect=_full())
+    assert cf is not None and cf0 is not None
+    assert (cf.u, cf.v) == pytest.approx((cf0.u, cf0.v), abs=0.0)
 
 
 def test_snap_big_sprite_not_pinned_to_center():

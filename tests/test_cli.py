@@ -923,3 +923,151 @@ def test_lidar_sim_rejects_bad_args(tmp_path, capsys):
         assert main(["lidar", "sim", "--width", "4", "--height", "4",
                      "--out", str(tmp_path)]) == 1
     assert "尺寸太小" in err.getvalue()
+
+
+def test_lidar_sim_push_passes_through(monkeypatch, capsys):
+    """--push 模态：端口/h/pitch/roll/frames 透传给 simulate_scene_server。
+
+    v1.6 起推流模式一直没有任何测试；这条钉住「命令 → 模拟器」的传参链
+    （serve 侧协议由 test_lidar_live 覆盖）。
+    """
+    import arcam.lidar_sim as sim_mod
+    seen: dict = {}
+
+    class _FakeThread:
+        def join(self, timeout=None):
+            return None
+
+    def fake_server(port, **kw):
+        seen["port"] = port
+        seen.update(kw)
+        return _FakeThread()
+
+    monkeypatch.setattr(sim_mod, "simulate_scene_server", fake_server)
+    code = main(["lidar", "sim", "--push", "7799", "--frames", "3",
+                 "--h", "1.5", "--pitch", "10", "--roll", "4"])
+    assert code == 0
+    assert seen == {"port": 7799, "h": 1.5, "pitch": 10.0, "roll": 4.0, "frames": 3}
+    out = capsys.readouterr().out
+    assert "已推送 3 帧到 127.0.0.1:7799" in out
+
+
+def test_lidar_sim_push_rejects_custom_frame_spec(tmp_path, capsys):
+    """--push 模式下给非默认 --width/--height/--seed → 人话报错，不静默丢参数。
+
+    复现（v1.8 审计）：simulate_scene_server 按固定 256×192/seed 0 合成，
+    命令却把 --width 96 收下——推出去的帧既是 256×192，用户无从得知。
+    """
+    import io, contextlib
+    for flag, value in (("--width", "128"), ("--height", "96"), ("--seed", "7")):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert main(["lidar", "sim", "--push", "7799",
+                         flag, value]) == 1, flag
+        msg = err.getvalue()
+        assert flag in msg and "256×192" in msg, (flag, msg)
+
+
+def test_render_shadow_flags_take_effect(tmp_path, photo, capsys):
+    """--shadow-az / --shadow-opacity 必须真的到达 compose（CLI 级透传回归钉）。
+
+    单测层 test_sprite 已覆盖 sprite.contact_shadow_layer；这条钉 CLI 旗标 →
+    _compose_kw → compose_shot 的整条链（v1.6 加旗标时的踩坑类型：旗标收了
+    但没透传 = 静默失效）。影子轮廓非均匀时才看得出方位角——用梯形立绘。
+    """
+    char = tmp_path / "taper.png"
+    arr = np.zeros((200, 80, 4), dtype=np.uint8)
+    arr[..., 0] = 235
+    arr[..., 1] = 60
+    arr[..., 2] = 200
+    for y in range(200):                       # 三角形：底行 alpha 轮廓非均匀
+        half = int(40 * (0.35 + 0.65 * (y / 200)))
+        arr[y, 40 - half:40 + half, 3] = 255
+    Image.fromarray(arr, "RGBA").save(char)
+
+    def render(extra: list[str], tag: str) -> np.ndarray:
+        out = tmp_path / f"sh_{tag}.png"
+        assert main(["render", str(photo), str(char), "-o", str(out),
+                     "--pitch", "10", "--d", "3"] + extra) == 0
+        return np.asarray(Image.open(out).convert("RGB")).astype(int)
+
+    base = render([], "base")
+    az = render(["--shadow-az", "40"], "az")
+    op = render(["--shadow-opacity", "0.3"], "op")
+    assert int((np.abs(az - base).sum(2) > 0).sum()) > 0, "--shadow-az 没生效"
+    assert int((np.abs(op - base).sum(2) > 0).sum()) > 0, "--shadow-opacity 没生效"
+
+
+def test_render_overlay_hud_reports_placement_hints(tmp_path, photo, char,
+                                                    capsys):
+    """--overlay hud 的构图提示必须带**本遍实际落位**（三分线/顶满那几条才报）。
+
+    修复前 draw_hud_text 没收 placement/shot/mode，落位相关的四条永远不触发
+    （只有角度三条会报）——原版 compositionHints 读的就是当前摆位。
+    """
+    out = tmp_path / "hud.png"
+    code = main(["render", str(photo), str(char), "-o", str(out),
+                 "--d", "1.2", "--overlay", "hud"])
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "构图提示" in printed and "角色快顶满画面" in printed, printed
+
+
+def test_batch_ext_jpg_and_scene(tmp_path, char, capsys):
+    """batch --ext jpg 出 .jpg；--scene 每张顺带写同名 scene.json。"""
+    src = tmp_path / "photos"
+    src.mkdir()
+    for i in range(2):
+        _make_photo(src / f"p{i}.jpg", seed=i)
+    out = tmp_path / "out"
+    assert main(["batch", str(src), str(char), "-o", str(out),
+                 "--ext", "jpg", "--scene"]) == 0
+    produced = sorted(p.name for p in out.iterdir())
+    assert "shot_p0.jpg" in produced and "shot_p1.jpg" in produced
+    assert "shot_p0.json" in produced and "shot_p1.json" in produced
+    for name in ("shot_p0.jpg", "shot_p1.jpg"):
+        with Image.open(out / name) as im:
+            assert im.format == "JPEG"
+    scene = json.loads((out / "shot_p0.json").read_text(encoding="utf-8"))
+    assert scene["version"] == 1
+
+
+# ─────────────────────── prep 兜底（v1.8.0 审计修复） ───────────────────────
+
+def test_prep_reverts_when_content_collapses(tmp_path, capsys):
+    """抠/裁之后内容 <8px → 整条回退原图（index.html:2435-2439 的风控）。
+
+    复现（v1.8 审计）：5×5 内容 + 全透明底的图，cmd_prep 只实现前四步、
+    没有兜底，输出 5×5 的"修好的图"并报三个动作；webapp /api/prep 走
+    auto_prepare_char 同一张图回退原图——两条入口结论相反。现在两边一致：
+    输出 = 原图尺寸，动作链只剩一条还原提示。
+    """
+    tiny = tmp_path / "tiny.png"
+    arr = np.zeros((100, 100, 4), dtype=np.uint8)
+    arr[40:45, 40:45] = (230, 60, 200, 255)      # 5×5 内容，四角透明（cut 不触发）
+    Image.fromarray(arr, "RGBA").save(tiny)
+    out = tmp_path / "prepped.png"
+    assert main(["prep", str(tiny), "-o", str(out)]) == 0
+    with Image.open(out) as im:
+        assert im.size == (100, 100), "兜底没生效：输出被裁成了内容尺寸"
+    printed = capsys.readouterr().out
+    assert "已还原到原图" in printed
+    assert "自动裁掉" not in printed, "回退后不该还报裁边的动作"
+    # 与 auto_prepare_char（/api/prep 的实现）结论一致
+    from arcam.matte_tools import auto_prepare_char
+    res = auto_prepare_char(np.asarray(Image.open(tiny).convert("RGBA"),
+                                       dtype=np.float64) / 255.0)
+    assert res.rgba01.shape == (100, 100, 4) and res.actions == ()
+
+
+def test_prep_keeps_result_when_content_survives(tmp_path, capsys):
+    """内容足够大时正常修图（裁边真的发生、不回退）——兜底的另一面。"""
+    big = tmp_path / "big.png"
+    arr = np.zeros((120, 120, 4), dtype=np.uint8)
+    arr[10:110, 10:110] = (230, 60, 200, 255)    # 100×100 内容 + 透明边
+    Image.fromarray(arr, "RGBA").save(big)
+    out = tmp_path / "prepped.png"
+    assert main(["prep", str(big), "-o", str(out)]) == 0
+    with Image.open(out) as im:
+        assert im.size == (100, 100), "透明边应该被裁掉"
+    assert "自动裁掉了四周的空白边" in capsys.readouterr().out

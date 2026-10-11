@@ -2,6 +2,63 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.8.0] — 2026-10-11
+
+全项目审计轮次（五分区并行 + 编排者集成）：修复 12 个问题，收敛两侧分叉。
+
+### 修复（BUG）
+
+- **`arcam prep` 兜底整条漏掉**（cli.py）：动过手（抠或裁）且最终内容 bbox 任一边
+  < 8px 时应整条回退原图（index.html:2435-2439），CLI 侧从未实现——5×5 的立绘
+  会被输出成 5×5 的"修好"的图，而 webapp `/api/prep` 同图回退原图，**两条入口
+  结论相反**。已对齐 + 两条回归测试（回退/保持）。
+- **`snap_to_edge` 的 NaN rot 炸 `js_round`**（placement.py）：原版 `if(!rot) rot=0`
+  的 JS 假值集含 NaN，Python `not nan` 为 False，NaN 漏进 `_rotate_bar` 把
+  `math.floor` 炸成 ValueError（公开 API 的 rot 由调用方数据算出，NaN 可达）。
+- **`free_placement(free_p=None)` TypeError**：`current_placement`/`auto_fix_x` 有
+  None 兜底而它没有（同一公开 API 家族口径不一致）。
+- **`lidar sim --push` 静默丢掉用户给的 `--width/--height/--seed`**：
+  `simulate_scene_server` 按固定 256×192/seed 0 合成、不收尺寸参数，命令却把
+  `--width 128` 收下——推出去的帧既是 256×192，用户无从得知。改人话报错。
+- **`--overlay hud` 的构图提示不带本遍落位**（cli.py）：`draw_hud_text` 没收
+  placement/shot/mode，三分线/顶满/偏小/浮空那四条永远不触发（原版
+  compositionHints 读的就是当前摆位）。
+- **`arcam stats` 版本号在可编辑安装下报旧版**：`importlib.metadata` 停留在安装
+  那一刻（实测 pyproject 已 1.7.0、metadata 报 1.2.0）。改为**源码树在就以
+  pyproject 为准**，纯 wheel 安装才回落 metadata。
+- **webapp 路由表与 404 hint 缺 `/api/batch`**（v1.7 上线未回写文档）。
+
+### 优化
+
+- `sprite._warp_rect` 的预乘 RGB 提到分块循环外（与块无关的常量每块重算）：
+  实测 1509×1000 源 + 4K 画布，单次 `composite_sprite` 0.51s → 0.36s。
+- `contact_shadow_layer` 的 `sm` 广播统一（az=0 与斜射两支同形）。
+
+### 收敛（两侧同源去分叉）
+
+- `webui/hud.js` 与 `docs/hud.js` 的 `autoFixX`/`currentPlacementOf` 逐字对齐
+  （此前同一算法两种写法）。
+- `webui/app.js` 的 `bindNumeric`/`applyLang` 对齐 docs 风格，删 `currentLang`
+  helper（toggle 处内联）。
+
+### 删除
+
+- `docs/matte-tools.js` 的 `rgba01`（8 行零引用死函数——`cutSolidBg` 等处都直接
+  内联取 `px`）。
+- `cmd_batch`/`cmd_lidar_sim` 里模块顶部已 import 的重复局部 `from arcam.i18n
+  import t`。
+
+### 备注
+
+- i18n 表 108 个"死键"经复核**全部保留**：原版 TXT 160 条逐条搬运是 FEATURE-SPEC
+  §3 的契约（完整性本身是验收项），且 option 标签（`shot.全身` 等）被两个页面
+  直接当中文下标用。
+- `align_to_canvas`/`sample_subject`/`occlusion_mask`/`send_frame` 经全仓扫描
+  确认均有真实引用（跨模块/测试/公开 API），非死代码。
+- 全套 **570 passed / 1 skipped**；golden 差分 462 向量 0 失败；batch + depth
+  混合尺寸照片实测 2 ok / 0 failed；浏览器复验本机版（hud 12 导出、i18n 190 条、
+  MMD/live 就绪）。
+
 ## [1.7.0] — 2026-10-11
 
 **3D 模型支持进入本机网页版**（此前只有 Pages 版有）——两侧现在功能对等。
@@ -453,6 +510,7 @@ cli/video/matting · depth/plane/lidar/webapp · webui/Pages JS），修复 16 �
   `point(u,v,1)·depth`），与径向（cosθ）解释的仲裁结论一致，有回归测试钉住。
 - scene.json 与原版 1:1 同构（字段序/单位/toFixed 口径），未因本次审计变动。
 
+[1.8.0]: https://github.com/ForJiang/arcam/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/ForJiang/arcam/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/ForJiang/arcam/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/ForJiang/arcam/compare/v1.4.0...v1.5.0

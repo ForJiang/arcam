@@ -53,16 +53,14 @@
     var targets = [1 / 3, 0.5, 2 / 3];
     var c0 = currentPlacementOf(cam, subj, mode, sizePct, opts);
     if (!c0) return null;
-    var width = cam.W;
-    var xr = c0.u / width;
+    var xr = c0.u / cam.W;
     var best = targets[0];
     for (var i = 1; i < targets.length; i++) {
       if (Math.abs(xr - targets[i]) < Math.abs(xr - best)) best = targets[i];
     }
-    var targetU = best * width;
+    var targetU = best * cam.W;
     if (mode === "free") {
-      var newU = Math.max(0, Math.min(1, targetU / width));
-      return { freeU: newU, snapped: best };
+      return { freeU: Math.max(0, Math.min(1, targetU / cam.W)), snapped: best };
     }
     // ground：数值导数一步解（与 Python 的 dx=0.05 同）
     var plus = project(subj.x + 0.05, -cam.h, subj.d, cam);
@@ -70,19 +68,15 @@
     if (!plus || !minus) return { x: subj.x, snapped: best };
     var grad = (plus.u - minus.u) / 0.1;
     if (!isFinite(grad) || Math.abs(grad) < 1e-6) return { x: subj.x, snapped: best };
-    var nx = subj.x - (c0.u - targetU) / grad;
-    nx = Math.max(-20, Math.min(20, nx));
-    return { x: nx, snapped: best };
+    return { x: Math.max(-20, Math.min(20, subj.x - (c0.u - targetU) / grad)), snapped: best };
   }
 
   // 当前摆位（webui 没有 arcam-core，用一份最小落位对译）
   function currentPlacementOf(cam, subj, mode, sizePct, opts) {
     if (mode === "free") {
       var h = sizePct / 100 * cam.H;
-      var w = h * (opts.charAspect || 0.6);
-      var freeP = opts.freeP || [0.5, 0.6];
-      var u = freeP[0] * cam.W, v = freeP[1] * cam.H;
-      return { u: u, v: v, w: w, h: h };
+      return { u: (opts.freeP || [0.5, 0.6])[0] * cam.W, v: (opts.freeP || [0.5, 0.6])[1] * cam.H,
+               w: h * (opts.charAspect || 0.6), h: h };
     }
     // ground：足底 pb 与头顶 pt 的投影（与 groundPlacement 同式）
     var SHOTS = { "全身": 1.00, "膝上": 0.72, "腰上": 0.47, "胸上": 0.28, "头肩": 0.20 };

@@ -50,7 +50,7 @@ if TYPE_CHECKING:                                  # 仅标注期引用：arcam.
     from arcam.depth import LiDARFrame              # LiDAR 接入层（L1/L2），懒加载，
     from arcam.plane import CameraEnv               # 不依赖它们是否已安装
 
-#: 原版 measureRegion 的 N（index.html:3687：出图采样固定 32 级）
+#: 原版 measureRegion 的 N（index.html:3686：出图采样固定 32 级）
 LIGHT_LEVELS: int = 32
 #: 原版 ``S.frame`` 的默认值（index.html:925）—— ``compose_char_layer`` 的
 #: ``frame_key`` 缺省值（原版 buildCharCanvas = composeShot(null, …) 用的就是当前
@@ -286,8 +286,8 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
         drawn = char_rgba01
         if m is not None:
             drawn = bake_lit(drawn, m, (js_round(c.w), js_round(c.h)), grain=grain)
-        # 阴影是"场景"的一部分：自由模式不知道地面在哪，不铺（index.html:3131）；
-        # shadow=False 是显式开关（原版 LIGHT_SHD，index.html:1144）
+        # 阴影是"场景"的一部分：自由模式不知道地面在哪，不铺（index.html:3117）；
+        # shadow=False 是显式开关（原版 LIGHT_SHD，index.html:3050 声明 / 3116 门）
         shadow_layer = None
         if mode == 'ground' and shadow:
             shadow_layer = contact_shadow_layer(char_rgba01, c, ambient,

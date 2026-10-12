@@ -317,7 +317,7 @@ async function renderNow() {
     showScene(attachMmdKey(r.scene, state.photoCanvasPreview.width, state.photoCanvasPreview.height));
     setStatus(t('note.renderDone'), performance.now() - t0);
   } catch (e) {
-    setStatus(t('note.renderErr', (e && e.message ? e.message : e)), null, true);
+    setStatus(t('note.renderErr', errMsg(e)), null, true);
   }
 }
 
@@ -380,7 +380,7 @@ async function doMatte() {
     setStatus(t('note.matteOk'), performance.now() - t0);
     scheduleRender();
   } catch (e) {
-    setStatus(t('note.matteErr', (e && e.message ? e.message : e)), null, true);
+    setStatus(t('note.matteErr', errMsg(e)), null, true);
   }
 }
 
@@ -401,10 +401,12 @@ async function doExportPng() {
     const r = await composeFull();
     const blob = await canvasToBlob(r.shot, 'image/png');
     const name = 'arcam-render-' + stamp() + '.png';
-    await saveBlob(blob, name);
-    setStatus(t('note.saveStart', name));
+    // 取消（用户在保存框里关掉）不是成功：状态条要能分辨（同本地 webui 口径）。
+    // 旧实现无视 saveBlob 的返回值，取消后照显示「已开始下载」——撒谎。
+    const how = await saveBlob(blob, name);
+    setStatus(how === 'cancel' ? t('note.saveCancel') : t('note.saveStart', name));
   } catch (e) {
-    setStatus(t('note.exportErr', (e && e.message ? e.message : e)), null, true);
+    setStatus(t('note.exportErr', errMsg(e)), null, true);
   }
 }
 
@@ -424,10 +426,11 @@ async function doExportLayer() {
     if (!layer) throw new Error(t('err.layerEmpty'));
     const blob = await canvasToBlob(layer, 'image/png');
     const name = 'arcam-char-layer-' + stamp() + '.png';
-    await saveBlob(blob, name);
-    setStatus(t('note.saveStart', name));
+    // 取消不是成功：状态条要能分辨（同 doExportPng / 本地 webui 口径）
+    const how = await saveBlob(blob, name);
+    setStatus(how === 'cancel' ? t('note.saveCancel') : t('note.saveStart', name));
   } catch (e) {
-    setStatus(t('note.exportErr', (e && e.message ? e.message : e)), null, true);
+    setStatus(t('note.exportErr', errMsg(e)), null, true);
   }
 }
 
@@ -472,10 +475,11 @@ async function doExportBundle() {
       { name: 'character.png', data: new Uint8Array(await layerBlob.arrayBuffer()) }
     ]);
     const name = 'arcam-bundle-' + stamp() + '.zip';
-    await saveBlob(zip, name);
-    setStatus(t('note.bundleStart', name));
+    // 取消不是成功：状态条要能分辨（同 doExportPng / 本地 webui 口径）
+    const how = await saveBlob(zip, name);
+    setStatus(how === 'cancel' ? t('note.saveCancel') : t('note.bundleStart', name));
   } catch (e) {
-    setStatus(t('note.exportErr', (e && e.message ? e.message : e)), null, true);
+    setStatus(t('note.exportErr', errMsg(e)), null, true);
   }
 }
 
@@ -677,9 +681,12 @@ function init() {
 
   $('btn-matte').addEventListener('click', doMatte);
   $('btn-rerender').addEventListener('click', renderNow);
-  // file-photos 的 change 只由 bindBatch() 绑一次（那边带护栏：立绘未上传、
-  // 超过 12 张、逐张合成与失败明细）。init 里再绑一条 = 选一次文件跑两遍批量、
-  // 下两个 zip（webui 侧同款坑，v1.9.0 两边一起修）。
+  // 批量出图两条接线各绑一次（v1.9.0 双接线事故 + v1.12 双 click 事故回归）：
+  //   click（打开文件选择框）就在本 init 里，与其余按钮同一处；
+  //   file-photos 的 change 只在 bindBatch() 里绑一次（那边带护栏：立绘未上传、
+  //   超过 12 张、逐张合成与失败明细）——init 里再绑一条 change = 选一次文件
+  //   跑两遍批量、下两个 zip；bindBatch 里再绑一条 click = 点一次开两回选择框。
+  //   两侧门禁：tests/test_docs_ui.py::test_docs_batch_bound_exactly_once。
   $('btn-batch').addEventListener('click', () => $('file-photos').click());
   $('btn-png').addEventListener('click', doExportPng);
   $('btn-layer').addEventListener('click', doExportLayer);
@@ -737,6 +744,28 @@ function t(key) {
   return window.arcamT ? window.arcamT.apply(null, arguments) : key;
 }
 
+// T(key, fallback)：键不存在时回落 fallback 原文（arcamT 对缺 key 返回裸 key，
+// 直接显示会比不翻更糟）。用于**预接线**场景：键由编排者按 DONE.md 清单落地，
+// 落地前界面保持写死的原文（与 mmd.js 的 T()、applyLang 的守卫同口径）。
+function T(key, fallback) {
+  const v = t(key);
+  return v !== key ? v : fallback;
+}
+
+/** 网络类错误的人话化：fetch 失败时浏览器抛的是**英文 TypeError**
+ *  （"Failed to fetch" / "Load failed"）——不可操作。这里识别后换成人话
+ *  （键未落地回落中文原文）；其余错误的 message 原样返回（调用方的
+ *  note.renderErr / note.exportErr 等键负责包装）。 */
+function errMsg(e) {
+  const msg = (e && e.message) || String(e);
+  // ⚠ 判据是 e.name === 'TypeError'（fetch 失败在规范里就是抛 TypeError），不是
+  //   消息文本里有没有 "fetch"——后端 error/hint 的文案里将来出现这三个词会被
+  //   误吞成通用网络错误（v1.12.0 对抗复核 P3-1）。ApiError 有自己的 name。
+  return (e && e.name === 'TypeError')
+    ? T('err.network', '连不上服务：网页版请检查网络后重试；本地版请确认「启动AR取景器」窗口还开着。')
+    : msg;
+}
+
 function initLang() {
   const q = new URLSearchParams(location.search).get('lang');
   if (q === 'zh' || q === 'en') window.ARCAM_LANG = q;
@@ -761,9 +790,18 @@ function applyLang() {
   // ⚠ 不覆写 document.title：原版的 title 就是 app.title（"手机端"），但本 port
   //    有自己的标题（index.html 里写死"arcam（GitHub Pages 版）"）——语言切换
   //    只换正文，不动牌子。
+  // ⚠ 缺 key 时 t() 回落的是**裸 key 字符串**——无脑覆写会把标签换成 "param.x"
+  //   这种裸键，比不翻更糟。判据：译文 === key（键不存在）就保留 HTML 原文。
+  //   i18n 键由编排者按 artifacts/W5-web/DONE.md 清单落地，落地前预接线的
+  //   data-t 靠这条守卫保持中文原文（不现裸键）。
   document.querySelectorAll('[data-t]').forEach((el) => {
     const v = t(el.dataset.t);
     if (v !== el.dataset.t) el.textContent = v;
+  });
+  // data-t-title → title 属性（tooltip；原版 index.html 的同款机制，与本地 webui 一致）
+  document.querySelectorAll('[data-t-title]').forEach((el) => {
+    const v = t(el.dataset.tTitle);
+    if (v !== el.dataset.tTitle) el.title = v;
   });
   $('btn-lang').textContent = lang === 'en' ? '中' : 'EN';
   $('btn-lang').title = t('lang.switch');
@@ -1326,7 +1364,9 @@ function syncControlsFromParams() {
 /* ================= 11.5 批量出图（v1.6.0，客户端） ================= */
 
 function bindBatch() {
-  $('btn-batch').addEventListener('click', () => $('file-photos').click());
+  // ⚠ click（打开文件选择框）不在这里绑——init 里已绑一次（与其余按钮同处）。
+  //   两处都绑 = 点一次批量钮开两回文件选择框（v1.12 审计实修：双 click）。
+  //   本函数只拥有 change 接线（带护栏的那条）。
   $('file-photos').addEventListener('change', async (e) => {
     const files = e.target.files;
     e.target.value = '';                          // 清掉，否则同一批文件再选不触发 change
@@ -1334,19 +1374,28 @@ function bindBatch() {
     if (!state.charCanvas) { setStatus(t('note.batchNeedChar'), null, true); return; }
     if (files.length > 12) { setStatus(t('note.batchTooManyGot', files.length), null, true); return; }
     setStatus(t('note.batchRunning', files.length));
+    //: 长任务秒表（同本地 webui doBatch）：客户端逐张全尺寸合成，12 张可能
+    //   几十秒——隔两秒刷一次「已用 N 秒」（复用 note.aiElapsed，不新造键）。
+    const t0 = performance.now();
+    const ticker = setInterval(() => {
+      setStatus(t('note.batchRunning', files.length) + ' · ' +
+                t('note.aiElapsed', Math.round((performance.now() - t0) / 1000)));
+    }, 2000);
     const parts = [];
     const failed = [];
-    for (let i = 0; i < files.length; i++) {
-      try {
-        await setPhoto(files[i]);                     // 逐张换成当前照片
-        const r = await composeFull();                // 全尺寸重合成（同 render 路径）
-        const blob = await canvasToBlob(r.shot, 'image/png');
-        parts.push({ name: `shot_${String(i + 1).padStart(3, '0')}.png`,
-                     data: new Uint8Array(await blob.arrayBuffer()) });
-      } catch (err) {
-        failed.push(t('err.batchItem', i + 1, (err && err.message) || err));
+    try {
+      for (let i = 0; i < files.length; i++) {
+        try {
+          await setPhoto(files[i]);                     // 逐张换成当前照片
+          const r = await composeFull();                // 全尺寸重合成（同 render 路径）
+          const blob = await canvasToBlob(r.shot, 'image/png');
+          parts.push({ name: `shot_${String(i + 1).padStart(3, '0')}.png`,
+                       data: new Uint8Array(await blob.arrayBuffer()) });
+        } catch (err) {
+          failed.push(t('err.batchItem', i + 1, errMsg(err)));
+        }
       }
-    }
+    } finally { clearInterval(ticker); }
     if (!parts.length) {
       setStatus(t('err.batchAllFail', failed.slice(0, 3).join('；')), null, true);
       return;
@@ -1355,9 +1404,12 @@ function bindBatch() {
       parts.push({ name: '_errors.txt', data: new TextEncoder().encode(failed.join('\n') + '\n') });
     }
     const zip = buildBundleZip(parts);
-    await saveBlob(zip, 'arcam-batch.zip');
-    setStatus(t('note.batchDoneDocs', parts.length - (failed.length ? 1 : 0)) +
-              (failed.length ? t('note.batchSkip', failed.length) : ''));
+    // 取消不是成功：done 后面缀上「已取消保存」，成功/失败张数照旧可读
+    // （同本地 webui 的 note.batchDoneWeb + note.batchCancel 口径）
+    const how = await saveBlob(zip, 'arcam-batch.zip');
+    const done = t('note.batchDoneDocs', parts.length - (failed.length ? 1 : 0)) +
+                 (failed.length ? t('note.batchSkip', failed.length) : '');
+    setStatus(done + (how === 'cancel' ? t('note.batchCancel') : ''));
   });
 }
 

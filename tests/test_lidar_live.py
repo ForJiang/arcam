@@ -335,3 +335,147 @@ def test_sim_thread_is_daemon_and_sends_exact_frames():
     assert not sim.is_alive()
     assert _wait_for(lambda: len(received) == 2)
     assert len(received) == 2
+
+
+# ---------------------------------------------------------------------------
+# W3 健壮性增补（覆盖缺口：协议守卫 / 落盘兜底 / accept 失败 / 空客户端）
+# ---------------------------------------------------------------------------
+
+def test_recv_frame_zero_meta_length_raises():
+    """meta_len=0：长度前缀必须落在 (0, 64KiB]——0 字节 meta 不是合法帧。"""
+    a, b = socket.socketpair()
+    with contextlib.closing(a), contextlib.closing(b):
+        a.settimeout(5.0)
+        b.sendall(struct.pack('>I', 0))
+        with pytest.raises(ValueError, match='bad meta length'):
+            recv_frame(a)
+
+
+def test_recv_frame_oversize_meta_length_raises():
+    """meta_len 超 64KiB 上限：在读 meta 之前就拒（不为垃圾长度吞内存）。"""
+    a, b = socket.socketpair()
+    with contextlib.closing(a), contextlib.closing(b):
+        a.settimeout(5.0)
+        b.sendall(struct.pack('>I', (1 << 16) + 1))
+        with pytest.raises(ValueError, match='bad meta length'):
+            recv_frame(a)
+
+
+def test_recv_frame_meta_not_object_raises():
+    """meta 是 JSON 数组/标量 → ValueError（协议要求 JSON object）。"""
+    a, b = socket.socketpair()
+    with contextlib.closing(a), contextlib.closing(b):
+        a.settimeout(5.0)
+        junk = b'[1, 2, 3]'
+        b.sendall(struct.pack('>I', len(junk)) + junk)
+        with pytest.raises(ValueError, match='must be a JSON object'):
+            recv_frame(a)
+
+
+def test_recv_frame_non_number_intrinsic_raises():
+    """内参给字符串 → ValueError（_require_number：bool/str 都拒）。"""
+    a, b = socket.socketpair()
+    with contextlib.closing(a), contextlib.closing(b):
+        a.settimeout(5.0)
+        meta = dict(_good_meta(0), fx='1.0')
+        meta_bytes = json.dumps(meta).encode('utf-8')
+        b.sendall(struct.pack('>I', len(meta_bytes)) + meta_bytes)
+        with pytest.raises(ValueError, match=r"meta\['fx'\]"):
+            recv_frame(a)
+
+
+def test_send_frame_rejects_non_2d_depth():
+    """写侧同样只发 (H,W)：三维数组直接 ValueError（不发畸形帧）。"""
+    meta, _ = lidar_sim.synth_ground_frame(index=0)
+    with pytest.raises(ValueError, match=r'\(H, W\)'):
+        send_frame(_NullSocket(), meta, np.zeros((4, 4, 3), np.float32))
+
+
+def test_send_frame_rejects_oversize_meta():
+    """meta JSON 超 64KiB → ValueError（与读侧上限同口径，垃圾不外发）。"""
+    meta, depth = lidar_sim.synth_ground_frame(index=0)
+    huge = dict(meta, junk='x' * (1 << 16))
+    with pytest.raises(ValueError, match='meta too large'):
+        send_frame(_NullSocket(), huge, depth)
+
+
+def test_save_depth_file_falls_back_to_spec_writer(tmp_path: Path):
+    """arcam.depth 不可导入（裁剪安装）时走内置 §2.3 写盘，读回仍自洽。
+
+    兜底路径与权威实现的逐字节同口径由
+    ``test_write_depth_spec_matches_authoritative_save_depth`` 钉死；这里验
+    的是**选择逻辑**：``_arcam_depth=None`` 时必须真的落到兜底写盘函数。
+    """
+    from arcam import lidar_live
+
+    meta, depth = lidar_sim.synth_ground_frame(h=1.55, index=0)
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(lidar_live, '_arcam_depth', None)
+    try:
+        out = tmp_path / 'fallback.depth'
+        lidar_live.save_depth_file(out, meta, depth)
+    finally:
+        monkey.undo()
+    frame = arcam_depth.load_depth(out)
+    assert frame.depth_m.shape == depth.shape
+    assert np.array_equal(frame.depth_m, depth, equal_nan=True)
+    assert (frame.fx, frame.cx) == pytest.approx((meta['fx'], meta['cx']))
+
+
+class _FakeListener:
+    """accept 立刻抛 OSError 的假监听 socket（验 serve 的 accept 失败退出）。"""
+
+    def __init__(self):
+        self.closed = False
+
+    def setsockopt(self, *_a):
+        pass
+
+    def bind(self, _addr):
+        pass
+
+    def listen(self, _n):
+        pass
+
+    def accept(self):
+        raise OSError('listener closed')
+
+    def close(self):
+        self.closed = True
+
+
+def test_serve_accept_oserror_exits_cleanly(monkeypatch):
+    """监听 socket 被关（accept 抛 OSError）→ serve 干净结束，不挂线程。"""
+    from arcam import lidar_live
+
+    monkeypatch.setattr(lidar_live.socket, 'socket', lambda *a, **k: _FakeListener())
+    frames = lidar_live.serve(0)
+    assert list(frames) == []
+
+
+def test_serve_eof_without_frames_serves_next_client():
+    """客户端连上就断（一帧不发）→ EOF 只断这个连接，下一个客户端照收。"""
+    port = _free_port()
+    received = _collect_async(port, max_frames=1)
+    with contextlib.closing(socket.create_connection((HOST, port), timeout=5.0)):
+        pass                                   # 干净 EOF，零帧
+    time.sleep(0.2)                            # 让 serve 回到 accept
+
+    exp_meta, exp_depth = lidar_sim.synth_ground_frame(h=1.55, index=0)
+    with contextlib.closing(socket.create_connection((HOST, port), timeout=5.0)) as sock:
+        send_frame(sock, exp_meta, exp_depth)
+    assert _wait_for(lambda: len(received) == 1)
+    assert np.array_equal(received[0][1].view(np.uint32), exp_depth.view(np.uint32))
+
+
+def test_serve_out_dir_frames_are_numbered_across_clients(tmp_path: Path):
+    """序号跨客户端连续累计：两个客户端各推一帧 → frame_000000/000001。"""
+    port = _free_port()
+    received = _collect_async(port, out_dir=str(tmp_path), max_frames=2)
+    for i in range(2):
+        meta, depth = lidar_sim.synth_ground_frame(h=1.55, index=i)
+        with contextlib.closing(socket.create_connection((HOST, port), timeout=5.0)) as sock:
+            send_frame(sock, meta, depth)
+        assert _wait_for(lambda: len(received) == i + 1), i
+    files = sorted(p.name for p in tmp_path.glob('frame_*.depth'))
+    assert files == ['frame_000000.depth', 'frame_000001.depth']

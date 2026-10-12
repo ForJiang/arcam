@@ -43,7 +43,7 @@ from arcam.geometry import Camera, project
 from arcam.lighting import LightSample, bake_lit, measure_region
 from arcam.numeric import Rect, js_round
 from arcam.placement import SpritePlacement, Subject, current_placement
-from arcam.sprite import composite_sprite, contact_shadow_layer
+from arcam.sprite import _warp_layers, composite_sprite, contact_shadow_layer
 from arcam.tone import tone_matched_layer
 
 if TYPE_CHECKING:                                  # 仅标注期引用：arcam.depth/plane 属
@@ -153,7 +153,7 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
         env = _lidar_env(depth) if depth is not None else None
         cam, subj, _notes = _merge_env(cam, subj, env_overrides, env,
                                        depth=depth, mode=mode, shot=shot)
-    rect, light_used, shot_rgba = _engine(
+    rect, light_used, shot_rgba, (shot_drawn, shot_shadow) = _engine(
         src_rgb01, char_rgba01, subj, cam, frame_key,
         light=light, mode=mode, size_pct=size_pct, char_scale=char_scale,
         rot_basis=rot_basis, tone=tone, shot=shot, edge_bar=edge_bar,
@@ -163,15 +163,19 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
     # 立绘层与照片**同一个裁切框**：同一份 frame_key、同一套光，两张图才逐像素对应。
     # with_char_layer=False（video 逐帧/CLI 出图）整遍跳过：第二遍 _engine 与第一遍
     # 同构图，只为出那张透明底立绘层，只要 shot 的调用方纯白烧（实测 47%）。
+    # 第二遍还复用第一遍的烘光/阴影产物（drawn/shadow_layer）：bake_lit 与
+    # contact_shadow_layer 都是确定性纯函数，相同入参必然相同输出，没有不算两遍
+    # 的理由（实测 bake_lit 一遍 ≈ 单帧 25%）。
     layer_rgba = None
     if with_char_layer:
-        _, _, layer_rgba = _engine(
+        _, _, layer_rgba, _ = _engine(
             None, char_rgba01, subj, cam, frame_key,
             light=light_used, mode=mode, size_pct=size_pct, char_scale=char_scale,
             rot_basis=rot_basis, tone=False, shot=shot, edge_bar=edge_bar,
             depth=depth, shadow=shadow, grain=grain, sample_light=sample_light,
             shadow_az=shadow_az, shadow_opacity=shadow_opacity,
-            grain_scale=grain_scale)
+            grain_scale=grain_scale,
+            drawn=shot_drawn, shadow_layer=shot_shadow)
     return ComposedShot(shot=shot_rgba[..., :3], rect=rect,
                         light=light_used, char_layer=layer_rgba, env=env)
 
@@ -222,7 +226,7 @@ def compose_char_layer(char_rgba01: np.ndarray, subj: Subject, cam: Camera, *,
         env = _lidar_env(depth) if depth is not None else None
         cam, subj, _notes = _merge_env(cam, subj, env_overrides, env,
                                        depth=depth, mode=mode, shot=shot)
-    rect, _, layer_rgba = _engine(
+    rect, _, layer_rgba, _ = _engine(
         None, char_rgba01, subj, cam, frame_key,
         light=light, mode=mode, size_pct=size_pct, char_scale=char_scale,
         rot_basis=rot_basis, tone=False, shot=shot, edge_bar=edge_bar,
@@ -241,9 +245,11 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
             shadow: bool = True, grain: bool = True,
             sample_light: bool = True,
             shadow_az: float = 0.0, shadow_opacity: float = 1.0,
-            grain_scale: float = 1.0
-            ) -> tuple[Rect, LightSample | None, np.ndarray]:
-    """composeShot 的公共引擎：返回 ``(rect, light_used, rgba_uint8)``。
+            grain_scale: float = 1.0,
+            drawn: np.ndarray | None = None,
+            shadow_layer: np.ndarray | None = None
+            ) -> tuple[Rect, LightSample | None, np.ndarray, tuple]:
+    """composeShot 的公共引擎：返回 ``(rect, light_used, rgba_uint8, reuse)``。
 
     ``frame_key`` 由调用方给出（``compose_char_layer`` 缺省 ``DEFAULT_FRAME``，
     即原版 ``S.frame`` 默认值）—— 照片与立绘层两条路共用同一套取景/落位/裁切
@@ -253,6 +259,13 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
     ``depth`` 非 None（LIDAR-SPEC §4）时按 effective ``cam``（本函数入参，已由
     调用方合并好）算遮挡掩码。照片路径与立绘层路径**各调一遍**本函数，遮挡因此
     两条路都抠——立绘层里的公告板被挡区 alpha 同样置 0。
+
+    ``drawn`` / ``shadow_layer``：调用方预建的（已烘光立绘 / 接触阴影层），
+    None = 本遍自己算。:func:`compose_shot` 的两遍（照片 + 立绘层）构图完全相同，
+    而 ``bake_lit`` 与 ``contact_shadow_layer`` 都是确定性纯函数 —— 相同入参必然
+    相同输出，第二遍直接复用第一遍的产物，逐位相同、不算两遍（实测 bake_lit
+    一遍 ≈ 单帧 25%）。返回值第 4 项 ``reuse = (drawn, shadow_layer)`` 即本遍
+    实际用到的这两个产物，交给调用方传给下一遍。
     """
     if mode not in _MODES:
         raise ValueError(f"mode 必须是 {_MODES} 之一，收到 {mode!r}")
@@ -298,24 +311,34 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
     rgba = None
     if c is not None and char_rgba01 is not None:
         ambient = m.mean if m is not None else None
-        drawn = char_rgba01
-        if m is not None:
-            drawn = bake_lit(drawn, m, (js_round(c.w), js_round(c.h)), grain=grain,
-                             grain_scale=grain_scale)
+        if drawn is None:
+            drawn = char_rgba01
+            if m is not None:
+                drawn = bake_lit(drawn, m, (js_round(c.w), js_round(c.h)), grain=grain,
+                                 grain_scale=grain_scale)
         # 阴影是"场景"的一部分：自由模式不知道地面在哪，不铺（index.html:3117）；
-        # shadow=False 是显式开关（原版 LIGHT_SHD，index.html:3050 声明 / 3116 门）
-        shadow_layer = None
+        # shadow=False 是显式开关（原版 LIGHT_SHD，index.html:3050 声明 / 3116 门）。
+        # 调用方预建的 shadow_layer 只在门过了之后才可能非 None（门没过 → 置回
+        # None，自由模式/显式关闭绝不铺）
         if mode == 'ground' and shadow:
-            shadow_layer = contact_shadow_layer(char_rgba01, c, ambient,
-                                                shadow_az=shadow_az,
-                                                shadow_opacity=shadow_opacity)
+            if shadow_layer is None:
+                shadow_layer = contact_shadow_layer(char_rgba01, c, ambient,
+                                                    shadow_az=shadow_az,
+                                                    shadow_opacity=shadow_opacity)
+        else:
+            shadow_layer = None
         draw_shadow = shadow_layer is not None
         kw = dict(shadow=draw_shadow, ambient=ambient, shadow_layer=shadow_layer)
         black = np.zeros((cam.height, cam.width, 3), dtype=np.float64)
         white = np.full((cam.height, cam.width, 3), 1.0, dtype=np.float64)
-        # 黑底上 source-over 的结果 = 预乘色；白底再合成一次反解出累加 alpha
-        on_black = _to_float01(composite_sprite(black, drawn, c, **kw))
-        on_white = _to_float01(composite_sprite(white, drawn, c, **kw))
+        # 黑底上 source-over 的结果 = 预乘色；白底再合成一次反解出累加 alpha。
+        # warp 结果只取决于 (源, 摆位, 画布尺寸)、与底无关：两遍共用同一份预
+        # warp 层，第二遍不做第二次 clip+预乘+分块双线性（逐位相同）
+        layers = _warp_layers(drawn, c, shadow=draw_shadow, ambient=ambient,
+                              shadow_layer=shadow_layer,
+                              out_hw=(cam.height, cam.width))
+        on_black = _to_float01(composite_sprite(black, drawn, c, layers=layers, **kw))
+        on_white = _to_float01(composite_sprite(white, drawn, c, layers=layers, **kw))
         alpha = _alpha_from(on_black, on_white)
         if occ is not None:
             # 遮挡区 alpha 归零、RGB 清零：on_black 清零后照片路径该处露出原照片，
@@ -343,8 +366,9 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
 
     # ⑤ 小数偏移裁切（off 画布；越界目标像素保持透明黑，对应 JPEG 的黑边）
     out = _crop_offset(rgba, rect)
-    # ⑥ 把这一遍实际用到的光带出去（立绘层必须跟照片用同一套）
-    return rect, m, out
+    # ⑥ 把这一遍实际用到的光带出去（立绘层必须跟照片用同一套）；drawn/shadow_layer
+    #    是同构图下一遍的现成产物（确定性纯函数，无副作用）
+    return rect, m, out, (drawn, shadow_layer)
 
 
 def _lidar_env(depth: LiDARFrame) -> CameraEnv:
@@ -550,20 +574,34 @@ def _alpha_from(on_black: np.ndarray, on_white: np.ndarray) -> np.ndarray:
     三元素中位用 ``max(min(a,b), min(max(a,b), c))`` 直接算 —— 与
     ``np.median(axis=2)`` 逐位相同（奇数个元素就是中间那个），但不用为 12M×3
     的数组做一次 partition（实测省 0.6 s/张）。
+
+    原地化说明：``1.0 + b - w`` 的运算顺序**不能换**（浮点加法不结合），所以
+    仍是"先加 1 再减白底"两步，但第二步与 clip 都写回同一块临时；后续
+    min/max 全部 in-place，6 幅全幅临时减到 3 幅，数值逐位相同。
     """
-    est = np.clip(1.0 + on_black - on_white, 0.0, 1.0)
-    lo = np.minimum(est[..., 0], est[..., 1])
-    hi = np.maximum(est[..., 0], est[..., 1])
-    return np.maximum(lo, np.minimum(hi, est[..., 2]))
+    est = 1.0 + on_black
+    est -= on_white
+    np.clip(est, 0.0, 1.0, out=est)
+    e0 = est[..., 0]
+    e1 = est[..., 1]
+    lo = np.minimum(e0, e1)
+    hi = np.maximum(e0, e1)
+    np.minimum(hi, est[..., 2], out=hi)
+    np.maximum(lo, hi, out=lo)
+    return lo
 
 
 def _unpremultiply(rgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
-    """黑底上 source-over 的结果是预乘色，按 alpha 反预乘回源色（alpha=0 处置 0）。"""
+    """黑底上 source-over 的结果是预乘色，按 alpha 反预乘回源色（alpha=0 处置 0）。
+
+    用 ``where=`` 的原地除法代替布尔掩码 gather/scatter：实心像素都是同一个
+    ``rgb/alpha`` 除法（逐位相同），透明像素留在零初始化数组里仍是 0；少两轮
+    (n,3) 大小的压缩/散布临时（1080p 实测 98 ms → 30 ms）。
+    """
     out = np.zeros_like(rgb)
     solid = alpha > 1e-9
-    a = alpha[solid][:, None]
-    out[solid] = rgb[solid] / a
-    return np.clip(out, 0.0, 1.0)
+    np.divide(rgb, alpha[..., None], out=out, where=solid[..., None])
+    return np.clip(out, 0.0, 1.0, out=out)
 
 
 def _crop_offset(rgba01: np.ndarray, r: Rect) -> np.ndarray:
@@ -591,6 +629,11 @@ def _crop_offset(rgba01: np.ndarray, r: Rect) -> np.ndarray:
     y1 = min(src_h, oy + out_h)
     if x1 > x0 and y1 > y0:
         block = rgba01[y0:y1, x0:x1]
-        out[dy:dy + (y1 - y0), dx:dx + (x1 - x0)] = (
-            np.clip(block, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+        # clip→*255→+0.5 除 clip（无 out= 即「拷一份再夹」）外全部原地，比
+        # clip/乘/加/astype 四连临时少两幅全幅 float64；astype 对非负值向零截断，
+        # 与 (…*255+0.5).astype(uint8) 逐位相同
+        q = np.clip(block, 0.0, 1.0)
+        q *= 255.0
+        q += 0.5
+        out[dy:dy + (y1 - y0), dx:dx + (x1 - x0)] = q
     return out

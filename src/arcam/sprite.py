@@ -85,31 +85,64 @@ def _premul_source(src01: np.ndarray) -> np.ndarray:
     return src_pm
 
 
-def _bilinear_rgba_premul(src_pm: np.ndarray, fx: np.ndarray, fy: np.ndarray) -> np.ndarray:
+def _bilinear_rgba_premul(src_pm: np.ndarray, fx: np.ndarray, fy: np.ndarray,
+                          out: np.ndarray) -> np.ndarray:
     """在**预乘** RGBA 源上按连续坐标 (fx, fy) 双线性采样；滤波后解除预乘。
 
     ``src_pm`` 是 :func:`_premul_source` 的产物（预乘 RGB + alpha 拼成的
     (H,W,4)）。边缘按夹取（canvas 滤波的常见实现）；源外由调用方先把坐标夹进
     [0, n-1]。预乘源**与块无关**，提到分块循环外算一次（每块重算等于白烧：
     实测 1509×1000 源 + 4K 画布，单次 composite_sprite 0.51 s → 0.36 s）。
+
+    结果直接写进 ``out``（(n,W,4) float64 可写视图，即 warp 目标画布的一块），
+    不再另返回拼接数组——省一幅 (n,W,4) 全块临时。alpha 与 RGB 用**同一组权重**
+    分开混（通道各自独立，与四通道一起混逐位相同）；``(1-wx)``/``(1-wy)`` 每个
+    只算一次（原实现 top/bot 各算一遍，值相同）。
     """
     sh, sw = src_pm.shape[:2]
     x0 = np.floor(fx)
     y0 = np.floor(fy)
     wx = (fx - x0)[..., None]
     wy = (fy - y0)[..., None]
-    x0i = np.clip(x0.astype(np.int64), 0, sw - 1)
-    x1i = np.clip((x0 + 1).astype(np.int64), 0, sw - 1)
-    y0i = np.clip(y0.astype(np.int64), 0, sh - 1)
-    y1i = np.clip((y0 + 1).astype(np.int64), 0, sh - 1)
-
-    top = src_pm[y0i, x0i] * (1.0 - wx) + src_pm[y0i, x1i] * wx
-    bot = src_pm[y1i, x0i] * (1.0 - wx) + src_pm[y1i, x1i] * wx
-    out = top * (1.0 - wy) + bot * wy
-    a = out[..., 3:4]
-    safe = a > 1e-9
-    rgb = np.where(safe, out[..., :3] / np.where(safe, a, 1.0), 0.0)
-    return np.concatenate([rgb, a], axis=-1)
+    # 下标计算：调用方（_warp_rect）已把坐标夹进 [0, n-1]（docstring 契约），故
+    # x0/y0 = floor(坐标) 天然在界内、只需给 +1 的那一半夹一次；展平成**一维**
+    # 下标再 gather，比两枚广播下标数组的双 advanced-index 快 ~20%（实测）
+    x0i = x0.astype(np.int64)
+    x1i = x0i + 1
+    np.clip(x1i, 0, sw - 1, out=x1i)
+    y0i = y0.astype(np.int64)
+    y1i = y0i + 1
+    np.clip(y1i, 0, sh - 1, out=y1i)
+    ty0 = y0i * sw
+    ty1 = y1i * sw
+    flat = src_pm.reshape(-1, 4)          # C 连续源的视图（非连续时 reshape 自拷贝，值不变）
+    omwx = 1.0 - wx
+    omwy = 1.0 - wy
+    # 四角 gather 出来的是本函数私有临时，立刻就地加权再相加：
+    # top = A*(1-wx) + B*wx（IEEE 加法满足交换律，项序不变即逐位相同）
+    g00 = flat[ty0 + x0i]
+    g01 = flat[ty0 + x1i]
+    g00 *= omwx
+    g01 *= wx
+    g00 += g01                                   # top
+    g10 = flat[ty1 + x0i]
+    g11 = flat[ty1 + x1i]
+    g10 *= omwx
+    g11 *= wx
+    g10 += g11                                   # bot
+    out_a = out[..., 3]
+    out_rgb = out[..., :3]
+    omwy_a = omwy[..., 0]                     # (n,W) 视图：alpha 通道用
+    np.multiply(g00[..., 3], omwy_a, out=out_a)
+    out_a += g10[..., 3] * wy[..., 0]
+    np.multiply(g00[..., :3], omwy, out=out_rgb)
+    out_rgb += g10[..., :3] * wy
+    # 解除预乘：a>1e-9 才除（与原 where(safe, …, 0) 同口径）；alpha=0 处 RGB
+    # 置 0。预乘 RGB 非负，乘 False 得 +0.0，与 np.where(…, 0.0) 逐位相同
+    safe = out[..., 3:4] > 1e-9
+    np.divide(out_rgb, out[..., 3:4], out=out_rgb, where=safe)
+    out_rgb *= safe
+    return out
 
 
 def _warp_rect(src01: np.ndarray, lx0: float, ly0: float, rw: float, rh: float,
@@ -143,20 +176,47 @@ def _warp_rect(src01: np.ndarray, lx0: float, ly0: float, rw: float, rh: float,
     ya1 = min(h_out, int(math.ceil(max(rys))) + 1)
     if xa1 <= xa0 or ya1 <= ya0:
         return out, (ya0, ya0, xa0, xa0)
+    lx1 = lx0 + rw                       # 矩形右/下边：循环内是常量，算一次就够
+    ly1 = ly0 + rh
     for y0 in range(ya0, ya1, _WARP_CHUNK):
         y1 = min(ya1, y0 + _WARP_CHUNK)
         jj, ii = np.mgrid[y0:y1, xa0:xa1]
-        u = ii + 0.5 - cu
-        v = jj + 0.5 - cv
-        lx = u * ca + v * sa
-        ly = -u * sa + v * ca
-        inside = ((lx >= lx0) & (lx <= lx0 + rw) & (ly >= ly0) & (ly <= ly0 + rh))
-        fx = np.clip((lx - lx0) / rw * sw - 0.5, 0.0, sw - 1.0)
-        fy = np.clip((ly - ly0) / rh * sh - 0.5, 0.0, sh - 1.0)
-        warped = _bilinear_rgba_premul(src_pm, fx, fy)
-        warped[..., 3] = np.where(inside, warped[..., 3], 0.0)
-        rgb = np.where(warped[..., 3:4] > 0.0, warped[..., 0:3], 0.0)
-        out[y0:y1, xa0:xa1] = np.concatenate([rgb, warped[..., 3:4]], axis=-1)
+        u = ii + 0.5
+        u -= cu
+        v = jj + 0.5
+        v -= cv
+        lx = u * ca
+        lx += v * sa
+        # ly = (-u)*sa + v*ca：u 之后不再用，就地取负省一幅临时（(-u)*sa 与
+        # u*(-sa) 都精确等于 -(u*sa)，与原式逐位相同）
+        np.negative(u, out=u)
+        ly = u * sa
+        ly += v * ca
+        # inside 用原地 &= 累乘（7 个布尔临时减到 1 个）；必须在 lx/ly 被下面
+        # 覆写成源坐标之前算完
+        inside = lx >= lx0
+        inside &= lx <= lx1
+        inside &= ly >= ly0
+        inside &= ly <= ly1
+        # 逆映射收尾全部原地化：lx/ly 是本循环私有临时，运算顺序与原式一一对应
+        np.subtract(lx, lx0, out=lx)
+        np.divide(lx, rw, out=lx)
+        np.multiply(lx, sw, out=lx)
+        np.subtract(lx, 0.5, out=lx)
+        np.clip(lx, 0.0, sw - 1.0, out=lx)
+        np.subtract(ly, ly0, out=ly)
+        np.divide(ly, rh, out=ly)
+        np.multiply(ly, sh, out=ly)
+        np.subtract(ly, 0.5, out=ly)
+        np.clip(ly, 0.0, sh - 1.0, out=ly)
+        # 双线性直接写进画布视图：不再要 (n,W,4) 的 warped 全块临时 + concatenate
+        dst = out[y0:y1, xa0:xa1]
+        _bilinear_rgba_premul(src_pm, lx, ly, dst)
+        # 局部矩形外 alpha 置零、alpha=0 处 RGB 清零：两处都就地乘 0/1 掩码。
+        # warp 出来的 alpha/RGB 都非负（源 alpha 已 clip 到 [0,1]、权重非负），
+        # 乘 False 得 +0.0，与 np.where(…, 0.0) 逐位相同
+        dst[..., 3] *= inside
+        dst[..., :3] *= dst[..., 3:4] > 0.0
     return out, (ya0, ya1, xa0, xa1)
 
 
@@ -316,9 +376,52 @@ def contact_shadow_layer(char_rgba: np.ndarray, c: "SpritePlacement",
 
 
 # ── 立绘落位合成（drawCharTo，index.html:3146-3166）─────────────────────
+def _warp_layers(char_rgba01: np.ndarray, c: "SpritePlacement", *, shadow: bool,
+                 ambient: tuple[float, float, float] | None,
+                 shadow_layer: np.ndarray | None,
+                 out_hw: tuple[int, int]) -> list[tuple[np.ndarray, tuple[int, int, int, int]]]:
+    """预 warp 好 (阴影, 立绘) 两层 —— :func:`composite_sprite` 的几何段。
+
+    为什么与落尾段（:func:`_apply_layers`）拆开：compose 的**黑底/白底两遍**
+    合成用的是同一个摆位、同一份 shadow_layer，而 warp 结果只取决于
+    (源, 几何, 画布尺寸)、与底无关 —— 两遍之外只算一次、第二遍直接复用，
+    省掉整整一遍 clip + 预乘 + 分块双线性（实测占单帧 ~40%）。
+    """
+    layers: list[tuple[np.ndarray, tuple[int, int, int, int]]] = []
+    if shadow:
+        layer = shadow_layer if shadow_layer is not None else contact_shadow_layer(
+            char_rgba01, c, ambient)
+        layer01 = _to_float01(layer, 4)
+        if layer01.shape[0] > 0 and layer01.shape[1] > 0 and float(layer01[..., 3].max()) > 0.0:
+            sh_thick = c.w * SH_THICK
+            warped, span = _warp_rect(layer01, -c.w / 2.0, c.h / 2.0 - sh_thick * SH_PEAK,
+                                      c.w, sh_thick, c.rot, c.u, c.v, out_hw)
+            layers.append((warped, span))
+    char01 = _to_float01(char_rgba01, 4)
+    warped_char, span = _warp_rect(char01, -c.w / 2.0, -c.h / 2.0, c.w, c.h,
+                                   c.rot, c.u, c.v, out_hw)
+    layers.append((warped_char, span))
+    return layers
+
+
+def _apply_layers(base_rgb01: np.ndarray,
+                  layers: list[tuple[np.ndarray, tuple[int, int, int, int]]]) -> np.ndarray:
+    """把 :func:`_warp_layers` 的产物按顺序 source-over 到 base 上（落尾段）。
+
+    ``base_rgb01`` 必须是调用方私有的可写 (H,W,3) float64 数组 —— 就地写回。
+    :func:`composite_sprite` 传 :func:`_to_float01` 的返回值（契约上就是新数组）；
+    compose 的黑底/白底两遍传各自现建的画布。
+    """
+    out = base_rgb01
+    for warped, span in layers:
+        out = _over(out, warped, span)
+    return out
+
+
 def composite_sprite(base_rgb01: np.ndarray, char_rgba01: np.ndarray, c: "SpritePlacement",
                      *, shadow: bool = True, ambient: tuple[float, float, float] | None = None,
-                     shadow_layer: np.ndarray | None = None) -> np.ndarray:
+                     shadow_layer: np.ndarray | None = None,
+                     layers: list | None = None) -> np.ndarray:
     """把（已烘光的）立绘按摆位合成进画布，返回**新画布**（float64 [0,1]，不改入参）。
 
     对应 ``drawCharTo``（index.html:3146-3166）：
@@ -333,23 +436,15 @@ def composite_sprite(base_rgb01: np.ndarray, char_rgba01: np.ndarray, c: "Sprite
       离线签名没有 mode，由调用方把关）。``shadow_layer`` 可传入
       :func:`contact_shadow_layer` 的结果以复用（原版 footCv 缓存）。
     · ``c`` 为 None 或尺寸退化 → 原样返回画布副本。
+    · ``layers``（可选）：传入 :func:`_warp_layers` 的预 warp 产物则跳过几何段
+      直接落位。warp 与底无关，同一个 (源, 摆位, 画布) 要合成到多个底上时
+      （compose 的黑底/白底两遍）算一次就够——逐位相同，只是不重算。
     """
     base = _to_float01(base_rgb01, 3)
     out = base                       # _to_float01 已保证是新数组，省一次整幅拷贝
     if c is None or c.w <= 0 or c.h <= 0:
         return out
-    char01 = _to_float01(char_rgba01, 4)
-    h_out, w_out = out.shape[:2]
-    if shadow:
-        layer = shadow_layer if shadow_layer is not None else contact_shadow_layer(
-            char_rgba01, c, ambient)
-        layer01 = _to_float01(layer, 4)
-        if layer01.shape[0] > 0 and layer01.shape[1] > 0 and float(layer01[..., 3].max()) > 0.0:
-            sh_thick = c.w * SH_THICK
-            warped, span = _warp_rect(layer01, -c.w / 2.0, c.h / 2.0 - sh_thick * SH_PEAK,
-                                      c.w, sh_thick, c.rot, c.u, c.v, (h_out, w_out))
-            out = _over(out, warped, span)
-    warped_char, span = _warp_rect(char01, -c.w / 2.0, -c.h / 2.0, c.w, c.h,
-                                   c.rot, c.u, c.v, (h_out, w_out))
-    out = _over(out, warped_char, span)
-    return out
+    if layers is None:
+        layers = _warp_layers(char_rgba01, c, shadow=shadow, ambient=ambient,
+                              shadow_layer=shadow_layer, out_hw=out.shape[:2])
+    return _apply_layers(out, layers)

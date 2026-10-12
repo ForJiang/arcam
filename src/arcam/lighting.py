@@ -111,18 +111,20 @@ def _box_resample(src: np.ndarray, x0: float, y0: float, w: float, h: float,
 def _to_float01(img: np.ndarray, channels: int) -> np.ndarray:
     """uint8 → float64 [0,1]；float64 原样（clip 到 [0,1]）。
 
-    **总是返回新数组**（走一次 ``copy=True`` + 原地 clip，比
-    ``astype`` 再 ``clip`` 少一整幅 float64 临时缓冲）。
+    **总是返回新数组**（调用方拿到手就可以就地改，不会写回入参）。
+    uint8 走一趟 ufunc 完成「升精度 + 归一」（``astype`` 再 ``/=`` 是两趟整幅
+    扫描，而 uint8→float64 精确、除法与先 cast 再除逐位相同）；float64 直接用
+    无 ``out=`` 的 ``clip``——它本身就返回新数组，比 copy 再原地 clip 少一趟。
     """
     arr = np.asarray(img)
     if arr.dtype == np.uint8:
         if arr.ndim != 3 or arr.shape[2] != channels:
             raise ValueError(f"expected (H,W,{channels}) image, got {arr.shape}")
-        out = arr.astype(np.float64)
-        out /= 255.0
-        return out
+        return arr / 255.0
     if arr.ndim != 3 or arr.shape[2] != channels:
         raise ValueError(f"expected (H,W,{channels}) image, got {arr.shape}")
+    if arr.dtype == np.float64:
+        return np.clip(arr, 0.0, 1.0)
     out = np.array(arr, dtype=np.float64, copy=True)
     np.clip(out, 0.0, 1.0, out=out)
     return out
@@ -369,7 +371,17 @@ def _to_u8_rgba(char_rgba: np.ndarray) -> np.ndarray:
         return arr
     if arr.ndim != 3 or arr.shape[2] != 4:
         raise ValueError(f"expected (H,W,4) RGBA, got {arr.shape}")
-    return np.floor(np.clip(arr.astype(np.float64), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    # clip→*255→+0.5→astype(uint8)：除 clip（无 out= 即「拷一份再夹」）外全部
+    # 原地，比 astype/clip/乘/加/floor/astype 六连临时少 4 幅全幅缓冲。
+    # floor 可省：clip 后值域 [0.5,255.5] 非负，astype(uint8) 的向零截断就是 floor
+    # （与原 ``floor(…).astype`` 逐位相同）。
+    if arr.dtype == np.float64:
+        a = np.clip(arr, 0.0, 1.0)
+    else:
+        a = np.clip(arr.astype(np.float64), 0.0, 1.0)
+    a *= 255.0
+    a += 0.5
+    return a.astype(np.uint8)
 
 
 def bake_lit(char_rgba: np.ndarray, sample: LightSample | None,
@@ -402,7 +414,8 @@ def bake_lit(char_rgba: np.ndarray, sample: LightSample | None,
     src = _to_u8_rgba(char_rgba)
     out_family_float = not (np.asarray(char_rgba).dtype == np.uint8)
     if sample is None:
-        return (src.astype(np.float64) / 255.0) if out_family_float else src.copy()
+        # uint8→float64 归一一趟完成（astype 再 /= 是两趟整幅扫描，逐位相同）
+        return (src / 255.0) if out_family_float else src.copy()
     _ch_lum, ch_sat, ch_r, ch_b = _char_stats(char_rgba)
     mean = sample.mean
     env_lum = _LUM_W[0] * mean[0] + _LUM_W[1] * mean[1] + _LUM_W[2] * mean[2]
@@ -417,28 +430,55 @@ def bake_lit(char_rgba: np.ndarray, sample: LightSample | None,
                  * clampn(1.0 / lit_scale_bucket(lit_scale), 1.0, GRN_COMP_MAX)
                  * grain_scale)          # v1.9.0 强度倍率；1.0 = 原版逐位一致
 
-    r = lut_r[src[..., 0]].astype(np.float64)
-    g = lut_g[src[..., 1]].astype(np.float64)
-    b = lut_b[src[..., 2]].astype(np.float64)
+    # 三条 LUT 各转一份 float64（256 项小表）：查表直接落 float64，省掉每通道
+    # 一次 uint8→float64 的整幅 astype（值逐位相同：uint8→float64 是精确转换）
+    lut_r = lut_r.astype(np.float64)
+    lut_g = lut_g.astype(np.float64)
+    lut_b = lut_b.astype(np.float64)
+    r = lut_r[src[..., 0]]
+    g = lut_g[src[..., 1]]
+    b = lut_b[src[..., 2]]
     if s_k != 1.0:
         y = _LUM_W[0] * r + _LUM_W[1] * g + _LUM_W[2] * b
-        r = y + (r - y) * s_k
-        g = y + (g - y) * s_k
-        b = y + (b - y) * s_k
+        # 原地化：r/g/b 都是本函数刚建的查表结果、无其他引用；加法交换律保证
+        # y + X 与 X + y 逐位相同
+        np.subtract(r, y, out=r)
+        np.multiply(r, s_k, out=r)
+        np.add(r, y, out=r)
+        np.subtract(g, y, out=g)
+        np.multiply(g, s_k, out=g)
+        np.add(g, y, out=g)
+        np.subtract(b, y, out=b)
+        np.multiply(b, s_k, out=b)
+        np.add(b, y, out=b)
     if g_amp > 0.0:
         tile = grain_tile()
         # 广播索引代替 meshgrid：两块 (h,w) int64 整网在 1509×1000 上是 24 MB 白烧
         n = tile[(np.arange(h_px)[:, None] & 255), (np.arange(w_px)[None, :] & 255)]
-        n_l = n * g_amp
-        n_c = n * g_amp * 0.35
-        r = r + n_l
-        g = g + n_l - n_c
-        b = b + n_l + n_c
-    out = np.zeros_like(src)
+        # n_l 直接覆写 n（fancy-gather 的产物是本函数私有的），省一幅全幅临时；
+        # n_c 仍要单独一份——g/b 两个通道都用它，且 n_c = (n*g_amp)*0.35 的乘法
+        # 顺序不能并进后面的加减（(n_l - n_c) 与 n_l*(1-0.35) 浮点上不等价）
+        np.multiply(n, g_amp, out=n)
+        n_c = n * 0.35
+        r += n
+        g += n
+        g -= n_c
+        b += n
+        b += n_c
+    out = np.empty_like(src)               # 4 通道下面全写，不必先清零
     solid = src[..., 3] != 0
-    rgb = np.rint(np.clip(np.stack([r, g, b], axis=-1), 0.0, 255.0)).astype(np.uint8)
-    out[..., 0:3] = np.where(solid[..., None], rgb, 0)
+    # 逐通道原地 clip→rint 后直接落字节，替代 stack([r,g,b])+clip+rint+astype
+    # 四连临时（每连都是一幅 (h,w,3) float64 ≈ 23 MB@1080p 立绘）。
+    # 为什么逐位相同：① 透明像素先乘 solid 置 0（乘 1.0 不改变数值），等价于原
+    # ``np.where(solid, rgb, 0)``；② clip 与 rint 可交换——x>255 时 clip→255→
+    # rint→255 与 rint→≥255→clip→255 等价，x<0 同理；③ 值已 integral 且落在
+    # [0,255]，float64→uint8 的向零截断是精确转换。
+    for i, ch in enumerate((r, g, b)):
+        np.multiply(ch, solid, out=ch)
+        np.clip(ch, 0.0, 255.0, out=ch)
+        np.rint(ch, out=ch)
+        out[..., i] = ch
     out[..., 3] = np.where(solid, src[..., 3], 0)
     if out_family_float:
-        return out.astype(np.float64) / 255.0
+        return out / 255.0
     return out

@@ -1666,3 +1666,889 @@ def test_check_and_recipe_en_keep_data_keys(tmp_path, track_file,
     assert main(["recipe", "show", "t1", "--lang", "en"]) == 0
     printed = capsys.readouterr().out
     assert "Recipe t1" in printed and "--shot" in printed and "腰上" in printed, printed
+
+
+# ─────────────────────── 深度打磨轮：错误路径 / 冷门分支 / 双语补强 ───────────────────────
+# 本节目标是 cli.py 的**错误路径与冷门分支**：编排者体检报 cli.py 90%（110 语句
+# 未覆盖），未覆盖的多是"参数解析了但没走到执行点"那类静默失效高发区。每条新测试
+# 都做了变异验证（改坏被测行为 → 本条红 → 还原 → 复跑绿），证据见
+# artifacts/W1-cli-tests/DONE.md。
+
+# ---------- A. 数值旗标的用法错误（同进程版；subprocess 版在上面的参数化里） ----------
+
+@pytest.mark.parametrize("flag", ["--x", "--d", "--h", "--hp", "--feq", "--pitch",
+                                  "--roll", "--char-scale", "--size-pct",
+                                  "--shadow-az", "--grain-scale", "--shadow-opacity"])
+def test_render_rejects_nan_in_process(tmp_path: Path, photo: Path, char: Path,
+                                       flag: str,
+                                       capsys: pytest.CaptureFixture) -> None:
+    """每个浮点旗标拒 nan：argparse 用法错误 exit 2 + 人话口径（_finite/_nonneg）。
+
+    与上面的 subprocess 版同一条校验，这里走同进程——覆盖率只统计进程内执行，
+    subprocess 版那条真入口测试不计入。
+    """
+    with pytest.raises(SystemExit) as e:
+        main(["render", str(photo), str(char), "-o", str(tmp_path / "x.png"),
+              f"{flag}=nan"])
+    assert e.value.code == 2, flag
+    assert "应是有限数" in capsys.readouterr().err, flag
+
+
+@pytest.mark.parametrize("flag,value,expect", [
+    ("--shadow-opacity", "-1", "应 >= 0"),
+    ("--grain-scale", "-1", "应 >= 0"),
+    ("--shadow-opacity", "inf", "应是有限数"),
+    ("--grain-scale", "-inf", "应是有限数"),
+])
+def test_render_rejects_bad_nonneg_values(tmp_path: Path, photo: Path, char: Path,
+                                          flag: str, value: str, expect: str,
+                                          capsys: pytest.CaptureFixture) -> None:
+    """--shadow-opacity/--grain-scale：负数与非有限数都是用法错误 exit 2。
+
+    0 是合法值（关阴影/关颗粒，网页两侧滑块最左档），负数则是静默失效：乘在
+    SH_ALPHA/gAmp 上被夹成 0，出图与 0 逐字节相同、零提示。
+    """
+    with pytest.raises(SystemExit) as e:
+        main(["render", str(photo), str(char), "-o", str(tmp_path / "x.png"),
+              f"{flag}={value}"])
+    assert e.value.code == 2, (flag, value)
+    assert expect in capsys.readouterr().err, (flag, value)
+
+
+# ---------- B. --depth 的两条懒加载错误路径 + 拟合失败 ----------
+
+def _sim_depth_file(tmp_path: Path, name: str = "sim.depth") -> Path:
+    """合成一盘 .depth（真机帧的离线替身，内参外参与 roll 齐备）。"""
+    from arcam.lidar_live import save_depth_file
+    from arcam.lidar_sim import synth_ground_frame
+    meta, depth = synth_ground_frame(h=1.55, pitch_deg=12.0, roll_deg=8.0,
+                                     width=64, height=48, index=0)
+    p = tmp_path / name
+    save_depth_file(p, meta, depth)
+    return p
+
+
+def test_render_depth_unreadable_file(tmp_path: Path, photo: Path, char: Path,
+                                      capsys: pytest.CaptureFixture) -> None:
+    """--depth 指到读不懂的文件：人话报错退出 1，且中英各有前缀。"""
+    junk = tmp_path / "scan.bin"
+    junk.write_bytes(b"not a depth file at all")
+    code = main(["render", str(photo), str(char), "-o", str(tmp_path / "o.png"),
+                 "--depth", str(junk)])
+    assert code == 1
+    assert "深度文件读不懂" in capsys.readouterr().err
+    code = main(["render", str(photo), str(char), "-o", str(tmp_path / "o.png"),
+                 "--depth", str(junk), "--lang", "en"])
+    assert code == 1
+    assert "Cannot read the depth file" in capsys.readouterr().err
+
+
+def test_render_depth_module_missing(tmp_path: Path, photo: Path, char: Path,
+                                     monkeypatch,
+                                     capsys: pytest.CaptureFixture) -> None:
+    """arcam.depth 被裁剪掉的安装：人话报错退出 1（带契约指引），不 traceback。"""
+    depth = _sim_depth_file(tmp_path)
+    monkeypatch.setitem(sys.modules, "arcam.depth", None)
+    code = main(["render", str(photo), str(char), "-o", str(tmp_path / "o.png"),
+                 "--depth", str(depth)])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "读不到 LiDAR 深度模块" in err and "LIDAR-SPEC" in err
+
+
+def test_render_depth_plane_module_missing(tmp_path: Path, photo: Path, char: Path,
+                                           monkeypatch,
+                                           capsys: pytest.CaptureFixture) -> None:
+    """深度读得进来但 arcam.plane 缺失：拟合那一环人话报错退出 1。"""
+    depth = _sim_depth_file(tmp_path)
+    monkeypatch.setitem(sys.modules, "arcam.plane", None)
+    code = main(["render", str(photo), str(char), "-o", str(tmp_path / "o.png"),
+                 "--depth", str(depth)])
+    assert code == 1
+    assert "读不到 LiDAR 平面拟合模块" in capsys.readouterr().err
+
+
+def test_render_depth_plane_fit_fails(tmp_path: Path, photo: Path, char: Path,
+                                      monkeypatch,
+                                      capsys: pytest.CaptureFixture) -> None:
+    """拟合不出地面平面（点数不足等）：转人话 CliError，裸 ValueError 不漏出命令。"""
+    import arcam.plane as plane_mod
+    depth = _sim_depth_file(tmp_path)
+
+    def boom(*a, **k):
+        raise ValueError("有效点仅 3 个（< 64），无法可靠拟合地平面")
+
+    monkeypatch.setattr(plane_mod, "fit_ground_plane", boom)
+    code = main(["render", str(photo), str(char), "-o", str(tmp_path / "o.png"),
+                 "--depth", str(depth)])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "深度帧拟合不出地面平面" in err and "有效点仅 3 个" in err
+    code = main(["render", str(photo), str(char), "-o", str(tmp_path / "o.png"),
+                 "--depth", str(depth), "--lang", "en"])
+    assert code == 1
+    assert "Cannot fit a ground plane" in capsys.readouterr().err
+
+
+# ---------- C. render --scene 的父目录自动创建 ----------
+
+def test_render_scene_creates_parent_dirs(tmp_path: Path, photo: Path,
+                                          char: Path) -> None:
+    """--scene 给嵌套路径：父目录不存在时建出来再写（配方路径不该先手工 mkdir）。"""
+    scene = tmp_path / "deep" / "nested" / "scene.json"
+    code = main(["render", str(photo), str(char), "-o", str(tmp_path / "o.png"),
+                 "--scene", str(scene)])
+    assert code == 0 and scene.is_file()
+    assert json.loads(scene.read_text(encoding="utf-8"))["version"] == 1
+
+
+# ---------- D. recipe 四子命令的错误分支与双语 ----------
+
+def _recipe_root(tmp_path: Path, monkeypatch):
+    """把配方库指到 tmp_path/recipes（返回该路径；不存在，由命令自己建）。"""
+    import arcam.cli as cli
+    root = tmp_path / "recipes"
+    monkeypatch.setattr(cli, "RECIPE_ROOT", root)
+    monkeypatch.setenv("ARCAM_RECIPES", str(root))
+    return root
+
+
+def test_recipe_save_rejects_unusable_name(tmp_path: Path, monkeypatch,
+                                           capsys: pytest.CaptureFixture) -> None:
+    """配方名一个可用字符都没有（如 ???）→ 人话报错（否则会静默存成空文件名）。"""
+    _recipe_root(tmp_path, monkeypatch)
+    code = main(["recipe", "save", "???", "--pitch", "10"])
+    assert code == 1
+    assert "配方名" in capsys.readouterr().err
+
+
+def test_recipe_list_empty_root(tmp_path: Path, monkeypatch,
+                                capsys: pytest.CaptureFixture) -> None:
+    """配方库不存在/为空：提示怎么存第一个，退出 0（不是错误）。"""
+    _recipe_root(tmp_path, monkeypatch)
+    assert main(["recipe", "list"]) == 0
+    assert "还没有配方" in capsys.readouterr().out
+
+
+def test_recipe_list_reports_unreadable(tmp_path: Path, monkeypatch,
+                                        capsys: pytest.CaptureFixture) -> None:
+    """库里有读不出来的 json：列出来说"读不出来"，其余照样列（不整命令挂掉）。"""
+    root = _recipe_root(tmp_path, monkeypatch)
+    root.mkdir(parents=True)
+    (root / "broken.json").write_text("{not json", encoding="utf-8")
+    assert main(["recipe", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "读不出来" in out and "broken" in out
+
+
+def test_recipe_show_json_dump(tmp_path: Path, monkeypatch,
+                               capsys: pytest.CaptureFixture) -> None:
+    """recipe show --json：原样输出 JSON（脚本消费用）。"""
+    _recipe_root(tmp_path, monkeypatch)
+    assert main(["recipe", "save", "t", "--pitch", "15", "--mode", "free"]) == 0
+    capsys.readouterr()
+    assert main(["recipe", "show", "t", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["name"] == "t" and data["params"]["pitch"] == 15.0
+
+
+def test_recipe_apply_missing_and_bad_set(tmp_path: Path, monkeypatch,
+                                          capsys: pytest.CaptureFixture) -> None:
+    """apply 的错误分支：配方不存在 / --set 缺 = / --set 未知键，都人话退出 1。"""
+    _recipe_root(tmp_path, monkeypatch)
+    assert main(["recipe", "save", "t", "--pitch", "15"]) == 0
+    capsys.readouterr()
+    assert main(["recipe", "apply", "nope"]) == 1
+    assert "没有叫 nope 的配方" in capsys.readouterr().err
+    assert main(["recipe", "apply", "t", "--set", "pitch"]) == 1
+    assert "K=V" in capsys.readouterr().err
+    assert main(["recipe", "apply", "t", "--set", "bogus=1"]) == 1
+    assert "没有 'bogus' 这一项" in capsys.readouterr().err
+
+
+def test_recipe_four_actions_lang_en(tmp_path: Path, monkeypatch,
+                                     capsys: pytest.CaptureFixture) -> None:
+    """recipe 四动作的**标签**在 --lang en 下英文；配方值是数据键（shot=腰上）不翻。
+
+    与 check 同口径（test_check_and_recipe_en_keep_data_keys）：景别/画幅的 key
+    是 scene.json 与 CLI 的值，译成就没法粘回 --shot/--frame，只翻标签。
+    """
+    _recipe_root(tmp_path, monkeypatch)
+    assert main(["recipe", "save", "t", "--pitch", "15", "--shot", "腰上",
+                 "--lang", "en"]) == 0
+    assert "Recipe saved to" in capsys.readouterr().out
+    assert main(["recipe", "list", "--lang", "en"]) == 0
+    printed = capsys.readouterr().out
+    assert "items" in printed and "腰上" in printed, printed
+    assert main(["recipe", "show", "t", "--lang", "en"]) == 0
+    printed = capsys.readouterr().out
+    assert "Recipe t" in printed and "--shot" in printed and "腰上" in printed, printed
+    assert main(["recipe", "apply", "t", "--lang", "en"]) == 0
+    assert "--pitch 15" in capsys.readouterr().out
+    # 父前子后：``recipe --lang en save x`` 也不能静默变回中文
+    assert main(["recipe", "--lang", "en", "save", "t2", "--pitch", "5"]) == 0
+    assert "Recipe saved to" in capsys.readouterr().out
+
+
+# ---------- E. --vary 的畸形输入 ----------
+
+def test_vary_rejects_malformed_items(tmp_path: Path, photo: Path, char: Path,
+                                      capsys: pytest.CaptureFixture) -> None:
+    """--vary 缺 = / 键不是摆放参数 / 没给取值 → 人话退出 1（别等渲染到一半才炸）。"""
+    for item, expect in (("d", "K=V,V"), ("bogus=1", "不是摆放参数"),
+                         ("d=", "没给取值")):
+        code = main(["contact-sheet", str(photo), str(char),
+                     "-o", str(tmp_path / "s.png"), "--vary", item])
+        assert code == 1, item
+        assert expect in capsys.readouterr().err, item
+
+
+# ---------- F. watch：轮询循环 / 单遍失败 / 退出码 ----------
+
+def test_sig_of_handles_missing_files(tmp_path: Path) -> None:
+    """_sig_of 对消失的文件给 None 签名而不是抛——轮询期内素材被删是常态。"""
+    from arcam.cli import _sig_of
+    p = tmp_path / "a.png"
+    p.write_bytes(b"x")
+    sig = _sig_of([p, tmp_path / "gone.png"])
+    assert sig[0][1] is not None and sig[0][2] == 1
+    assert sig[1] == (str(tmp_path / "gone.png"), None, None)
+
+
+def test_watch_loop_reruns_on_change(tmp_path: Path, photo: Path, char: Path,
+                                     monkeypatch,
+                                     capsys: pytest.CaptureFixture) -> None:
+    """监视循环：签名变了重渲一遍，Ctrl-C 停（退出码跟随最后一遍成败 = 0）。"""
+    import arcam.cli as cli
+    import os
+    calls = {"n": 0}
+
+    def fake_sleep(_sec):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            os.utime(photo, (1000, 1000))       # 只改 mtime → 签名变
+        else:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+    out = tmp_path / "w.png"
+    code = main(["watch", str(photo), str(char), "-o", str(out),
+                 "--interval", "0.2"])
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "监视中" in printed and "变了：photo.jpg" in printed
+    assert "已停止监视" in printed
+
+
+def test_watch_loop_survives_failed_run(tmp_path: Path, photo: Path, char: Path,
+                                        monkeypatch,
+                                        capsys: pytest.CaptureFixture) -> None:
+    """循环里一遍失败：打日志、继续监视，但退出码如实报 1（旧实现恒返 0）。"""
+    import arcam.cli as cli
+    calls = {"n": 0}
+
+    def fake_sleep(_sec):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            char.unlink()                       # 素材消失 → 这一遍渲染失败
+        else:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+    code = main(["watch", str(photo), str(char), "-o", str(tmp_path / "w.png"),
+                 "--interval", "0.2"])
+    assert code == 1
+    printed = capsys.readouterr().out
+    assert "失败" in printed and "已停止监视" in printed
+
+
+def test_watch_once_failure_exits_1(tmp_path: Path, photo: Path,
+                                    capsys: pytest.CaptureFixture) -> None:
+    """watch --once 出图失败 → exit 1：它的承诺是"带日志的 render"。
+
+    复现（修复前）：立绘是坏文件时输出一行"失败"却 exit 0 —— 错误被吞、
+    退出码与事实相反，脚本侧完全看不出这遍没出图。
+    """
+    bad = tmp_path / "broken.png"
+    bad.write_bytes(b"not an image")
+    code = main(["watch", str(photo), str(bad), "-o", str(tmp_path / "w.png"),
+                 "--once"])
+    assert code == 1
+    assert "失败" in capsys.readouterr().out
+
+
+def test_watch_missing_inputs(tmp_path: Path, char: Path,
+                              capsys: pytest.CaptureFixture) -> None:
+    """监视不存在的素材：人话报错退出 1（--once 也一样，不进循环）。"""
+    code = main(["watch", str(tmp_path / "nope.jpg"), str(char),
+                 "-o", str(tmp_path / "w.png")])
+    assert code == 1
+    assert "找不到" in capsys.readouterr().err
+
+
+def test_watch_lang_en(tmp_path: Path, photo: Path, char: Path,
+                       capsys: pytest.CaptureFixture) -> None:
+    """watch --lang en：首遍/监视中/失败三行人话都要英文。"""
+    out = tmp_path / "w.png"
+    assert main(["watch", str(photo), str(char), "-o", str(out), "--once",
+                 "--lang", "en"]) == 0
+    printed = capsys.readouterr().out
+    assert "first run" in printed and not _CJK.search(printed), printed
+
+
+def test_watch_overlay_hud_reports_hints(tmp_path: Path, photo: Path, char: Path,
+                                         capsys: pytest.CaptureFixture) -> None:
+    """watch 的 hud 附注也要带**本遍落位**的构图提示（_render_one 的 note 回传）。"""
+    out = tmp_path / "w.png"
+    code = main(["watch", str(photo), str(char), "-o", str(out), "--once",
+                 "--d", "1.2", "--overlay", "hud"])
+    assert code == 0
+    assert "构图提示" in capsys.readouterr().out
+
+
+# ---------- G. --spec 的畸形段 ----------
+
+def test_spec_empty_segment_and_missing_equals(tmp_path: Path, photo: Path,
+                                               char: Path,
+                                               capsys) -> None:
+    """spec 尾部分号（空段）跳过；段里缺 = → 人话退出 1。"""
+    out = tmp_path / "m.png"
+    assert main(["multi", str(photo), str(char), str(char), "-o", str(out),
+                 "--spec", "x=0.5;"]) == 0          # 尾部空段不报错
+    assert main(["multi", str(photo), str(char), str(char), "-o", str(out),
+                 "--spec", "x"]) == 1
+    assert "K=V" in capsys.readouterr().err
+
+
+# ---------- H. multi 的剩余分支 ----------
+
+def test_multi_rejects_too_many_specs(tmp_path: Path, photo: Path, char: Path,
+                                      capsys: pytest.CaptureFixture) -> None:
+    """--spec 套数 > 附加立绘数 → 人话退出 1（多给的 spec 会被静默丢弃）。"""
+    code = main(["multi", str(photo), str(char), str(char),
+                 "-o", str(tmp_path / "m.png"),
+                 "--spec", "x=0.5", "--spec", "d=3"])
+    assert code == 1
+    assert "--spec 给了 2 套" in capsys.readouterr().err
+
+
+def test_multi_creates_out_parent(tmp_path: Path, photo: Path, char: Path) -> None:
+    """multi 的 -o 嵌套路径：父目录自动建。"""
+    out = tmp_path / "deep" / "dir" / "m.png"
+    assert main(["multi", str(photo), str(char), "-o", str(out)]) == 0
+    assert out.is_file()
+
+
+# ---------- I. stats 的安装态回落 / 版本号口径 / 防御分支 ----------
+
+def test_stats_falls_back_to_installed_package(tmp_path: Path, monkeypatch,
+                                               capsys) -> None:
+    """旁边没有 src/ 树（wheel 安装态）：退回已安装 arcam 包目录，表照样出。
+
+    造假一棵源码树路径（cli.__file__ 指过去），模拟"装了 wheel、旁边没仓库"。
+    """
+    import arcam.cli as cli
+    fake = tmp_path / "x" / "y" / "arcam" / "cli.py"
+    monkeypatch.setattr(cli, "__file__", str(fake))
+    assert main(["stats", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["python_modules"] > 0 and data["python_loc"] > 0
+    assert data["test_files"] == 0          # 假根旁边没有 tests/
+    assert data["subcommands"] and "multi" in data["subcommands"]
+
+
+def test_project_version_prefers_pyproject(tmp_path: Path) -> None:
+    """旁边有 pyproject.toml 就以它为准（editable 安装的 metadata 会停在旧版）。"""
+    import arcam.cli as cli
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "arcam"\nversion = "9.9.9"\n', encoding="utf-8")
+    assert cli._project_version(tmp_path) == "9.9.9"
+
+
+def test_project_version_unreadable_pyproject(tmp_path: Path,
+                                               monkeypatch) -> None:
+    """pyproject 在但读不出（OSError）：不猜不崩，回落 importlib.metadata。"""
+    from pathlib import Path as _Path
+    import arcam.cli as cli
+    (tmp_path / "pyproject.toml").write_text('version = "1.2.3"\n',
+                                             encoding="utf-8")
+
+    def boom(*a, **k):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(_Path, "read_text", boom)
+    version = cli._project_version(tmp_path)
+    assert version and version != "1.2.3"
+
+
+def test_project_version_unknown(tmp_path: Path, monkeypatch) -> None:
+    """pyproject 没有、metadata 也拿不到：'?'（stats 不因此崩）。"""
+    import importlib.metadata as md
+    import arcam.cli as cli
+
+    def boom(name):
+        raise Exception("no metadata")
+
+    monkeypatch.setattr(md, "version", boom)
+    assert cli._project_version(tmp_path / "nowhere") == "?"
+
+
+def test_subcommand_names_degrades_gracefully(monkeypatch) -> None:
+    """parser 里没有子命令表时返回 []——stats 的抓取不崩（防御分支契约）。"""
+    import argparse
+    import arcam.cli as cli
+    monkeypatch.setattr(cli, "build_parser",
+                        lambda lang="zh": argparse.ArgumentParser())
+    assert cli._subcommand_names() == []
+
+
+# ---------- J. contact-sheet 的位姿键重建与嵌套输出 ----------
+
+def test_contact_sheet_vary_camera_and_subject_keys(tmp_path: Path, photo: Path,
+                                                    char: Path) -> None:
+    """--vary 的相机/人物位姿键（h/feq/roll/hp/x）走 Camera/Subject 重建分支。
+
+    这些键不是 compose 开关，落位要靠重建位姿对象——分支没走到就是"扫了参数
+    但构图没变"的静默失效。逐键扫两个取值，两格必须不同（变异验证：删掉任一
+    重建分支 → 该键两格逐字节相同 → 本条红）。
+    """
+    def two_cells(key: str, lo: str, hi: str) -> tuple[np.ndarray, np.ndarray]:
+        out = tmp_path / f"sheet_{key}.png"
+        code = main(["contact-sheet", str(photo), str(char), "-o", str(out),
+                     "--vary", f"{key}={lo},{hi}", "--cell-w", "80"])
+        assert code == 0 and out.is_file(), key
+        with Image.open(out) as im:
+            sheet = np.asarray(im.convert("RGB"))
+        # 两格 → 一行两列（cols=ceil(sqrt(2))）；标签条 26px，格高按画幅等比
+        # （照片 128×160 → 80×100）。左格 = sheet[26:126, 0:80]，右格 = [26:126, 80:160]
+        assert sheet.shape == (126, 160, 3), (key, sheet.shape)
+        return sheet[26:126, 0:80], sheet[26:126, 80:160]
+
+    for key, lo, hi in (("h", "1.2", "1.8"), ("feq", "20", "40"),
+                        ("roll", "-10", "10"), ("hp", "1.4", "1.9"),
+                        ("x", "-0.5", "0.5")):
+        a, b = two_cells(key, lo, hi)
+        assert not np.array_equal(a, b), f"--vary {key} 的两格相同（重建分支没走到）"
+
+
+def test_contact_sheet_creates_out_parent(tmp_path: Path, photo: Path,
+                                          char: Path) -> None:
+    """contact-sheet 的 -o 嵌套路径：父目录自动建。"""
+    out = tmp_path / "a" / "b" / "sheet.png"
+    assert main(["contact-sheet", str(photo), str(char), "-o", str(out),
+                 "--vary", "d=3,4", "--cell-w", "80"]) == 0
+    assert out.is_file()
+
+
+# ---------- K. batch 的目录/深度模块错误路径 ----------
+
+def test_batch_missing_dirs(tmp_path: Path, char: Path,
+                            capsys: pytest.CaptureFixture) -> None:
+    """照片目录 / 深度帧目录不存在 → 人话退出 1（各报各的）。"""
+    assert main(["batch", str(tmp_path / "nope"), str(char),
+                 "-o", str(tmp_path / "o")]) == 1
+    assert "照片目录不存在" in capsys.readouterr().err
+    src = tmp_path / "photos"
+    src.mkdir()
+    _make_photo(src / "p0.jpg", seed=0)
+    assert main(["batch", str(src), str(char), "-o", str(tmp_path / "o2"),
+                 "--depth-dir", str(tmp_path / "nodepth")]) == 1
+    assert "深度帧目录不存在" in capsys.readouterr().err
+
+
+def test_batch_depth_module_missing(tmp_path: Path, char: Path, monkeypatch,
+                                    capsys: pytest.CaptureFixture) -> None:
+    """给了 --depth-dir 但深度模块被裁剪：进循环前就人话报错（v1.5 审计修复的回归钉）。
+
+    旧实现在循环里 import，NameError 被候选循环的宽 except 吞掉 → 每张都静默
+    退回无深度渲染、退出码还是 0。
+    """
+    src = tmp_path / "photos"
+    src.mkdir()
+    _make_photo(src / "p0.jpg", seed=0)
+    depths = tmp_path / "depths"
+    depths.mkdir()
+    monkeypatch.setitem(sys.modules, "arcam.depth", None)
+    code = main(["batch", str(src), str(char), "-o", str(tmp_path / "out"),
+                 "--depth-dir", str(depths)])
+    assert code == 1
+    assert "读不到 LiDAR 深度模块" in capsys.readouterr().err
+
+
+def test_batch_skips_unreadable_depth_candidate(tmp_path: Path, char: Path,
+                                                capsys) -> None:
+    """同名候选不是深度帧 → 跳过该候选走无深度路径（不整批失败、退出 0）。"""
+    src = tmp_path / "photos"
+    src.mkdir()
+    _make_photo(src / "p0.jpg", seed=0)
+    depths = tmp_path / "depths"
+    depths.mkdir()
+    (depths / "p0.depth").write_bytes(b"junk not a depth frame")
+    out = tmp_path / "out"
+    code = main(["batch", str(src), str(char), "-o", str(out),
+                 "--depth-dir", str(depths)])
+    assert code == 0
+    assert (out / "shot_p0.png").is_file()
+    assert "（深度驱动）" not in capsys.readouterr().out
+
+
+# ---------- L. bundle 的嵌套输出与缺层防护 ----------
+
+def test_bundle_creates_out_parent(tmp_path: Path, photo: Path, char: Path) -> None:
+    """bundle 的 -o 嵌套路径：父目录自动建。"""
+    out = tmp_path / "deep" / "pack.zip"
+    assert main(["bundle", str(photo), str(char), "-o", str(out)]) == 0
+    assert out.is_file()
+
+
+def test_bundle_missing_char_layer(tmp_path: Path, photo: Path, char: Path,
+                                   monkeypatch,
+                                   capsys: pytest.CaptureFixture) -> None:
+    """这一遍没产出立绘层 → 人话报错退出 1（三件套缺一张不许静默出包）。"""
+    from types import SimpleNamespace
+    import arcam.cli as cli
+
+    def fake_compose(*a, **k):
+        return SimpleNamespace(shot=np.zeros((4, 4, 3), np.uint8), rect=None,
+                               char_layer=None)
+
+    monkeypatch.setattr(cli, "compose_shot", fake_compose)
+    code = main(["bundle", str(photo), str(char), "-o", str(tmp_path / "p.zip")])
+    assert code == 1
+    assert "没有产出立绘层" in capsys.readouterr().err
+    assert not (tmp_path / "p.zip").exists()
+
+
+# ---------- M. matte 的三类运行期错误翻译 ----------
+
+def test_matte_translates_runtime_errors(tmp_path: Path, char: Path, monkeypatch,
+                                         capsys) -> None:
+    """anime_cut 的 ImportError/FileNotFoundError/ValueError 都转人话 CliError。"""
+    import arcam.cli as cli
+    out = tmp_path / "cut.png"
+
+    def make(exc):
+        def raiser(*a, **k):
+            raise exc
+        return raiser
+
+    monkeypatch.setattr(cli, "anime_cut", make(ImportError("onnxruntime 未安装")))
+    assert main(["matte", str(char), "-o", str(out)]) == 1
+    err = capsys.readouterr().err
+    assert "onnxruntime" in err and "pip install" in err and not out.exists()
+    monkeypatch.setattr(cli, "anime_cut", make(FileNotFoundError("模型文件不在")))
+    assert main(["matte", str(char), "-o", str(out)]) == 1
+    assert "isnet-anime-q8.onnx" in capsys.readouterr().err
+    monkeypatch.setattr(cli, "anime_cut", make(ValueError("图片太小，没法抠")))
+    assert main(["matte", str(char), "-o", str(out)]) == 1
+    assert "图片太小" in capsys.readouterr().err
+    # en：安装提示那半也要英文
+    monkeypatch.setattr(cli, "anime_cut", make(ImportError("no onnxruntime")))
+    assert main(["matte", str(char), "-o", str(out), "--lang", "en"]) == 1
+    err = capsys.readouterr().err
+    assert "pip install onnxruntime" in err and not _CJK.search(err), err
+
+
+# ---------- N. prep 的成功步与逐步失败 ----------
+
+def test_prep_cuts_solid_background(tmp_path: Path,
+                                    capsys: pytest.CaptureFixture) -> None:
+    """纯色底 + 占比在 5%~85% 门控内：抠底这一步真的发生（成功步的动作链）。"""
+    arr = np.zeros((100, 100, 4), dtype=np.uint8)
+    arr[..., :3] = 255
+    arr[..., 3] = 255                       # 不透明白底
+    arr[25:75, 25:75] = (230, 60, 200, 255)  # 品红块 50×50 = 25%
+    src = tmp_path / "solid.png"
+    Image.fromarray(arr, "RGBA").save(src)
+    out = tmp_path / "prepped.png"
+    assert main(["prep", str(src), "-o", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "纯色底" in printed, printed
+
+
+def test_prep_step_failures_are_skipped(tmp_path: Path, monkeypatch,
+                                        capsys) -> None:
+    """四步各抛一次错：静默跳过、命令照常出图（修图链不许把出图搞挂）。"""
+    import arcam.matte_tools as mt
+    big = tmp_path / "big.png"
+    arr = np.zeros((120, 120, 4), dtype=np.uint8)
+    arr[10:110, 10:110] = (230, 60, 200, 255)
+    Image.fromarray(arr, "RGBA").save(big)
+    for name in ("_flood_solid", "auto_trim", "soften_edge", "lens_blur"):
+        def boom(*a, **k):
+            raise RuntimeError("step exploded")
+        with monkeypatch.context() as m:
+            m.setattr(mt, name, boom)
+            out = tmp_path / f"p_{name}.png"
+            assert main(["prep", str(big), "-o", str(out)]) == 0, name
+            assert out.is_file(), name
+
+
+def test_prep_missing_char(tmp_path: Path,
+                           capsys: pytest.CaptureFixture) -> None:
+    """prep 的输入不存在：人话退出 1。"""
+    code = main(["prep", str(tmp_path / "nope.png"), "-o", str(tmp_path / "o.png")])
+    assert code == 1
+    assert "找不到" in capsys.readouterr().err
+
+
+# ---------- O. lidar sim 的推流连接失败 ----------
+
+def test_lidar_sim_push_connection_fails(monkeypatch,
+                                         capsys: pytest.CaptureFixture) -> None:
+    """--push 连不上 serve：人话报错并提示先起 serve（退出 1，不 traceback）。"""
+    import arcam.lidar_sim as sim_mod
+
+    def boom(port, **kw):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(sim_mod, "simulate_scene_server", boom)
+    code = main(["lidar", "sim", "--push", "7799"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "连不上 127.0.0.1:7799" in err and "arcam lidar serve" in err
+
+
+# ---------- P. lidar inspect 的模块缺失 / 文本模式 / 双语 ----------
+
+def test_lidar_inspect_module_missing(tmp_path: Path, monkeypatch,
+                                      capsys: pytest.CaptureFixture) -> None:
+    """LiDAR 模块被裁剪：inspect 人话报错退出 1（带契约指引）。"""
+    p = tmp_path / "x.depth"
+    p.write_bytes(b"x")
+    monkeypatch.setitem(sys.modules, "arcam.depth", None)
+    assert main(["lidar", "inspect", str(p)]) == 1
+    assert "读不到 LiDAR 模块" in capsys.readouterr().err
+
+
+def test_lidar_inspect_bad_depth_file(tmp_path: Path,
+                                      capsys: pytest.CaptureFixture) -> None:
+    """inspect 指到读不懂的深度文件：双语人话退出 1（内文来自 depth.py）。"""
+    junk = tmp_path / "scan.bin"
+    junk.write_bytes(b"not a depth file at all")
+    code = main(["lidar", "inspect", str(junk)])
+    assert code == 1
+    assert "深度帧诊断失败" in capsys.readouterr().err
+    code = main(["lidar", "inspect", str(junk), "--lang", "en"])
+    assert code == 1
+    assert "Depth diagnostics failed" in capsys.readouterr().err
+
+
+def test_lidar_inspect_text_and_lang(tmp_path: Path,
+                                     capsys: pytest.CaptureFixture) -> None:
+    """文本模式（含 ARKit roll 备注行）；--lang en 全英文、数据键不翻。"""
+    p = _sim_depth_file(tmp_path)
+    assert main(["lidar", "inspect", str(p)]) == 0
+    out = capsys.readouterr().out
+    assert "ARKit 给定 roll=8" in out, out
+    assert main(["lidar", "inspect", str(p), "--lang", "en"]) == 0
+    out = capsys.readouterr().out
+    assert "ARKit gave roll=8" in out and not _CJK.search(out), out
+
+
+# ---------- Q. lidar serve 的模块残缺 / Ctrl-C / 运行期错误 / 双语 ----------
+
+def test_lidar_serve_without_callable_serve(monkeypatch,
+                                            capsys: pytest.CaptureFixture) -> None:
+    """模块在但没有 serve()：提示"未就绪"并正常退出 0（不崩、不吞错）。"""
+    import arcam.lidar_live as live
+    monkeypatch.setattr(live, "serve", None)
+    assert main(["lidar", "serve", "--port", "7707"]) == 0
+    assert "未就绪" in capsys.readouterr().out
+
+
+def test_lidar_serve_stops_on_ctrl_c(monkeypatch,
+                                     capsys: pytest.CaptureFixture) -> None:
+    """收到一帧后 Ctrl-C：打印共接收帧数，正常退出 0。"""
+    import arcam.lidar_live as live
+    meta = {"height_m": 1.55, "pitch_deg": 12.0, "roll_deg": 8.0}
+
+    def fake_serve(**kw):
+        yield dict(meta), np.zeros((3, 4), dtype=np.float32)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(live, "serve", fake_serve)
+    assert main(["lidar", "serve", "--port", "7707"]) == 0
+    out = capsys.readouterr().out
+    assert "第 1 帧 4×3" in out and "已停止，共接收 1 帧" in out
+
+
+def test_lidar_serve_runtime_error_exits_1(monkeypatch,
+                                           capsys: pytest.CaptureFixture) -> None:
+    """serve 迭代中抛 ValueError/OSError（协议错等）：人话退出 1。"""
+    import arcam.lidar_live as live
+
+    def fake_serve(**kw):
+        raise ValueError("协议错误：meta 不是合法 JSON")
+        yield  # pragma: no cover - 生成器语义：首次 next() 就抛
+
+    monkeypatch.setattr(live, "serve", fake_serve)
+    assert main(["lidar", "serve", "--port", "7707"]) == 1
+    assert "协议错误" in capsys.readouterr().err
+
+
+def test_lidar_serve_lang_en(monkeypatch,
+                             capsys: pytest.CaptureFixture) -> None:
+    """serve --lang en：监听/逐帧摘要/收尾三行都英文。"""
+    import arcam.lidar_live as live
+
+    def fake_serve(**kw):
+        return iter([({"height_m": 1.5}, np.zeros((2, 2), dtype=np.float32))])
+
+    monkeypatch.setattr(live, "serve", fake_serve)
+    assert main(["lidar", "serve", "--port", "7707", "--lang", "en"]) == 0
+    out = capsys.readouterr().out
+    assert "listening" in out and "Frame 1" in out
+    assert "Connection closed" in out and not _CJK.search(out), out
+
+
+# ---------- R. main() 对 FileNotFoundError 的兜底翻译 ----------
+
+def test_main_translates_file_not_found(tmp_path: Path, photo: Path, char: Path,
+                                        monkeypatch,
+                                        capsys: pytest.CaptureFixture) -> None:
+    """main 对 FileNotFoundError 的兜底：人话 + 退出 1，不 traceback。
+
+    自然路径走不到这一条（_need 已把缺文件转成 CliError）——注入一个 IO 失败，
+    验证的是翻译契约本身：这类"最后一层"except 最容易被后来者删掉没人发现。
+    """
+    import arcam.cli as cli
+
+    def boom(*a, **k):
+        raise FileNotFoundError("素材盘被弹掉了")
+
+    monkeypatch.setattr(cli, "save_png", boom)
+    code = main(["render", str(photo), str(char), "-o", str(tmp_path / "o.png")])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "找不到文件" in err and "素材盘被弹掉了" in err
+    code = main(["render", str(photo), str(char), "-o", str(tmp_path / "o.png"),
+                 "--lang", "en"])
+    assert code == 1
+    assert "Error: file not found" in capsys.readouterr().err
+
+
+# ---------- S. 门禁：每条错误路径在 --lang en 下都要人话可读 ----------
+
+#: (argv 模板, 期望出现的英文片段, 是否要求整条 stderr 无 CJK)。
+#: check/video 两条允许内文含中文：问题清单出自 video.track_issues（中文单语，
+#: 双语化需要 i18n.TXT 键 —— 属 B3 的 i18n.py，跨分区，已写进交付报告）。
+_ERROR_PATH_CASES = [
+    (["render", "{miss}", "{miss}", "-o", "{tmp}/o.png"], "Not found", True),
+    (["char-layer", "{miss}", "-o", "{tmp}/o.png"], "Not found", True),
+    (["bundle", "{miss}", "{miss}", "-o", "{tmp}/o.zip"], "Not found", True),
+    (["matte", "{miss}", "-o", "{tmp}/o.png"], "Not found", True),
+    (["prep", "{miss}", "-o", "{tmp}/o.png"], "Not found", True),
+    (["watch", "{miss}", "{miss}", "-o", "{tmp}/o.png"], "Not found", True),
+    (["multi", "{miss}", "{miss}", "-o", "{tmp}/o.png"], "Not found", True),
+    (["contact-sheet", "{miss}", "{miss}", "-o", "{tmp}/o.png",
+      "--vary", "d=3,4"], "Not found", True),
+    (["batch", "{miss}", "{miss}", "-o", "{tmp}/o"], "does not exist", True),
+    (["lidar", "inspect", "{miss}"], "Not found", True),
+    (["lidar", "sim", "--frames", "0"], "at least 1", True),
+    (["video", "{miss}", "{miss}", "-o", "{tmp}/o", "--bg", "{miss}"],
+     "Cannot read the track", False),
+    (["check", "{miss}"], "Cannot read the track", False),
+]
+
+
+@pytest.mark.parametrize("template,marker,no_cjk", _ERROR_PATH_CASES)
+def test_error_paths_english_under_lang_en(tmp_path: Path, template, marker,
+                                           no_cjk,
+                                           capsys: pytest.CaptureFixture) -> None:
+    """每个子命令的错误路径在 --lang en 下都要有英文人话（双语化的兜底门禁）。"""
+    argv = [token.format(miss=str(tmp_path / "nope.bin"), tmp=str(tmp_path))
+            for token in template]
+    code = main([*argv, "--lang", "en"])
+    assert code == 1, (argv, capsys.readouterr())
+    err = capsys.readouterr().err
+    assert marker in err, (argv, err)
+    if no_cjk:
+        assert not _CJK.search(err), (argv, err)
+
+
+# ---------- T. 深度打磨轮补遗：显式环境量 / main 兜底 / matte 成功路径 ----------
+
+def _real_onnx_model():
+    """真模型路径（软链到上游仓库的只读源）；解析不到给 None。"""
+    try:
+        from arcam.matting import _resolve_model_path
+        return _resolve_model_path(None)
+    except Exception:
+        return None
+
+
+def test_render_depth_explicit_env_override(tmp_path: Path, photo: Path, char: Path,
+                                            capsys) -> None:
+    """--depth + 显式摆放参数：显式值进 env_overrides 并打印"显式值优先"。
+
+    _env_overrides 只收默认 None 的那五个开关；一个都不给时它是空 dict，
+    深度测出值全量生效——两条路都要有测试（v1.5 审计：--shot/--char-scale/
+    --edge-bar 曾整组没透传）。
+    """
+    depth = _sim_depth_file(tmp_path)
+    out = tmp_path / "o.png"
+    code = main(["render", str(photo), str(char), "-o", str(out),
+                 "--depth", str(depth), "--h", "1.7"])
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "深度测得" in printed and "显式值优先：h" in printed, printed
+    # 一个显式开关都不给：测出值全量生效，提示是"已用于摆位"
+    assert main(["render", str(photo), str(char), "-o", str(out),
+                 "--depth", str(depth)]) == 0
+    assert "已用于摆位" in capsys.readouterr().out
+
+
+def test_main_translates_generic_value_error(tmp_path: Path, monkeypatch,
+                                             capsys) -> None:
+    """main 的 ValueError/OSError 兜底：人话 + 退出 1（最后一道翻译层）。
+
+    走自然路径：``recipe save --from`` 一份坏 JSON —— json 解析错误是
+    ValueError 子类，命令层没转，靠 main 这一层接。
+    """
+    root = _recipe_root(tmp_path, monkeypatch)
+    scene = tmp_path / "broken.json"
+    scene.write_text("{not json", encoding="utf-8")
+    code = main(["recipe", "save", "x", "--from", str(scene)])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "错误：" in err and not (root / "x.json").exists()
+    code = main(["recipe", "save", "x", "--from", str(scene), "--lang", "en"])
+    assert code == 1
+    assert "Error:" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(
+    not (importlib.util.find_spec("onnxruntime") is not None
+         and _real_onnx_model() is not None),
+    reason="onnxruntime 未装或 isnet-anime-q8.onnx 模型不存在：真模型 E2E 跳过",
+)
+def test_matte_real_model_end_to_end(tmp_path: Path, char: Path,
+                                     capsys: pytest.CaptureFixture) -> None:
+    """matte 成功路径：真模型端到端（前景占比/推理耗时都在提示里）。
+
+    环境里模型是软链到上游仓库的只读源（~/.cache/arcam/isnet-anime-q8.onnx）；
+    缺失时整条跳过，与 test_matting 的真模型 E2E 同条件。
+    """
+    from PIL import Image
+    # 与 test_matting 的真模型 E2E 同一张确定性合成图（噪声背景 + 噪声正弦椭圆
+    # 主体）：纯色块模型不认（分布外，输出全 0 → fg 闸拦下），必须用纹理图
+    rng = np.random.default_rng(7)
+    h, w = 160, 120
+    yy, xx = np.mgrid[0:h, 0:w]
+    blob = (xx - 60) ** 2 / 45 ** 2 + (yy - 80) ** 2 / 60 ** 2 <= 1
+    bg = 0.95 + rng.normal(0.0, 0.02, (h, w, 3))
+    fg = 0.3 + 0.5 * rng.random((h, w, 3)) + np.sin(xx[:, :, None] / 3.0) * 0.05
+    img = np.clip(np.where(blob[:, :, None], fg, bg), 0.0, 1.0)
+    src = tmp_path / "subject.png"
+    Image.fromarray((img * 255.0 + 0.5).astype(np.uint8), "RGB").save(src)
+    out = tmp_path / "cut.png"
+    code = main(["matte", str(src), "-o", str(out), "--lang", "en"])
+    assert code == 0, capsys.readouterr()
+    assert out.is_file()
+    printed = capsys.readouterr().out
+    assert "Cut out" in printed and "foreground" in printed, printed
+    with Image.open(out) as im:
+        assert im.mode == "RGBA"
+        alpha = np.asarray(im)[..., 3]
+    assert 0.02 < float((alpha > 127).mean()) < 0.95

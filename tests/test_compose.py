@@ -293,7 +293,10 @@ def test_shadow_color_uses_measured_light(monkeypatch) -> None:
 def test_bake_lit_receives_target_box(monkeypatch) -> None:
     """bake_lit 的 canvas 参数 = 立绘落在画布上的目标尺寸（颗粒缩放补偿用）。
 
-    照片路径与立绘层路径各烘一次，两次的目标框必须相同。
+    照片路径与立绘层路径**共用同一份**烘光产物：bake_lit 是确定性纯函数，两遍
+    _engine 构图完全相同（同一摆位、同一套光），相同入参必然相同输出——所以
+    只烘一次、第二遍复用（v1.x 性能打磨，逐位相同）。"两遍目标框相同"这条不变，
+    只是从"各烘一次比两次"变成"烘一次、两遍都用它"。
     """
     seen: list[tuple] = []
     real = bake_lit
@@ -303,10 +306,17 @@ def test_bake_lit_receives_target_box(monkeypatch) -> None:
         return real(char, sample, canvas, **kw)
 
     monkeypatch.setattr(comp, "bake_lit", spy)
+    from arcam import sprite as sp
     pc = current_placement(CHAR, SUBJ, CAM, mode="ground", char_scale=1.0, rot_basis="world")
-    compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅")
+    got = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅")
     assert seen and set(seen) == {(js_round(pc.w), js_round(pc.h))}
-    assert len(seen) == 2                          # 照片一遍 + 立绘层一遍
+    assert len(seen) == 1                          # 只烘一次，照片/立绘层两遍共用
+    # 共用必须真的发生：与"每遍各烘一次"的参考出图逐像素相同
+    m = got.light
+    ref = q(sp.composite_sprite(BG, bake_lit(CHAR, m, (js_round(pc.w), js_round(pc.h))),
+                                pc, shadow=True, ambient=m.mean,
+                                shadow_layer=sp.contact_shadow_layer(CHAR, pc, m.mean)))
+    assert np.array_equal(got.shot, ref)
 
 
 def test_composed_shot_fields() -> None:
@@ -475,10 +485,12 @@ def _grain_spy(monkeypatch: pytest.MonkeyPatch) -> list:
 def test_grain_gate_passthrough_and_effect(monkeypatch) -> None:
     seen = _grain_spy(monkeypatch)
     base = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅")
-    assert seen == [True, True]                     # 照片一遍 + 立绘层一遍都透传
+    # 照片/立绘层两遍共用一份烘光产物（bake_lit 确定性纯函数，v1.x 性能打磨），
+    # 门仍然真的透传进 bake_lit —— 只是不再透传两遍
+    assert seen == [True]
     seen.clear()
     off = compose_shot(BG, CHAR, SUBJ, CAM, frame_key="满幅", grain=False)
-    assert seen == [False, False]
+    assert seen == [False]
     assert not np.array_equal(base.shot, off.shot)
     assert not np.array_equal(base.char_layer, off.char_layer)
     # compose_char_layer 那一遍也透传（层路径只有一个 _engine 调用点）
@@ -539,3 +551,75 @@ def test_sample_light_gate_passthrough_and_effect(monkeypatch) -> None:
     lay_a, _ = compose_char_layer(CHAR, SUBJ, CAM, light=base.light)
     lay_b, _ = compose_char_layer(CHAR, SUBJ, CAM, light=base.light, sample_light=False)
     assert np.array_equal(lay_a, lay_b)
+
+
+# ─────────────────────── 渲染黄金字节（v1.12.0 对抗复核补） ───────────────────────
+
+#: compose_shot 的冻结字节基线（md5 前 16 位）。为什么需要它：v1.12.0 的性能
+#: 打磨（clip 融合、原地化、双线性重写）声称「输出逐位相同」，但当时只有一次性的
+#: A/B artifact 背书——没有门禁守着，将后再改渲染管线漂了字节没人知道。对抗复核
+#: 的变异实测证明：单元级 golden（bakeLit 那 17 个向量）抓不住 compose 层的编排
+#: 漂移（把颗粒加法换序、双线性换等价代数式，输出字节完全相同、全套测试全绿），
+#: 所以这里按**整条 compose_shot** 冻一批代表性配置。
+#:
+#: fixture 就是本模块的 CHAR/BG/SUBJ/CAM（程序生成、无外部依赖、确定性）。
+#: 改动渲染管线后若本测试红：先判断是「有意变更」还是「意外漂移」——有意变更必须
+#: 连带更新 docs/tests/golden.json 的光照组与 JS 孪生，并在这里重算基线；
+#: 意外漂移则回退。⚠ 只认确定性路径：别把随机/时间/哈希序混进出图输入。
+_COMPOSE_GOLDEN = {
+    "default":         ("0a5f08a46e9926da", "4c626e1060e79021"),
+    "no_light":        ("7d5c9ec4b1521fbf", "32dbdafea11fd0e6"),
+    "no_grain":        ("3131f93593e2b92f", "3521554ee7f0cd11"),
+    "gs0":             ("3131f93593e2b92f", "3521554ee7f0cd11"),
+    "gs25":            ("8f3efc3892e693af", "776d481580eadb81"),
+    "az45":            ("1cbb5b41e42f3a83", "08a11c95afc8dabf"),
+    "op05":            ("a9d760e475db98ed", "92d78ac0f8784d44"),
+    "no_shadow":       ("0b86f455cca1f390", "9bda3aae536e5e43"),
+    "tone":            ("8e23539b0c1a5d47", "4c626e1060e79021"),
+    "free":            ("35e61c9b9ddb88a5", "35b2c7b1e202eb13"),
+    "bust":            ("625b59fb59b89e81", "35ad04284f19082a"),
+    "16x9":            ("a0d4861d277b346b", "7671643afe685259"),
+    "char_layer_only": ("", "32dbdafea11fd0e6"),
+}
+
+_COMPOSE_GOLDEN_KW = {
+    "default":         dict(frame_key="满幅"),
+    "no_light":        dict(frame_key="满幅", sample_light=False),
+    "no_grain":        dict(frame_key="满幅", grain=False),
+    "gs0":             dict(frame_key="满幅", grain_scale=0.0),
+    "gs25":            dict(frame_key="满幅", grain_scale=2.5),
+    "az45":            dict(frame_key="满幅", shadow_az=45.0),
+    "op05":            dict(frame_key="满幅", shadow_opacity=0.5),
+    "no_shadow":       dict(frame_key="满幅", shadow=False),
+    "tone":            dict(frame_key="满幅", tone=True),
+    "free":            dict(frame_key="满幅", mode="free", size_pct=55.0, edge_bar=2),
+    "bust":            dict(frame_key="满幅", shot="胸上"),
+    "16x9":            dict(frame_key="16:9"),
+    "char_layer_only": dict(frame_key="满幅"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_COMPOSE_GOLDEN))
+def test_compose_golden_bytes(case: str) -> None:
+    """整条 compose_shot / compose_char_layer 的冻结字节基线。
+
+    覆盖 12 组开关组合 + 立绘层直出：默认、关光、关颗粒、颗粒强度 0/2.5、阴影
+    方位/浓度、关阴影、色调、自由模式+贴边、非全身景别、非满幅画幅。
+    任一字节漂了立刻红——这是渲染性能优化的「逐位相同」承诺的常驻门禁。
+    """
+    import hashlib
+
+    want_shot, want_layer = _COMPOSE_GOLDEN[case]
+    kw = _COMPOSE_GOLDEN_KW[case]
+    if case == "char_layer_only":
+        layer, _rect = compose_char_layer(CHAR, SUBJ, CAM, **kw)
+        got_shot, got_layer = "", hashlib.md5(np.ascontiguousarray(layer)).hexdigest()[:16]
+    else:
+        r = compose_shot(BG, CHAR, SUBJ, CAM, **kw)
+        got_shot = hashlib.md5(np.ascontiguousarray(r.shot)).hexdigest()[:16]
+        got_layer = hashlib.md5(np.ascontiguousarray(r.char_layer)).hexdigest()[:16]
+    assert got_shot == want_shot, \
+        f"{case}: shot 字节漂移（{got_shot} != 冻结值 {want_shot}）——" \
+        "渲染管线改动必须有意识地同步 golden.json 光照组与 JS 孪生"
+    assert got_layer == want_layer, \
+        f"{case}: char_layer 字节漂移（{got_layer} != 冻结值 {want_layer}）"

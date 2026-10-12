@@ -115,6 +115,24 @@ window.ARCAM_MMD = (function () {
 
   function setError(m) { error = m; console.warn('[MMD]', m); }
 
+  /** 用户可见文案取语言表；**键不存在时回落 fallback 原文**（i18n 键由编排者按
+   *  artifacts/W5-web/DONE.md 的清单落地，落地前界面保持中文原文——arcamT 对缺
+   *  key 返回的是裸 key 字符串，直接显示会比不翻更糟，与 app.js applyLang 的
+   *  守卫同口径）。args 喂 {0}/{1} 占位符（与 arcamT 同语义，fallback 同样替换，
+   *  不现裸 {0}）。 */
+  function T(key, fallback) {
+    var args = Array.prototype.slice.call(arguments, 2);
+    var v = (typeof window !== "undefined" && window.arcamT)
+      ? window.arcamT.apply(window, [key].concat(args)) : null;
+    if (v !== null && v !== key) return v;
+    var text = String(fallback);
+    for (var i = 0; i < args.length; i++) {
+      text = text.split("{" + i + "}").join(String(args[i]));
+    }
+    return text;
+  }
+
+
   // ── 引擎按需载入 ────────────────────────────────────────────────────
   async function init() {
     if (ready) return true;
@@ -127,7 +145,7 @@ window.ARCAM_MMD = (function () {
         try {
           THREE = await import('./mmd/three.module.js');
         } catch (e) {
-          setError('引擎载入失败：' + (e && e.message) + '（file:// 下动态 import 会被拦，必须走 http）');
+          setError(T('mmd.engineFail', '引擎载入失败：{0}（file:// 下动态 import 会被拦，必须走 http）', (e && e.message) || e));
           busy = false; return false;
         }
         const gl = await import('./mmd/loaders/GLTFLoader.js');
@@ -140,7 +158,7 @@ window.ARCAM_MMD = (function () {
       busy = false;
       return true;
     } catch (e) {
-      setError('初始化失败：' + (e && e.message));
+      setError(T('mmd.initFail', '初始化失败：{0}', (e && e.message) || e));
       busy = false;
       return false;
     }
@@ -266,28 +284,28 @@ window.ARCAM_MMD = (function () {
       return { ok: true, kind: 'glb' };
     if (b[0] === 0x7B) return { ok: true, kind: 'gltf-json' };                              // '{' 文本 glTF
     if (b.length >= 4 && b[0] === 0x50 && b[1] === 0x4D && b[2] === 0x58)                   // "PMX "
-      return { ok: true, kind: 'pmx', msg:
+      return { ok: true, kind: 'pmx', msg: T('mmd.pmxLone',
         '这是单个 .pmx —— 能解析，但**贴图不在这里**（PMX 只存贴图路径，图片散在它旁边，' +
         '而浏览器不给页面读旁边的文件）。所以会是一堆白模。要带贴图：先在「导入文件夹」里' +
-        '把那个文件夹选一次（我会记住它），之后丢任意一个 .pmx 进来都会自动配上；或者直接导入整个 .zip。' };
+        '把那个文件夹选一次（我会记住它），之后丢任意一个 .pmx 进来都会自动配上；或者直接导入整个 .zip。') };
     if (b[0] === 0x50 && b[1] === 0x4B)                                                     // "PK"
       return { ok: true, kind: 'zip' };
     if (b[0] === 0x52 && b[1] === 0x61 && b[2] === 0x72 && b[3] === 0x21)                  // "Rar!"
-      return { ok: false, kind: 'rar', msg:
-        '这是 .rar 压缩包 —— 浏览器解不了 RAR（只认 zip）。请先解压，再压成 .zip，或者直接用「导入文件夹」。' };
+      return { ok: false, kind: 'rar', msg: T('mmd.rar',
+        '这是 .rar 压缩包 —— 浏览器解不了 RAR（只认 zip）。请先解压，再压成 .zip，或者直接用「导入文件夹」。') };
     if (b[0] === 0x1F && b[1] === 0x8B)
-      return { ok: false, kind: 'gzip', msg: '这是 gzip 压缩文件（.gz），不是模型。要的是 .zip / .glb / .pmx。' };
+      return { ok: false, kind: 'gzip', msg: T('mmd.gzip', '这是 gzip 压缩文件（.gz），不是模型。要的是 .zip / .glb / .pmx。') };
     if (b[0] === 0xFF && b[1] === 0xD8)
-      return { ok: false, kind: 'jpeg', msg: '这是一张 JPEG 图片，不是 3D 模型。' };
+      return { ok: false, kind: 'jpeg', msg: T('mmd.jpeg', '这是一张 JPEG 图片，不是 3D 模型。') };
     if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47)
-      return { ok: false, kind: 'png', msg: '这是一张 PNG 图片，不是 3D 模型。' };
+      return { ok: false, kind: 'png', msg: T('mmd.png', '这是一张 PNG 图片，不是 3D 模型。') };
     if (b[0] === 0x08 || (b[0] === 0x0A) || (b.length > 4 && b[4] === 0x6F && b[5] === 0x6E))  // onnx 常见头
-      return { ok: false, kind: 'onnx', msg:
+      return { ok: false, kind: 'onnx', msg: T('mmd.onnx',
         '这看起来是 .onnx（AI 抠图那个模型，42MB），不是 3D 模型。' +
-        '3D 立绘要的是 .zip / .glb / .pmx —— 那一个在「立绘 → 3D 立绘」这一组里导入，别和「修饰立绘」里的「导入模型」搞混。' };
-    return { ok: false, kind: 'unknown', msg:
-      '这不是 glTF 二进制（文件头 ' + hex(4) + ' = "' + ascii(4) + '"，共 ' +
-      (b.length / 1048576).toFixed(2) + ' MB）。这里收 .zip（推荐，自带贴图）/ .glb / .pmx。' };
+        '3D 立绘要的是 .zip / .glb / .pmx —— 那一个在「立绘 → 3D 立绘」这一组里导入，别和「修饰立绘」里的「导入模型」搞混。') };
+    return { ok: false, kind: 'unknown', msg: T('mmd.unknown',
+      '这不是 glTF 二进制（文件头 {0} = "{1}"，共 {2} MB）。这里收 .zip（推荐，自带贴图）/ .glb / .pmx。',
+      hex(4), ascii(4), (b.length / 1048576).toFixed(2)) };
   }
 
   /** 把 src（URL 或 File）读成字节，边读边报进度 */
@@ -298,7 +316,7 @@ window.ARCAM_MMD = (function () {
       return buf;
     }
     const res = await fetch(src);
-    if (!res.ok) throw new Error('取不到文件（HTTP ' + res.status + '）');
+    if (!res.ok) throw new Error(T('mmd.fetchFail', '取不到文件（HTTP {0}）', res.status));
     const total = Number(res.headers.get('content-length')) || 0;
     if (!res.body) return new Uint8Array(await res.arrayBuffer());
     const reader = res.body.getReader();
@@ -330,8 +348,8 @@ window.ARCAM_MMD = (function () {
     parserScriptP = new Promise((res, rej) => {
       const s = document.createElement('script');
       s.src = SELF_DIR + 'mmd/libs/mmdparser.js';
-      s.onload = () => { MMDParser = window.MMDParser; MMDParser ? res(MMDParser) : rej(new Error('mmdparser.js 载入了但没挂到 window.MMDParser')); };
-      s.onerror = () => rej(new Error('拉不到 ./mmd/libs/mmdparser.js'));
+      s.onload = () => { MMDParser = window.MMDParser; MMDParser ? res(MMDParser) : rej(new Error(T('mmd.parserNoHook', 'mmdparser.js 载入了但没挂到 window.MMDParser'))); };
+      s.onerror = () => rej(new Error(T('mmd.parser404', '拉不到 ./mmd/libs/mmdparser.js')));
       document.head.appendChild(s);
     });
     return parserScriptP;
@@ -356,11 +374,12 @@ window.ARCAM_MMD = (function () {
       if (!pkgPmx.length) {
         const sk = (pkg && pkg.skipped) || [];
         const e = new Error(allPmx.length
-          ? '这个包里的模型都被你去掉了 —— 刷新页面就回来。'
+          ? T('mmd.allDropped', '这个包里的模型都被你去掉了 —— 刷新页面就回来。')
           : sk.length
-          ? '这个 zip 里的文件用了**不支持的压缩法**（' + sk.slice(0, 3).join('、') + (sk.length > 3 ? ' 等' : '') +
-            '）—— 常见于 2345好压 / 快压 打的包。请用 Bandizip 或 7-Zip 重新压一次（普通 deflate）再导入。'
-          : (kind === 'zip' ? '这个 zip 里没有 .pmx —— 是不是下错了包？' : '这个文件夹里没有 .pmx —— 选错文件夹了？'));
+          ? T('mmd.badCompression', '这个 zip 里的文件用了**不支持的压缩法**（{0}）—— 常见于 2345好压 / 快压 打的包。请用 Bandizip 或 7-Zip 重新压一次（普通 deflate）再导入。',
+              sk.slice(0, 3).join('、') + (sk.length > 3 ? ' 等' : ''))
+          : T(kind === 'zip' ? 'mmd.noPmxZip' : 'mmd.noPmxDir',
+              kind === 'zip' ? '这个 zip 里没有 .pmx —— 是不是下错了包？' : '这个文件夹里没有 .pmx —— 选错文件夹了？'));
         e.sniffed = true; throw e;
       }
       pmxIndex = Math.min(Math.max(0, pmxIdx || 0), pkgPmx.length - 1);
@@ -465,7 +484,7 @@ window.ARCAM_MMD = (function () {
       console.warn('[MMD] 官方 MMDLoader 装配失败：', err);
       built = null;
     }
-    if (!built) throw new Error('模型装配失败（官方 MMDLoader 没跑通）—— 把控制台里的报错发我。');
+    if (!built) throw new Error(T('mmd.assembleFail', '模型装配失败（官方 MMDLoader 没跑通）—— 把控制台里的报错发我。'));
     onProgress && onProgress(1, 0, 0);
     built.pmxName = pmxName;
     built.fromPackage = !!pkg;
@@ -614,7 +633,7 @@ window.ARCAM_MMD = (function () {
       busy = false;
       return true;
     } catch (e) {
-      setError(e && e.sniffed ? e.message : ('模型解析失败：' + ((e && e.message) || e)));
+      setError(e && e.sniffed ? e.message : T('mmd.parseFail', '模型解析失败：{0}', (e && e.message) || e));
       busy = false;
       return false;
     }

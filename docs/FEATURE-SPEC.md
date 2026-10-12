@@ -10,28 +10,32 @@ cutout.js 837 + mmd.js 1107 + mmd/ 2.8MB；上游 commit `4a9ed04`，一切 file
 
 ## 0. 差距清单（原版功能 → 现状 → 本版目标）
 
-| # | 原版功能（file:line） | 现状 | 去向 |
-|---|---|---|---|
-| A1 | 纯色底抠图 `cutSolidBg`（cutout.js:16-98） | 只有 AI 抠图 | `arcam/matte_tools.py` |
-| A2 | 内容边界+裁边 `contentBounds`/`cropToCanvas`（cutout.js:246-276） | 无 | 同上 |
-| A3 | 装图自动三件套 `autoPrepareChar`（index.html:2400-2440） | 无 | 同上 |
-| A4 | 半身判定（底行整条不透明→不能贴地，index.html:2365-2368） | 无 | 同上 |
-| A5 | HUD 六件套 `drawFrame/drawGrid/drawHorizon/drawFigure/hud`（index.html:1746-1972） | 无 | `arcam/hud.py` |
-| A6 | 构图体检 11 条 `compositionHints`（index.html:1890-1937） | 无 | 同上 |
-| A7 | 中英语言表 `TXT`+`t()`（index.html:600-830, 4047-4065） | 无 | `arcam/i18n.py` |
-| B1 | 摄像头 `start()`（index.html:3899-3961） | 无 | webui + docs |
-| B2 | 陀螺仪 `onOrient`（index.html:1059-1100） | 无 | webui + docs |
-| B3 | 拍照快门 + `resumeCam` 三时机（index.html:3469-3493, 3985-3993） | 无 | webui + docs |
-| B4 | 真·变焦 `setupZoom`（index.html:3855-3896） | 无 | webui + docs |
-| B5 | 中英切换 + `data-t` + localStorage（index.html:4047-4071） | 无 | webui + docs |
-| B6 | 全身/半身弹窗 `showKind`/`applyCharKind`（index.html:2500-2507, 2444-2454） | 无 | webui + docs |
-| B7 | 拖动提示 `showTip`（index.html:2519-2540） | 无 | webui + docs |
-| B8 | 软转屏 `syncTurn`+`rotSafeRange`（index.html:524-588, 4008-4037） | 无 | webui + docs |
-| B9 | 修图按钮组（纯色底/AI/裁边/还原，index.html:2783-2790） | 部分（AI 有） | webui + docs |
-| C1 | MMD 3D 层（mmd.js 1107 行 + mmd/ 2.8MB） | 无（README 记为"不做"） | Wave 2 |
+> 本表冻结于 v1.2.0 立项时。**2026-10-12 核对**：A*/B*/C1 全部落地，「现状」列
+> 已按代码更新（每条的证据见「代码证据」列）；去向列保留原计划值。
+
+| # | 原版功能（file:line） | 现状（2026-10-12 核对） | 代码证据 | 去向 |
+|---|---|---|---|---|
+| A1 | 纯色底抠图 `cutSolidBg`（cutout.js:16-98） | 已移植：`cut_solid_bg`（tol/feather、门控返 None） | `arcam/matte_tools.py:187`；`tests/test_matte_tools.py` | `arcam/matte_tools.py` |
+| A2 | 内容边界+裁边 `contentBounds`/`cropToCanvas`（cutout.js:246-276） | 已移植：`content_bounds`/`auto_trim` | `arcam/matte_tools.py:205,221` | 同上 |
+| A3 | 装图自动三件套 `autoPrepareChar`（index.html:2400-2440） | 已移植：`auto_prepare_char`（含 CLI `arcam prep` 与网页 `/api/prep`） | `arcam/matte_tools.py:389`；`cli.py` prep 子命令；`webapp.py` `/api/prep` | 同上 |
+| A4 | 半身判定（底行整条不透明→不能贴地，index.html:2365-2368） | 已移植：`PreparedChar.half_body`（h−2 行 >30% 口径） | `arcam/matte_tools.py:354,389` | 同上 |
+| A5 | HUD 六件套 `drawFrame/drawGrid/drawHorizon/drawFigure/hud`（index.html:1746-1972） | 已移植：`frame_overlay`/`grid_paths`/`draw_grid`/`draw_horizon`/`draw_figure`/`draw_hud_text`；CLI `--overlay` 可出图 | `arcam/hud.py`（496 行）；`tests/test_hud.py`；`cli.py:471,560` | `arcam/hud.py` |
+| A6 | 构图体检 11 条 `compositionHints`（index.html:1890-1937） | 已移植：`composition_hints`（11 条全并列，hints.* 进语言表） | `arcam/hud.py:396`；`i18n.py` `hints.*` | 同上 |
+| A7 | 中英语言表 `TXT`+`t()`（index.html:600-830, 4047-4065） | 已移植：`TXT` 343 条单一来源，两侧 `i18n.js` 逐条一致 | `arcam/i18n.py`；`tests/test_webui_static.py` | `arcam/i18n.py` |
+| B1 | 摄像头 `start()`（index.html:3899-3961） | 已移植：网页两侧 `live.js` `start()` | `webui/live.js`、`docs/live.js` | webui + docs |
+| B2 | 陀螺仪 `onOrient`（index.html:1059-1100） | 已移植：`live.js` `onOrient`（平滑 + screen.orientation 补偿） | 同上 | webui + docs |
+| B3 | 拍照快门 + `resumeCam` 三时机（index.html:3469-3493, 3985-3993） | 已移植：快门按钮 + visibilitychange/focus/pageshow | 两侧 `live.js`（resumeCam）；`index.html` `btn-shot`（webui:158 / docs:163） | webui + docs |
+| B4 | 真·变焦 `setupZoom`（index.html:3855-3896） | 已移植：`caps.zoom` min/max/step，失败禁用+提示 | `live.js` | webui + docs |
+| B5 | 中英切换 + `data-t` + localStorage（index.html:4047-4071） | 已移植：右上角切换器 + `arcam.lang` + `?lang=` | 两侧 `i18n.js`/`app.js` | webui + docs |
+| B6 | 全身/半身弹窗 `showKind`/`applyCharKind`（index.html:2500-2507, 2444-2454） | 已移植：导入立绘后弹（自动装载不问） | 两侧 `app.js` | webui + docs |
+| B7 | 拖动提示 `showTip`（index.html:2519-2540） | 已移植：TIP_MS=3600 / TIP_FADE=600，贴边与否换文案 | 两侧 `app.js`（tip.* 键） | webui + docs |
+| B8 | 软转屏 `syncTurn`+`rotSafeRange`（index.html:524-588, 4008-4037） | 已移植：`syncTurn` 阈值 45°（转屏本身）；`screenAxisToFree` 轴互换仅网页拖拽侧 | 两侧 `live.js:150` | webui + docs |
+| B9 | 修图按钮组（纯色底/AI/裁边/还原，index.html:2783-2790） | 已移植：四按钮 + autoPrepareChar 自动链 | 两侧 `index.html`（btn-cut-solid/btn-cutAi/btn-trim/btn-reset） | webui + docs |
+| C1 | MMD 3D 层（mmd.js 1107 行 + mmd/ 2.8MB） | 已移植（v1.7.0）：网页两侧 `mmd.js` + `mmd/` 运行时，四入口导入 | `webui/mmd.js`、`docs/mmd.js`、`webui/mmd/`；`tests/test_webui_static.py`（script/importmap 门禁） | Wave 2（已完成） |
 
 **形态分工**：Python 核心拿 A1-A7（CLI 可用、可测、无设备依赖）；B* 进两个网页
-（本机 webui + Pages docs，浏览器原生能力）；C1 Wave 2 单独排期。
+（本机 webui + Pages docs，浏览器原生能力）；C1 原列 Wave 2，已于 v1.7.0 完成
+（网页两侧；Python 核心仍不做 3D 运行时，见 `docs/SPEC.md` §0）。
 
 ## 1. `arcam/matte_tools.py`（F1 分区，新文件）
 
@@ -106,9 +110,9 @@ def auto_prepare_char(rgba01: np.ndarray, *, enabled: bool = True) -> PreparedCh
 
 ### CLI 新增（编排者合并时接线，契约冻结）
 
-- `arcam prep CHAR [-o out.png] [--no-solid] [--no-trim] [--no-soften]`：
+- `arcam prep CHAR [-o out.png] [--no-solid] [--no-trim] [--no-soften] [--no-blur]`：
   跑 auto_prepare_char，打印 actions 与 half_body 结论（i18n：默认跟随
-  `--lang`，缺省 zh）。
+  `--lang`，缺省 zh）。（`--no-blur` 为 v1.2.0 之后补的第四步开关。）
 - 既有子命令新增 `--lang {zh,en}`（影响所有人话输出；缺省 zh，**不改数值行为**）。
 
 ## 2. `arcam/hud.py`（F2 分区，新文件）
@@ -157,8 +161,9 @@ DEFAULT_LANG = "zh"
 def t(key: str, *args, lang: str = DEFAULT_LANG) -> str   # {0} {1} 占位符
 def table() -> dict[str, tuple[str, str]]                 # 全表（测试覆盖率用）
 ```
-- 表 = 原版 `TXT`（index.html:600-830）**逐条搬运**（约 120 条，数组形式
-  [中文, English]）；缺 key → 返回裸 key（原版行为，不静默漏翻）。
+- 表 = 原版 `TXT`（index.html:600-830）**逐条搬运**（实测 160 条，一条不落）
+  + webui/CLI 两侧新增键（当前共 **343 条**：160 + 183）；数组形式
+  [中文, English]；缺 key → 返回裸 key（原版行为，不静默漏翻）。
 - `t()` 的 `{0}` 替换用 str.format 语义等价手写（不许引异常）。
 - 数字与单位（1.60m / 23mm）不翻——表里就不含它们。
 
@@ -180,13 +185,17 @@ def table() -> dict[str, tuple[str, str]]                 # 全表（测试覆�
 | 修图 | 纯色底/AI/裁边/还原四按钮 + autoPrepareChar 自动链（webui 走 /api/prep） |
 | 既有 | 300ms 防抖、scale 预览、export 全尺寸、zip 三件套——不动 |
 
-## 5. Wave 2（本契约不含，排期另立）：MMD 3D
+## 5. Wave 2（MMD 3D）——已于 v1.7.0 完成，本节留档
 
-范围：mmd.js 1107 行 + mmd/（libs 312K / loaders 180K / controls 40K / shaders /
-poses.json / three-mmd）vendor 进两个网页；相机矩阵按 arcam 投影公式拼
+范围（当时的排期）：mmd.js 1107 行 + mmd/（libs 312K / loaders 180K / controls 40K /
+shaders / poses.json / three-mmd）vendor 进两个网页；相机矩阵按 arcam 投影公式拼
 （mmd.js:13 注释）；四入口（zip/glb/文件夹/pmx）；az/el/focus/dof 控件；
 draw3DLayer 合成与未就绪回退。Python 核心**不做** 3D（README「已知偏离」保留，
-但网页两侧补上后该条改为"网页版已支持"）。
+网页两侧补上后该条改为"网页版已支持"）。
+
+落地情况（v1.7.0，2026-10-11）：网页两侧 `mmd.js` + `mmd/` 运行时齐备，四入口、
+姿势与主光/景深可调都在；Python 核心仍不做 3D 运行时，README「MMD 3D 立绘
+（两个网页版都有）」即为现行口径。
 
 ## 6. 质量门禁（不省）
 

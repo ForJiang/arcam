@@ -17,6 +17,14 @@ function t(key) {
   return window.arcamT ? window.arcamT.apply(null, arguments) : key;
 }
 
+// T(key, fallback)：键不存在时回落 fallback 原文（arcamT 对缺 key 返回裸 key，
+// 直接显示会比不翻更糟）。用于**预接线**场景：键由编排者按 DONE.md 清单落地，
+// 落地前界面保持写死的原文（与 mmd.js 的 T()、applyLang 的守卫同口径）。
+function T(key, fallback) {
+  var v = window.arcamT ? window.arcamT(key) : null;
+  return (v !== null && v !== key) ? v : fallback;
+}
+
 var S_DEFAULTS = {
   x: 0, d: 4, h: 1.6, hp: 1.65, feq: 23, pitch: 0, roll: 0,
   shot: '全身', char_scale: 1.0, frame: '满幅', rot_basis: 'world',
@@ -75,8 +83,24 @@ function setStatus(msg, ms, isError) {
 }
 
 // 错误统一进状态条：显示 error+hint；不清空用户已调参数（state 不与失败路径耦合）。
+//: errMsg：fetch 失败时浏览器抛的是**英文 TypeError**（"Failed to fetch" /
+//   "Load failed"）——本地版最常见的事故是用户把「启动AR取景器」终端关了，
+//   屏幕上只飘一句英文，完全不知道下一步干什么。这里识别网络类错误换成人话
+//   （键未落地时回落中文原文，与 mmd.js 的 T() 同口径；ApiError 是后端回来的
+//   人话，不动）。
+function errMsg(e) {
+  var msg = (e && e.message) || String(e);
+  // ⚠ 判据是 e.name === 'TypeError'（fetch 失败在规范里就是抛 TypeError），
+  //   不是消息文本里有没有 "fetch"——后端 error/hint 的文案里将来出现这三个
+  //   词会被误吞成通用网络错误（v1.12.0 对抗复核 P3-1）。ApiError 有自己的
+  //   name，天然不走这条。
+  if (e && e.name === 'TypeError') {
+    return T('err.network', '连不上服务：本地版请确认「启动AR取景器」窗口还开着、地址是 127.0.0.1:8765；网页版请检查网络后重试。');
+  }
+  return msg;
+}
 function showApiError(e) {
-  setStatus(t('note.error', e.message), null, true);
+  setStatus(t('note.error', errMsg(e)), null, true);
 }
 
 /* ================= 3. fetch 封装 ================= */
@@ -167,7 +191,16 @@ async function uploadFile(kind, file) {
 
 // 只把「上传成功」的文件写进 state（photo/char/depth 一视同仁）：失败时留旧值，
 // 界面上的「未选择」才与内部状态一致；深度帧的落账在 uploadFile 的 depth 分支。
+//: 照片/立绘先按 MIME 挡一道（与 docs 版 handleFile 逐字同口径）：改名文本/
+//   坏文件不进服务端白跑一轮 multipart，直接人话提示（err.notImage 带文件名）。
+//   ⚠ 深度帧**不走这道**——.npy/.depth/.exr 没有 image/ MIME（heic/tif 才有），
+//     合法深度文件的类型由服务端 _decode_depth_upload 自己认（webapp.py:606）。
 function handleFile(kind, file) {
+  if (!file) return;
+  if (kind !== 'depth' && (!file.type || file.type.indexOf('image/') !== 0)) {
+    setStatus(t('err.notImage', file.name || t('err.unnamed')), null, true);
+    return;
+  }
   return uploadFile(kind, file);
 }
 
@@ -294,6 +327,13 @@ async function renderNow() {
 
 async function doMatte() {
   if (!state.char) { setStatus(t('note.needChar'), null, true); return; }
+  //: 长任务秒表（同 doBatch）：服务端推理 44MB 模型，大图要好几秒，中途
+  //   没有任何进度事件——隔两秒刷一次「已用 N 秒」，别让用户以为卡死。
+  var t0 = performance.now();
+  var ticker = setInterval(function () {
+    setStatus(t('note.matteRunning') + ' · ' +
+              t('note.aiElapsed', Math.round((performance.now() - t0) / 1000)));
+  }, 2000);
   try {
     setStatus(t('note.matteRunning'));
     var r = await apiJson('/api/matte', { source: 'char' });
@@ -305,7 +345,7 @@ async function doMatte() {
     if (state.photo) scheduleRender();
   } catch (e) {
     showApiError(e); // 模型缺失等情况：error 带下载指引，不 500
-  }
+  } finally { clearInterval(ticker); }
 }
 
 async function doLidar() {
@@ -353,6 +393,15 @@ async function doExport3D(target) {
       setStatus(how === 'cancel' ? t('note.saveCancel') : t('note.saveStart', 'arcam-3d-*.png'));
       return;
     }
+    if (target === 'layer') {
+      // 3D 立绘层 = MMD 层本身（与 bundle 的 character.png 同一张画布）：
+      // 预览/PNG 里画的就是它，层必须和预览同源；尺寸 = 裁切后的出图尺寸
+      // （base 是服务端 base_only 渲染的已裁切照片，W/H 即裁切框）。
+      var layerName = 'arcam-char-layer-' + stamp() + '.png';
+      var howL = await saveBlob(await canvasToBlob(window.ARCAM_MMD.canvas(), 'image/png'), layerName);
+      setStatus(howL === 'cancel' ? t('note.saveCancel') : t('note.saveStart', layerName));
+      return;
+    }
     // bundle：shot.jpg + scene.json + character.png（MMD 层）
     var shotBlob = await canvasToBlob(cv, 'image/jpeg', 0.95);
     var layerBlob = await canvasToBlob(window.ARCAM_MMD.canvas(), 'image/png');
@@ -376,9 +425,23 @@ function loadImage(uri) {
     img.src = uri;
   });
 }
+//: 画布 → Blob。⚠ toBlob 编码失败时回调收的是 **null**（不是抛异常）——
+//   旧实现 resolve(null)，下游 `new File([null])` 会把字符串 "null" 存成
+//   4 字节的 .png 交给用户（静默坏产物，v1.12 审计复现）。这里与 docs 版
+//   逐字同口径：null → reject(err.canvasEncode)，走状态条人话报错；
+//   OffscreenCanvas 走 convertToBlob；两者都没有 → err.canvasNoEncode。
 function canvasToBlob(canvas, type, quality) {
-  return new Promise(function (resolve) {
-    canvas.toBlob(function (b) { resolve(b); }, type, quality);
+  return new Promise(function (resolve, reject) {
+    if (typeof canvas.toBlob === 'function') {
+      canvas.toBlob(function (b) {
+        b ? resolve(b) : reject(new Error(t('err.canvasEncode')));
+      }, type, quality);
+    } else if (typeof canvas.convertToBlob === 'function') { // OffscreenCanvas
+      canvas.convertToBlob({ type: type, quality: quality })
+        .then(resolve, function (e) { reject(e || new Error(t('err.canvasEncode'))); });
+    } else {
+      reject(new Error(t('err.canvasNoEncode')));
+    }
   });
 }
 //: 保存兜底链（原版 index.html:3407-3453 移植；安卓 WebView 桥不移植——本项目没有安卓壳）。
@@ -426,7 +489,11 @@ function stamp() {
 }
 
 async function doExport(target) {
-  if (t3dReady() && (target === 'png' || target === 'bundle')) {
+  // 3D 模式三个 target 全部客户端合成：服务端 base_only 路径只会出 2D 立绘，
+  // 而预览里画的根本不是 2D 立绘——layer 也导 2D 层会和预览/PNG 自相矛盾
+  // （v1.12 审计：layer 漏 divert，纯 3D 用户点「下载立绘层」只拿到服务端
+  // 400 或一张和预览无关的 2D 层；docs 版走 charDraw 钩子本来就是 3D 层）。
+  if (t3dReady() && (target === 'png' || target === 'layer' || target === 'bundle')) {
     return doExport3D(target);      // 3D 模式：客户端合成（服务端只会出 2D）
   }
   try {
@@ -551,9 +618,19 @@ function applyLang() {
   const lang = window.ARCAM_LANG === 'en' ? 'en' : 'zh';
   document.documentElement.lang = lang === 'en' ? 'en' : 'zh-CN';
   // [data-t] → textContent；HUD/常驻条下一帧自然跟上（hud.js 每帧拼）
+  // ⚠ 缺 key 时 arcamT 回落的是**裸 key 字符串**（与 Python t() 同口径）——
+  //   无脑覆写会把标签换成 "param.x" 这种裸键，比不翻更糟。判据与 docs 版
+  //   逐字一致：译文 === key（键不存在）就保留 HTML 里的原文。i18n 键由
+  //   编排者按 artifacts/W5-web/DONE.md 的清单落地，落地前预接线的 data-t
+  //   靠这条守卫保持中文原文（不现裸键）。
   document.querySelectorAll('[data-t]').forEach(function (el) {
     var v = window.arcamT ? window.arcamT(el.dataset.t) : null;
-    if (v !== null) el.textContent = v;
+    if (v !== null && v !== el.dataset.t) el.textContent = v;
+  });
+  // data-t-title → title 属性（tooltip；原版 index.html 的同款机制）
+  document.querySelectorAll('[data-t-title]').forEach(function (el) {
+    var v = window.arcamT ? window.arcamT(el.dataset.tTitle) : null;
+    if (v !== null && v !== el.dataset.tTitle) el.title = v;
   });
   var btn = $('btn-lang');
   if (btn) {
@@ -819,8 +896,18 @@ function frameRectJs(key, W, H) {
 async function doBatch(files) {
   if (!files || !files.length) return;
   if (!state.char) { setStatus(t('note.batchNeedChar'), null, true); return; }
-  if (files.length > 12) { setStatus(t('note.batchTooMany'), null, true); return; }
+  // 收到几张就报几张（note.batchTooManyGot 带 {0}）——只说「最多 12 张」
+  // 用户不知道自己选了多少，还得回去数（docs 版同口径）
+  if (files.length > 12) { setStatus(t('note.batchTooManyGot', files.length), null, true); return; }
   setStatus(t('note.batchRunning', files.length));
+  //: 长任务秒表：批量是单次 POST，中途没有任何进度事件，12 张全尺寸合成
+  //   可能几十秒——隔两秒刷一次「已用 N 秒」（复用 note.aiElapsed，不新造键），
+  //   用户至少知道它没死。finally 里收表，成败都停。
+  var t0 = performance.now();
+  var ticker = setInterval(function () {
+    setStatus(t('note.batchRunning', files.length) + ' · ' +
+              t('note.aiElapsed', Math.round((performance.now() - t0) / 1000)));
+  }, 2000);
   var readers = Array.prototype.map.call(files, function (f) {
     return new Promise(function (resolve, reject) {
       var r = new FileReader();
@@ -836,17 +923,22 @@ async function doBatch(files) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ photos: uris, params: buildParams() })
     });
-    var blob = await res.blob();
+    // ⚠ 必须先判 res.ok 再读 body：响应体只能读一次，旧实现先 res.blob()
+    //   再 res.json()，错误路径的 json 必然抛「body stream already read」，
+    //   被 .catch 吞成 null → 用户只看到「出错：HTTP 400」，服务端的人话
+    //   （超 64MB / 没立绘 / dataURI 坏）整个丢掉（v1.12 审计复现）。
     if (!res.ok) {
       var d = await res.json().catch(function () { return null; });
       throw new ApiError((d && d.error) || ('HTTP ' + res.status), d && d.hint);
     }
+    var blob = await res.blob();
     var note = res.headers.get('X-Arcam-Batch') || '';
     // 走 saveBlob 兜底链（v1.9.0）：和单张导出/3D 导出同一条路，
     // navigator.share / showSaveFilePicker 优先、<a download> 兜底
     var how = await saveBlob(blob, 'arcam-batch.zip');
     setStatus(t('note.batchDoneWeb', note + (how === 'cancel' ? t('note.batchCancel') : '')));
   } catch (e) { showApiError(e); }
+  finally { clearInterval(ticker); }
 }
 
 /* ================= 9. 效果开关 + 拖拽摆位 + 自动摆正 ================= */

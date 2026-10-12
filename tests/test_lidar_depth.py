@@ -23,6 +23,8 @@ import pytest
 from PIL import Image
 
 from arcam.depth import (
+    ARCD_HEADER,
+    ARCD_MAGIC,
     LiDARFrame,
     _to_arcam_camera_coords,
     align_to_canvas,
@@ -554,3 +556,175 @@ def test_heic_depth_images_path_when_installed(tmp_path: Path) -> None:
     finally:
         monkeypatch.undo()
     assert float(frame.depth_m[10, 20]) == pytest.approx(4.0)
+
+
+# ── W3 健壮性增补（覆盖缺口：错误路径 / 可选格式的运行期失败） ─────────────────
+
+def test_tif32_mode_i_reads_and_rejects_out_of_range(tmp_path: Path) -> None:
+    """32-bit 单通道 TIFF（Pillow mode ``I``）：量程内照读、越界报错。
+
+    ⚠ PNG 的 32-bit 单通道存盘会被 Pillow 归一回 ``I;16``（实测），走不到
+    ``_u16_from_pil`` 的 mode=='I' 分支；TIFF 才保留 mode ``I``。越界值
+    （>65535）不是深度图——silently clamp 成 65535 会把 70m 外的点算成
+    65.5m，必须显式拒。
+    """
+    image = Image.fromarray(np.array([[0, 1500], [2500, 500]], dtype=np.int32), mode='I')
+    assert image.mode == 'I'
+    image.save(tmp_path / 'i32.tif', format='TIFF')
+    frame = load_depth(tmp_path / 'i32.tif')
+    assert np.isnan(frame.depth_m[0, 0])
+    assert frame.depth_m[0, 1] == pytest.approx(1.5)
+    assert frame.depth_m[1, 0] == pytest.approx(2.5)
+
+    big = Image.fromarray(np.array([[0, 70000], [2500, 500]], dtype=np.int32), mode='I')
+    big.save(tmp_path / 'big32.tif', format='TIFF')
+    with pytest.raises(ValueError, match='超出 uint16 量程'):
+        load_depth(tmp_path / 'big32.tif')
+
+
+def test_npy_npz_container_rejected(tmp_path: Path) -> None:
+    """.npy 后缀里装着 npz（多数组）→ 人话 ValueError（不当成裸数组硬读）。"""
+    with open(tmp_path / 'multi.npy', 'wb') as fh:
+        np.savez(fh, a=np.full((8, 8), 2.0, np.float32))
+    with pytest.raises(ValueError, match='单份深度数组'):
+        load_depth(tmp_path / 'multi.npy')
+
+
+def test_load_depth_unreadable_file_raises_value_error(tmp_path: Path) -> None:
+    """未知后缀 + 文件读不了（不存在/权限）→ ValueError 带原因（不泄裸栈）。"""
+    missing = tmp_path / 'nope.xyz'
+    with pytest.raises(ValueError, match='无法读取深度文件'):
+        load_depth(missing)
+    denied = tmp_path / 'denied.xyz'
+    denied.write_bytes(b'ARCD')
+    denied.chmod(0o000)
+    try:
+        with pytest.raises(ValueError, match='无法读取深度文件'):
+            load_depth(denied)
+    finally:
+        denied.chmod(0o644)
+
+
+@pytest.mark.parametrize('fx,cx,match', [
+    (0.0, 32.0, '内参 fx'),          # 零焦距：反投影全塌缩到光心
+    (50.0, float('inf'), '内参 cx'),  # 主点非有限：投影坐标全 NaN
+])
+def test_arcd_rejects_non_finite_or_non_positive_intrinsics(
+        tmp_path: Path, fx: float, cx: float, match: str) -> None:
+    """.depth 头里的内参不合法 → ValueError（``_make_frame`` 收口，四种格式共用）。"""
+    raw = (ARCD_HEADER.pack(ARCD_MAGIC, 8, 8, fx, 50.0, cx, 4.0,
+                            float('nan'), float('nan'), float('nan'))
+           + np.full((8, 8), 2.0, np.float32).tobytes())
+    (tmp_path / 'bad.depth').write_bytes(raw)
+    with pytest.raises(ValueError, match=match):
+        load_depth(tmp_path / 'bad.depth')
+
+
+def test_align_to_canvas_rejects_non_positive_canvas(tmp_path: Path) -> None:
+    """画布尺寸 0/负 → ValueError（调用方输入问题，不是静默出空图）。"""
+    from arcam.depth import align_to_canvas
+
+    frame = load_depth(_write_arcd(tmp_path))
+    for size in ((0, 10), (10, 0), (-4, 10)):
+        with pytest.raises(ValueError, match='画布尺寸非法'):
+            align_to_canvas(frame, *size)
+
+
+def test_save_depth_rejects_non_2d(tmp_path: Path) -> None:
+    """非二维深度不许落盘（.depth 布局按 (H,W) 行主序，silently reshape 会写坏帧）。"""
+    from arcam.depth import save_depth
+
+    bad = LiDARFrame(depth_m=np.zeros((4, 4, 3), np.float32),
+                     fx=50.0, fy=50.0, cx=2.0, cy=2.0)
+    with pytest.raises(ValueError, match='无法保存的深度尺寸'):
+        save_depth(bad, tmp_path / 'bad.depth')
+
+
+def test_exr_read_failure_wraps_runtime_error(tmp_path: Path) -> None:
+    """装着的 OpenEXR 打不开的坏文件 → RuntimeError 带上下文（不泄裸栈）。
+
+    webapp 的 ``_decode_depth_upload`` 靠这条走 400「深度帧读取失败」分支。
+    """
+    pytest.importorskip('OpenEXR')
+    (tmp_path / 'broken.exr').write_bytes(b'not an exr at all')
+    with pytest.raises(RuntimeError, match='从 EXR 读取深度通道失败'):
+        load_depth(tmp_path / 'broken.exr')
+
+
+class _FakeAuxDepth:
+    """pillow-heif HeifDepthImage 的字段级同构（``to_pillow`` 可返回任意对象）。"""
+
+    def __init__(self, pil, metadata: dict):
+        self.info = {'metadata': metadata}
+        self._pil = pil
+
+    def to_pillow(self):
+        return self._pil
+
+
+class _FakeHeifFile:
+    """Image.open 的返回同构：``.info['depth_images']`` + 上下文管理协议。"""
+
+    def __init__(self, depths):
+        self.info = {'depth_images': depths}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _patch_heif_open(depths, monkeypatch: pytest.MonkeyPatch, suffix='.heic') -> None:
+    real_open = Image.open
+
+    def fake_open(path, *a, **kw):
+        if str(path).endswith(('.heic', '.heif')):
+            return _FakeHeifFile(depths)
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr(Image, 'open', fake_open)
+
+
+@pytest.fixture()
+def heic_container(tmp_path: Path) -> Path:
+    """真 HEIC 容器（libheif 编码的 RGB 主图），辅图由 fake 注入。"""
+    pytest.importorskip('pillow_heif')
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    rgb = np.zeros((32, 48, 3), np.uint8)
+    rgb[..., 0] = 180
+    path = tmp_path / 'portrait.heic'
+    Image.fromarray(rgb, 'RGB').save(path, format='HEIF')
+    assert path.is_file()
+    return path
+
+
+def test_heic_aux_depth_non_2d_array_runtime_error(heic_container: Path,
+                                                   monkeypatch) -> None:
+    """辅图 ``to_pillow`` 返回非二维数组 → RuntimeError（绝不静默回落 RGB 主图）。"""
+    from arcam.depth import _load_heic_depth
+
+    _patch_heif_open([_FakeAuxDepth(np.zeros((32, 48, 3), np.float32),
+                                    {'representation_type': 2})], monkeypatch)
+    with pytest.raises(RuntimeError, match='期望二维'):
+        _load_heic_depth(heic_container)
+
+
+def test_heic_aux_depth_over_120m_runtime_error(heic_container: Path,
+                                                monkeypatch) -> None:
+    """换算后超出米制量程 (0, 120] → RuntimeError（疑似标定差异，不猜）。"""
+    from arcam.depth import _load_heic_depth
+
+    far = np.full((32, 48), 200.0, np.float32)          # 200m：超出量程
+    _patch_heif_open([_FakeAuxDepth(far, {'representation_type': 2})], monkeypatch)
+    with pytest.raises(RuntimeError, match='米制量程'):
+        _load_heic_depth(heic_container)
+
+
+def _write_arcd(tmp_path: Path) -> Path:
+    """写一份最小合法 .depth（8x8、全 2m），供对齐/尺寸守卫类用例复用。"""
+    path = tmp_path / 'mini.depth'
+    save_depth(LiDARFrame(depth_m=np.full((8, 8), 2.0, np.float32),
+                          fx=50.0, fy=50.0, cx=4.0, cy=4.0), path)
+    return path

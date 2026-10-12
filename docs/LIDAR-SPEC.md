@@ -161,12 +161,14 @@ def compose_shot(..., depth: LiDARFrame | None = None,
 ```
 arcam lidar inspect DEPTH [--json]         # 平面/h/pitch/roll/覆盖率/inliers，诊断
 arcam render ... --depth DEPTH             # 深度驱动（E1-E4 全开；显式参数仍优先）
-arcam lidar serve --port 7707 [--out DIR]  # 可选：实时流接收（协议见下）
-arcam lidar record TRACK.json --port ...   # 可选：把实时流落成 .depth 帧序列
+arcam lidar serve --port 7707 [--out DIR]  # 实时流接收（--out 顺带把帧落成 .depth 序列）
+arcam lidar sim --frames N --out DIR       # 合成深度帧（落盘；或 --push PORT 推给 serve）
 ```
+（v1.6.0 起补 `lidar sim` 合成器；原计划的 `lidar record` 子命令未单列——落盘由
+`serve --out DIR` 承担，实测本机回环：serve 收帧写 frame_%06d.depth。）
 
 实时流协议（`lidar_live.py`，可选最小实现）：TCP，每帧 = `[u32 BE meta_len][JSON][u32 BE len][depth float32 米]`；
-JSON 至少含 W,H,fx,fy,cx,cy,roll_deg,pitch_deg,height_m,timestamp。附 `simulator.py`
+JSON 至少含 W,H,fx,fy,cx,cy,roll_deg,pitch_deg,height_m,timestamp。附 `lidar_sim.py`
 （发 T2 合成场景的循环）供测试单测。没网/没 App 不影响本模块单测（localhost 回环）。
 
 ## 7. 文档

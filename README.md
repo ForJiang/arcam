@@ -12,7 +12,7 @@
 
 | 形态 | 入口 | 说明 |
 |---|---|---|
-| 命令行 | `arcam` / `python -m arcam` | 六个子命令，脚本化、批处理 |
+| 命令行 | `arcam` / `python -m arcam` | 15 个子命令（render/char-layer/bundle/matte/prep/video/check/recipe/batch/multi/contact-sheet/watch/stats/lidar/web），脚本化、批处理 |
 | 本机网页 | `arcam web` 或双击启动器 | 参数全可调、300ms 防抖实时预览、HUD 取景装饰、中英切换、立绘修图线；数据不出本机 |
 | 网页版（免安装） | [forjiang.github.io/arcam](https://forjiang.github.io/arcam/) | 同一管线的纯客户端 JS 移植 + 实时相机（getUserMedia + 陀螺仪 + 快门 + 变焦），运算全在访客浏览器里 |
 
@@ -38,8 +38,9 @@
 
 依赖只有 numpy + pillow（抠图/LiDAR/视频为可选 extra）。
 
-不做：实时摄像头（Python 侧只接受已给定的 yaw/pitch/roll 参数）、MMD 3D 运行时
-（three.js 生态；相机矩阵交叉验证的接口契约见 `docs/SPEC.md` §6）。
+不做：实时摄像头（Python 侧只接受已给定的 pitch/roll 参数，姿态数据源与版式
+布局 Shell 都是浏览器专属）、MMD 3D 运行时（three.js 生态；相机矩阵交叉验证的
+接口契约见 `docs/SPEC.md` §6）。
 
 ---
 
@@ -286,15 +287,23 @@ arcam render photo.jpg char.png -o shot.png --depth scan_0001.png --h 1.9   # �
 | `arcam/tone.py` | `index.html:3501-3620` | `toneMatchedLayer`（均值平移 + 范围重映射 + 边缘羽化） |
 | `arcam/matting.py` | `cutout.js:619-747` | `animeCut`（ISNet-anime + onnxruntime 懒加载） |
 | `arcam/video.py` | —（离线新增，引用 `index.html:3673`） | 轨道 schema、插值、逐帧渲染、图片 IO |
-| `arcam/cli.py` | `index.html:3797-3851` 快门/素材包/`zipStore` | 六个子命令 + `lidar inspect/serve`；zip 确定性时间戳 |
+| `arcam/cli.py` | `index.html:3797-3851` 快门/素材包/`zipStore` | 15 个子命令 + `lidar inspect/serve/sim`；zip 确定性时间戳 |
 | `arcam/depth.py` | —（离线新增，LiDAR 接入 L1，`docs/LIDAR-SPEC.md` §2） | `LiDARFrame`/`load_depth`/`align_to_canvas`/`save_depth`（ARCD） |
 | `arcam/plane.py` | —（离线新增，LiDAR 接入 L2，`docs/LIDAR-SPEC.md` §3） | `backproject`/`fit_ground_plane`/`camera_env_from_plane`/`sample_subject`/`occlusion_mask` |
 | `arcam/lidar_live.py` | —（离线新增，实时流，LIDAR-SPEC §6，可选） | TCP 帧协议 `serve`/`recv_frame`/`send_frame` |
+| `arcam/lidar_sim.py` | —（离线新增，LIDAR-SPEC §6） | 实时流协议模拟器（`lidar sim`：落盘 `.depth` 序列或推给 `serve`） |
+| `arcam/matte_tools.py` | `cutout.js:16-276` | `cut_solid_bg`/`content_bounds`/`auto_trim`/`soften_edge`/`auto_prepare_char` |
+| `arcam/hud.py` | `index.html:1746-1972` | 取景装饰六件套 + 构图提示 11 条的 PIL 对译（CLI `--overlay` 与网页浮层共用语义） |
+| `arcam/i18n.py` | `index.html:600-830` `TXT`+`t()` | 中英语言表单一来源（343 条，两侧 `i18n.js` 逐条一致） |
+| `arcam/webapp.py` | —（离线新增，`docs/WEB-SPEC.md` §1） | `arcam web` 后端：纯标准库 `http.server` + 渲染锁，`/api/*` 路由 |
 
-未移植（浏览器专属，只为 1:1 起见记录几何参数）：取景器装饰
-（`drawFrame`/`drawGrid`/`drawHorizon`/`drawFigure`/`compositionHints`/`hud`，
-`index.html:1740-1972`）、软转屏轴互换（`screenAxisToFree`）、3D 层
-（`draw3DLayer`/`mmd.js`）。
+浏览器预览态专属、Python 核心不实现的三项（网页两侧都已覆盖）：取景器装饰的
+**实时浮层**由 `webui/hud.js` 与 `docs/hud.js` 画、CLI 侧由 `arcam/hud.py`
+（`index.html:1746-1972` 全量对译，六件套 + 11 条构图提示，见 `tests/test_hud.py`）
+经 `--overlay` 出图；软转屏轴互换（`screenAxisToFree`，`index.html:2093`）是拖拽
+交互，网页两侧 `live.js` 的 `syncTurn` 已覆盖转屏本身；3D 层（`draw3DLayer`/
+`mmd.js`）网页两侧已移植（`src/arcam/webui/mmd.js` + `docs/mmd.js`），Python 侧
+按 §0「不做」只记录相机矩阵契约。
 
 ## 已知偏离（如实保留，不许「顺手修」）
 
@@ -328,8 +337,9 @@ arcam render photo.jpg char.png -o shot.png --depth scan_0001.png --h 1.9   # �
 ### 用法
 
 ```bash
-arcam web --open                # 起服务（默认 127.0.0.1:8765）并自动打开浏览器
-arcam web --open --port 9000    # 换端口；--open 控制要不要自动开浏览器
+arcam web                        # 起服务（默认 127.0.0.1:8765）并自动打开浏览器（默认行为）
+arcam web --port 9000            # 换端口
+arcam web --no-open              # 不自动开浏览器，自己贴地址（--open/--no-open 互斥）
 ```
 
 或者不敲命令 —— 直接用项目根目录的双击启动器（见下）。
@@ -353,7 +363,7 @@ canvas、无构建、无 CDN。上传的素材常驻**进程内存**（`POST /ap
 都会即时变。
 
 - **单一来源**：全表在 `src/arcam/i18n.py` 的 `TXT`（原版 160 条逐条搬运 + 两侧
-  新增键，当前 292 条），网页两侧 `i18n.js` 与它逐条一致
+  与 CLI 新增 183 条，当前 343 条），网页两侧 `i18n.js` 与它逐条一致
   （`tests/test_webui_static.py` 有逐条比对门禁）；缺 key 会原样显示键名——
   立刻现形，不静默漏翻。
 - **CLI 侧**：**每个子命令**都收 `--lang zh|en`（默认 zh）——112 条 help、
@@ -418,11 +428,13 @@ GitHub Pages 只伺服静态文件、跑不了 Python 服务，所以把 focal/p
 - **正确性基准**：`docs/tests/golden.json` 由 Python 管线生成（40 组 focal /
   200 组 project / 120 组 place / 102 组 placement / 3 组整帧 scene + v1.9.0
   起 10 张合成 fixture 上的光照五组：measureRegion 7 / bakeLit 17 / charStats 4 /
-  litScaleBucket 8 / grainTile 2，共 500 向量），JS 侧偏差 < 1e-9（引擎 libm 的
+  litScaleBucket 8 / grainTile 2，共 503 向量），JS 侧偏差 < 1e-9（引擎 libm 的
   1 ulp 差，比阈值低 7 个数量级），其中 bakeLit 出图**逐字节全等**（0 容差）；
-  合成调用序列与 scene 字段顺序与 Python 逐项对齐。差分夹具
-  `tools/golden-diff.mjs`（Node 直跑，500 向量 0 失败），Python 侧重算门禁
-  `tests/test_golden_recompute.py`（fixture 必须能被当前实现逐向量重算）。
+  合成调用序列与 scene 字段顺序与 Python 逐项对齐。Node 侧差分夹具
+  `tools/golden-diff.mjs` 逐向量跑其中 500 个（scene 组 3 个只做 Python 侧重算，
+  浏览器侧无对拍物），实测 `DIFF total=500 bad=0 worst=5.551e-17`；Python 侧重算
+  门禁 `tests/test_golden_recompute.py`（503 向量必须能被当前实现逐向量重算，
+  fixture 不许悄悄过期）。
 
 ## 测试
 
@@ -432,15 +444,18 @@ GitHub Pages 只伺服静态文件、跑不了 Python 服务，所以把 focal/p
 
 - `tests/test_video.py`：schema 往返、插值手推（中点）、轨道自检、渲染（帧数/
   尺寸/俯角上移方向）、背景目录与 hold。
-- `tests/test_cli.py`：六个子命令的冒烟（render+scene.json、char-layer RGBA、
-  bundle 解包三件套且 ZIP_DEFLATED、check 退出码、video 帧数、matte 错误路径）。
+- `tests/test_cli.py`：CLI 全冒烟——15 个子命令逐个过（render+scene.json、
+  char-layer RGBA、bundle 解包三件套且 ZIP_DEFLATED、check 退出码、video 帧数、
+  matte 错误路径、`--overlay` 各层与组合序、batch/recipe/multi/contact-sheet/
+  prep/watch/stats/web/lidar serve）。
 - `tests/test_lidar_compose.py`：LiDAR 深度接入合成的闭环——合成深度（地面+噪声+
   遮挡方块）驱动 `compose_shot(depth=…)` 与手算一致、遮挡区 alpha=0、无 depth 路径
   逐位回归、`_merge_env` 三态优先级、CLI `lidar inspect/serve` 与 `render --depth`。
-- 其余模块的 golden 用例（投影 12 组公式手推、4×4 矩阵交叉验证、像素级合成性质）
-  见 P1–P4 各自的测试文件。
+- 其余模块的 golden 用例（投影/反投影公式手推、4×4 矩阵交叉验证、像素级合成性质）
+  见 `tests/test_{geometry,placement,frames,lighting,sprite,compose,scene,tone,matting}.py`
+  （v1.0 并行期按 P1–P4 分区写，文件即分区，见 `docs/SPEC.md` §2）。
 - `tests/test_golden_recompute.py`：Pages 版数值基准 `docs/tests/golden.json` 必须
-  能用当前 Python 实现逐向量重算（500 向量全比对，bakeLit 逐字节 0 容差），
+  能用当前 Python 实现逐向量重算（503 向量全比对，bakeLit 逐字节 0 容差），
   fixture 不许悄悄过期。
   配套 `tools/golden-diff.mjs`（Node 跑 JS 侧差分，实测最大偏差 5.551e-17）：
 
@@ -456,14 +471,15 @@ GitHub Pages 只伺服静态文件、跑不了 Python 服务，所以把 focal/p
   .venv/bin/python tools/lidar-e2e-smoke.py
   ```
 
-当前 **659 passed / 1 skipped**（1 skip 为 onnxruntime 已装时 CLI 抠图 E2E 由
+当前 **897 passed / 1 skipped**（1 skip 为 onnxruntime 已装时 CLI 抠图 E2E 由
 P4 覆盖的既定跳过；可选依赖 pillow-heif/OpenEXR/imageio 装全后 HEIC/EXR 深度
-与 mp4 路径全部真跑）。历轮全项目审计：v1.1.1 修 18 个功能障碍（free 模式
-rot_basis/edge_bar 整条渲染链断链、char-layer --frame 静默失效、lidar serve
-一帧不收、视频背景双重除法、Pages 抠图阈值 1 ulp 翻面、HEIC 量程预检 0 值误判、
-web listen backlog 竞态等）；v1.8.0 修 12 个；v1.10.0 修 14 个（multi 立绘
-纯白、非有限角炸链、HUD 外第二处字节域错位、CLI nan 静默出图等），明细见
-`CHANGELOG.md`。
+与 mp4 路径全部真跑）。覆盖率 98%（4734 语句 / 90 未覆盖）。历轮全项目审计：
+v1.1.0 修 16 个功能障碍与静默错误（free 模式 rot_basis/edge_bar 整条渲染链
+断链、char-layer --frame 静默失效、lidar serve 一帧不收、视频背景双重除法、
+Pages 抠图阈值 1 ulp 翻面等）、v1.1.1 补验可选依赖路径再修 2 个（HEIC 量程
+预检 0 值误判、web listen backlog 竞态）；v1.8.0 修 12 个；v1.10.0 修 14 个
+（multi 立绘纯白、非有限角炸链、HUD 外第二处字节域错位、CLI nan 静默出图等），
+明细见 `CHANGELOG.md`。
 
 源码溯源：每个公开函数的 docstring 都注明对应 JS 的 `index.html:<line>` /
 `cutout.js:<line>`；契约全集在 `docs/SPEC.md`，原版逐字事实在

@@ -233,15 +233,23 @@ def test_fx_light_grain_switches_in_docs():
 
 
 def test_docs_batch_bound_exactly_once():
-    """批量出图的 file-photos change 只绑一次（v1.9.0 合并修复）。
+    """批量出图的接线只能各绑一次（v1.9.0 双 change + v1.12.0 双 click 事故回归）。
 
-    init 内联一条 + bindBatch 一条 = 选一次文件跑两遍批量、下两个 zip。
-    本地 webui 侧同款坑已修，两边一起钉死：全文件只许一处 change 绑定。
+    v1.9.0：init 内联防 change 调 doBatch，bindBatch() 又各自绑了一份 change
+    —— 选一次文件发两次 /api/batch、下两个 zip。
+    v1.12.0：W5 审计发现 click 也双着——init 与 bindBatch 各绑一条
+    `$('btn-batch').addEventListener('click', …)`，点一次批量钮开两回文件
+    选择框（旧门禁只断言 init 里有一条，没数全文件总条数，正好放错方向）。
+    本地 webui 侧同款坑已修，两边一起钉死：change 与 click 都只许一处。
     """
     js = _strip_comments((DOCS / "app.js").read_text(encoding="utf-8"))
     assert js.count("$('file-photos').addEventListener('change'") == 1, \
         "file-photos 的 change 被重复绑定（一次选择会跑两遍批量）"
+    assert js.count("$('btn-batch').addEventListener('click'") == 1, \
+        "批量钮的 click 被重复绑定（点一次开两回文件选择框）"
     body = _fn_body(js, "bindBatch")
+    assert "$('btn-batch').addEventListener('click'" not in body, \
+        "bindBatch 不应再绑 click（init 里已绑；双绑 = 开两回选择框）"
     assert "e.target.value = ''" in body, \
         "bindBatch 未清空 file input（同一批文件再选不触发 change）"
     # init 里不再出现 file-photos 的 change 绑定（按钮 click 打开选择框仍保留）
@@ -250,3 +258,25 @@ def test_docs_batch_bound_exactly_once():
         "init 里又绑了一条 file-photos change（与 bindBatch 双跑）"
     assert "$('btn-batch').addEventListener('click'" in init, \
         "批量钮的 click（打开文件选择框）应保留在 init"
+
+
+def test_docs_exports_cancel_aware():
+    """三个导出 + 批量的「保存取消」必须反映在状态条（v1.12.0 审计实修）。
+
+    saveBlob 返回 'cancel'（用户在保存框/分享面板里关掉）时，旧实现无视返回值
+    照显示「已开始下载 {name}」——状态条撒谎。本地 webui 的 doExport 一直判
+    ``how === 'cancel'``，docs 版拉齐；复用既有键 note.saveCancel / note.batchCancel。
+    """
+    js = _strip_comments((DOCS / "app.js").read_text(encoding="utf-8"))
+    for fn in ("doExportPng", "doExportLayer", "doExportBundle"):
+        body = _fn_body(js, fn)
+        assert re.search(r"const how = await saveBlob\(", body), \
+            f"{fn} 未接收 saveBlob 的返回值（拿不到 cancel/share/picker/download）"
+        assert re.search(r"how === 'cancel' \? t\('note\.saveCancel'\)", body), \
+            f"{fn} 取消时应报 note.saveCancel（旧实现取消也显示下载中）"
+    batch = _fn_body(js, "bindBatch")
+    assert re.search(r"how === 'cancel'", batch), \
+        "bindBatch 取消时应把 note.batchCancel 缀在结果后面"
+    # 长任务秒表：批量逐张全尺寸合成可能几十秒，状态条要能报「已用 N 秒」
+    assert re.search(r"setInterval\(", batch) and "note.aiElapsed" in batch, \
+        "bindBatch 缺长任务秒表（复用 note.aiElapsed；进行中无任何反馈）"

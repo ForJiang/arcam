@@ -337,7 +337,22 @@ button:hover { background: var(--btn-bg-hover); }
 .d3d-row label { font-size: 13px; color: var(--label-fg); }
 .d3d-row input[type="range"] { width: 100%; height: var(--ctrl-h); accent-color: var(--accent); }
 .d3d-row .val { font-size: 12px; color: var(--muted); min-width: 44px; text-align: right; }
-#model3dRow button[data-busy] { opacity: .55; pointer-events: none; }
+/* 选中态（模型/姿势按钮）：只换字色 + 边框色（原版 .btns .on 的克制版，不填充）。
+   ⚠ 2026-10-11 v1.12 审计补：refresh3dRows 给选中按钮打 className='on'，但本文件
+     原先没有 .on 规则——选中的模型/姿势和没选的一模一样，用户不知道当前是哪个
+     （docs 版一直有这条，SITE-SPEC §3 两版控件一致）。 */
+.fold button.on { color: var(--accent); border-color: var(--accent); }
+/* 切换模型时的进行态：等 M3D.switchModel/dropModel 那一下（pointer-events 也
+   关掉——进行中再点一次会拿同一份输入重建两遍） */
+#model3dRow button[data-busy] { opacity: .55; pointer-events: none; cursor: progress; }
+/* 行标题（模型 / 姿势）：12px muted，跟 .hint 同规格但不当提示。
+   ⚠ 同为 v1.12 审计补：index.html 的 model3dLabel/pose3dLabel 是 class="sub"，
+     本文件原先没有 .sub 规则，两行标题掉回正文 13px/正文色（docs 版一直有）。 */
+.fold .sub { font-size: 12px; color: var(--hint); margin: 10px 0 4px; }
+/* 3D 面板的报错（note.3dFail / note.3dDrawFail）：红字，跟状态条同一 token。
+   ⚠ 同为 v1.12 审计补：d3dNote() 会切 error 类，没有这条规则时报错和普通
+     提示一个色——3D 失败在视觉上完全看不出来（docs 版一直有）。 */
+.hint.error { color: var(--danger); }
 
 /* 取景框读数（原版 frameRead，index.html:355）——选完画幅就知道出图裁到多大 */
 .frame-read {

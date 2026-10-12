@@ -6,6 +6,13 @@
 > docs/WEB-SPEC.md、docs/SITE-SPEC.md 与 oss-teardown/lhso-20261003/artifacts/ 是
 > 行为基准（真机/JS 逐字源码）。
 
+> **现行基线（2026-10-12 实跑核对，后续各轮的「项目现状」都是当时快照，不改写）**：
+> `.venv/bin/python -m pytest tests/ -q` → **897 passed / 1 skipped**；
+> `node tools/golden-diff.mjs` → `DIFF total=500 bad=0 worst=5.551e-17`；
+> `.venv/bin/python -m coverage report` → **98%**（4734 语句 / 90 未覆盖）；
+> `.venv/bin/python -m arcam stats` → 23 模块 / 10767 行、22 测试文件 / 14567 行、
+> 15 个网页 JS / 9475 行、公开 API 74、语言表 343 条、15 个子命令。
+
 ## 1. 作业流程（每个 Agent 必须按序执行）
 
 1. **通读**：逐行读完自己分区内每个文件（禁止抽样/ skim；大文件分段读但要全覆盖）。

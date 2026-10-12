@@ -543,3 +543,104 @@ def test_occlusion_margin_tolerance() -> None:
     tight = occlusion_mask(blocked, cam, plc, margin_m=0.01)
     assert any(tight[v, u] for (u, v) in painted), 'margin 1cm 应判遮挡'
 
+
+
+# ── W3 健壮性增补（覆盖缺口：退化输入 / 守卫分支 / 极端姿态） ───────────────────
+
+def test_fit_all_collinear_points_raises() -> None:
+    """全部有效点共线（一行等深像素）→ 每个 RANSAC 候选都退化 → ValueError。
+
+    覆盖两条守卫：三点共线/重合的候选跳过（norm<=1e-12）与「一个满足斜坡
+    约束的候选都没找到」的收口。共线点云在真实数据里=传感器一行坏行，
+    不能静默拟合出一条随意平面。
+    """
+    fx, fy, cx, cy = _intrinsics()
+    depth = np.full((20, 100), np.nan, dtype=np.float32)
+    depth[10, :] = 2.0                                # 100 个共线有效点（>=64）
+    frame = LiDARFrame(depth_m=depth, fx=fx, fy=fy, cx=cx, cy=cy,
+                       source='collinear-row')
+    with pytest.raises(ValueError, match='RANSAC 未找到满足斜坡约束'):
+        fit_ground_plane(frame)
+
+
+def test_depth_stats_rejects_non_2d() -> None:
+    """depth_stats 只吃 (H,W)：三维数组 → ValueError（统计口径会静默失真）。"""
+    frame, _ = _synth_scene(1.55, 12.0, 8.0)
+    plane = fit_ground_plane(frame)
+    bad = LiDARFrame(depth_m=np.zeros((4, 4, 3), np.float32),
+                     fx=frame.fx, fy=frame.fy, cx=frame.cx, cy=frame.cy)
+    with pytest.raises(ValueError, match=r'\(H,W\)'):
+        depth_stats(bad, plane)
+
+
+def test_camera_from_frame_rejects_zero_sized_frame() -> None:
+    """零尺寸帧 → ValueError（否则反解 feq 会除零/出 NaN 相机）。"""
+    from arcam.plane import _camera_from_frame
+
+    frame, _ = _synth_scene(1.55, 12.0, 8.0)
+    env = camera_env_from_plane(fit_ground_plane(frame))
+    empty = LiDARFrame(depth_m=np.zeros((0, 8), np.float32),
+                       fx=frame.fx, fy=frame.fy, cx=frame.cx, cy=frame.cy)
+    with pytest.raises(ValueError, match='深度帧尺寸非法'):
+        _camera_from_frame(empty, env)
+
+
+def test_occlusion_mask_rejects_non_2d() -> None:
+    """遮挡掩码只吃 (H,W) 深度图（mgrid 会按错形状广播 → 静默错掩码）。"""
+    frame, cam = _synth_scene(1.55, 12.0, 8.0)
+    env = camera_env_from_plane(fit_ground_plane(frame))
+    plc = _placement(cam, 1.55, 5.0, 0.6)
+    bad = LiDARFrame(depth_m=np.zeros((8, 8, 3), np.float32),
+                     fx=frame.fx, fy=frame.fy, cx=frame.cx, cy=frame.cy)
+    with pytest.raises(ValueError, match=r'\(H,W\)'):
+        occlusion_mask(bad, cam, plc)
+
+
+def test_occlusion_mask_extreme_pitch_all_false() -> None:
+    """pitch=90°（直视地面）：cos(pitch)<=0 → 公告板整体在相机上方，全不判。
+
+    LIDAR-SPEC §3 的「极端仰角不判」守卫：此时脚底 place 无解或眼平面深度
+    非正，硬算会给出全 True 的荒谬掩码（把整个立绘抠光）。
+    """
+    frame, _ = _synth_scene(1.55, 12.0, 8.0)
+    straight_down = Camera(W, H, 1.55, 23.0, 90.0, 0.0)
+    # 直视地面时 ground_placement 自身就无解（射线与地平面近平行）——这正是
+    # 要守的极端姿态；公告板几何直接给一个居中矩形即可验证掩码守卫。
+    plc = SpritePlacement(u=W / 2.0, v=H / 2.0, w=40.0, h=80.0, rot=0.0)
+    mask = occlusion_mask(frame, straight_down, plc)
+    assert mask.shape == (H, W) and mask.dtype == np.bool_
+    assert not mask.any(), 'cos(pitch)<=0 时不许判任何遮挡'
+
+
+def test_camera_env_from_plane_rejects_degenerate_normal() -> None:
+    """零法向/非有限法向 → ValueError（atan2(0,0)=0 会静默给出 h=0 的假环境量）。"""
+    for normal in ((0.0, 0.0, 0.0), (float('nan'), 1.0, 0.0)):
+        plane = GroundPlane(normal=normal, offset=1.55, inliers=100, rms=0.01)
+        with pytest.raises(ValueError, match='平面法向非单位'):
+            camera_env_from_plane(plane)
+
+
+def test_refine_plane_second_fallback_is_provably_unreachable() -> None:
+    """钉死「精修后内点 <3 → 回退候选」分支的不可达性论证（W3）。
+
+    数学事实：``sel``（候选内点，≥3）非退化时 LSQ 平面过全部 sel 点（残差 0）；
+    ``sel`` 共线时残差 ``(p−center)·n`` 也恒 0（法向 ⊥ 直线）。故 ``mask2``
+    恒 ≥3——该分支是防御性守卫而非可达路径（compose/plane 均无静默失效面）。
+    这里用三组代表性点集实测：返回值必为**精修后**的模型（内点数不降）。
+    """
+    from arcam.plane import _refine_plane
+
+    up = np.array([0.0, -1.0, 0.0])
+    tol = 0.02
+    cases = [
+        np.array([[0., 0, 0], [1, 0, 0], [2, 0, 0], [50., 3, 7]]),      # 三点共线
+        np.array([[0., 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0],
+                  [9., 5, 5], [9., 6, 5]]),                              # 共线 + 远点
+        np.array([[0., 0, 0], [1, 0.019, 0], [2, -0.019, 0],
+                  [50., 3, 7]]),                                        # 近共线（tol 内）
+    ]
+    for pts in cases:
+        normal, d, inliers, rms = _refine_plane(pts, np.array([0., 1., 0.]),
+                                                0.0, tol, up)
+        assert inliers >= 3, pts
+        assert math.isfinite(rms) and rms >= 0.0

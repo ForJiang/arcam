@@ -39,11 +39,17 @@ cd docs && python3 -m http.server 8770
 ## 常见问题
 
 - **404 了**：确认 Pages 目录选的是 `/docs` 不是 `/`（仓库根）；或 Actions 构建还没跑完。
-- **页面白屏**：`docs/` 里 6 个网页文件 + `vendor/` 4 个运行时文件都要在（`vendor/` 是抠图模型，
-  缺了只是抠图按钮不出现，合成功能不受影响）。
+- **页面白屏**：`docs/` 里 12 个网页文件都要在——`index.html` / `style.css` /
+  `app.js` / `i18n.js` / `hud.js` / `live.js` / `matte-tools.js` / `mmd.js` /
+  `arcam-core.js` / `arcam-render.js` / `arcam-lighting.js` / `matte.js`
+  （引用关系见 `index.html` 的 script 标签与 `app.js` 顶部的动态 import），
+  外加 `mmd/` 运行时目录；`vendor/` 是抠图模型，缺了只是抠图按钮不出现，
+  合成功能不受影响。
 - **想换主题/加功能**：页面三件套是 `docs/index.html` / `style.css` / `app.js`；
   数学内核 `arcam-core.js` 与合成 `arcam-render.js` 与 Python 侧同契约，
   改完用 `docs/tests/golden.json` 对拍（见 `docs/SITE-SPEC.md`）。
-- **仓库带 53MB 模型**：`vendor/isnet-anime-q8.onnx` 是抠图用的 ISNet-anime，
-  sha256 `cb5f7850…77e3` 与上游写死值一致；不想要抠图功能就删掉 `docs/vendor/`
+- **仓库带约 56MB 模型**：`vendor/` 合计 55,931,309 字节（isnet-anime-q8.onnx
+  44,214,375 + ort-wasm 11,246,032 + ort.min.js 446,284 + wasm loader 24,618），
+  其中 onnx 是抠图用的 ISNet-anime，sha256 `cb5f7850…77e3` 与上游写死值一致
+  （`src/arcam/matting.py:46` `MODEL_SHA256`）；不想要抠图功能就删掉 `docs/vendor/`
   再推（页面会自动隐藏抠图按钮）。

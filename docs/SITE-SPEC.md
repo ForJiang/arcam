@@ -15,7 +15,9 @@
 - 验收基准：`docs/tests/golden.json`（Python 侧已生成：focal 40 / project 200 /
   place 120 / placement 102 / scene 3 + v1.9.0 起光照五组 38 向量
   （measureRegion 7 / bakeLit 17 / charStats 4 / litScaleBucket 8 / grainTile 2，
-  bakeLit 逐字节 0 容差），共 500 向量）。J1 必须用 node_repl
+  bakeLit 逐字节 0 容差），共 503 向量）。Node 侧夹具 `tools/golden-diff.mjs`
+  逐向量跑其中 500 个（scene 组 3 个无 JS 对拍物，只过 Python 侧重算门禁
+  `tests/test_golden_recompute.py`）；J1 交付时用 node_repl
   （`mcp__node_repl__js`，纯 Node 内核）加载自己的 JS + golden 做**数值 diff 全过**
   （几何 1e-9 相对误差；光照组 bakeLit 字节全等）。
 - 文件互斥：J1 只写 arcam-core.js；J2 只写 arcam-render.js；J3 只写

@@ -985,6 +985,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 raise ApiError(400, f"chunk 大小行不是十六进制：{line!r}",
                                "用非流式 fetch（Blob/FormData）发请求") from None
+            if size < 0:
+                # 负 chunk 大小（``int(b"-1", 16)`` = -1）：``total += size`` 会把
+                # 总长倒扣、``_read_exact(负数)`` 又立刻返回空——客户端只要反复发
+                # "-1\r\n" 就能让这个线程永远空转，且永远撞不上面的 64MB 闸门。
+                # 协议里不存在负大小，直接 400 断连（W3 硬化）。
+                self.close_connection = True
+                raise ApiError(400, f"chunk 大小是负数：{line!r}",
+                               "用非流式 fetch（Blob/FormData）发请求") from None
             if size == 0:
                 # 拖车头部读到空行为止
                 while True:
@@ -1069,6 +1077,11 @@ class Handler(BaseHTTPRequestHandler):
     # ---- GET ----
 
     def do_GET(self) -> None:
+        # 与 do_POST 对称：``_body_read`` 是**实例**属性，HTTP/1.1 同一条连接上
+        # 会跨请求残留（上一请求读完 body 后一直是 True）。不复位的话，本请求
+        # （GET 也可能带 body：``curl -X GET -d``）的请求体不会被 drain，残体
+        # 拼进下一条请求行 → 501（W3 复现：POST 之后同连接 GET -d）
+        self._body_read = False
         expected = self._expected_length()
         try:
             path = urllib.parse.urlsplit(self.path).path
@@ -1113,7 +1126,9 @@ class Handler(BaseHTTPRequestHandler):
             # 不进 500（也不把 lstat 的内部报错文本透出响应体）
             raise ApiError(400, f"静态路径无法解析：/static/{relative}",
                            "URL 里不要带 %00 这类控制字符或超长文件名") from None
-        if target != root and root not in target.parents or not is_file:
+        # 括号显式写出：越根（target != root 且不在 root 的 parents 链上）或不是
+        # 文件 → 404。``and`` 本来就更紧，加括号只为读起来不用背优先级表
+        if (target != root and root not in target.parents) or not is_file:
             raise ApiError(404, f"静态文件不存在：/static/{relative}",
                            "前端三件套在 src/arcam/webui/（style.css / app.js 等）")
         suffix = target.suffix.lower()
@@ -1261,8 +1276,8 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _api_batch(self) -> None:
-        """批量出图（CLI ``arcam batch`` 的 web 版；v1.6.0 上线，CHANGELOG
-        「批量出图」节——WEB-SPEC §1 路由表尚未回写本端点，属编排者文档）。
+        """批量出图（CLI ``arcam batch`` 的 web 版；v1.6.0 上线，WEB-SPEC §1
+        路由表（v1.5 补契约）已回写本端点。
 
         JSON：``{photos: [dataURI, …], params: {…}}`` → zip（每张一个
         ``shot_<i>.png``，DEFLATED 压缩、时间戳固定 1980-01-01——与 CLI bundle
@@ -1272,6 +1287,11 @@ class Handler(BaseHTTPRequestHandler):
         ``X-Arcam-Batch-Failed`` 头（**只放数字**——HTTP 头是 latin-1，中文
         原因放进去会 UnicodeEncodeError 直接 500，v1.6 踩过），具体原因写进
         zip 里的 ``_errors.txt``（UTF-8，只在有失败时才加，不污染全成功的产物）。
+
+        「单张失败」不只指 dataURI 解不开：该张的合成失败（compose 的
+        ValueError → ApiError）同样只跳过这张（WEB-SPEC §1「单张失败不拖垮
+        整批」的完整口径，W3 补上——旧实现只兜住解码错，某张照片让
+        compose_shot 抛 ValueError 会把整批 400 掉）。
         """
         data = self._read_json()
         params, explicit, _scale = self._params_of(data)
@@ -1294,11 +1314,12 @@ class Handler(BaseHTTPRequestHandler):
             for i, uri in enumerate(photos):
                 try:
                     src01 = _data_uri_to_rgb01(uri, f"第 {i + 1} 张照片")
+                    result = _compose(self._store(), params, explicit, scale=1.0,
+                                      src_override=src01)
                 except ApiError as exc:
+                    # 解码错与合成分错都只跳过这一张（见 docstring）
                     failed.append((i + 1, exc.error))
                     continue
-                result = _compose(self._store(), params, explicit, scale=1.0,
-                                  src_override=src01)
                 parts.append((f"shot_{i + 1:03d}.png", encode_png(result.shot01)))
         if not parts:
             detail = "；".join(f"第 {i} 张 {why}" for i, why in failed[:3])
@@ -1423,7 +1444,13 @@ class Handler(BaseHTTPRequestHandler):
                             tuple(actions))
 
     def _api_trim(self) -> None:
-        """只裁边（修图按钮组的单步入口；从当前立绘重算，不叠加）。"""
+        """只裁边（修图按钮组的单步入口；从当前立绘重算，不叠加）。
+
+        WEB-SPEC §1：**没有透明边距**（或内容 <4px）→ 400。auto_trim 对全不
+        透明图返回的是「全幅 rect」的 no-op（bounds 即整幅），端点早年照发
+        200 + ``trimmed:true``——前端显示「已裁边」而图一个像素都没变
+        （静默无操作，W3 按契约收敛成 400）。
+        """
         from arcam.matte_tools import auto_trim
         self._read_json()
         snap = self._store().snapshot()
@@ -1437,6 +1464,10 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "裁不动：四周没有透明边距，或内容太小",
                            "只有在立绘四周有透明留白时裁边才有意义")
         arr, rect = res
+        if tuple(int(v) for v in rect) == (0, 0, int(char01.shape[1]),
+                                           int(char01.shape[0])):
+            raise ApiError(400, "裁不动：四周没有透明边距",
+                           "只有在立绘四周有透明留白时裁边才有意义")
         self._store().set_char(arr, snap["char_name"])
         self._send_json(200, {
             "ok": True,

@@ -59,13 +59,15 @@ API_ROUTES = [
     "/api/matte", "/api/lidar/inspect", "/api/matte-result-as-char",
 ]
 
-# cli.py _add_placement 的 S 默认（WEB-SPEC §2）
+# cli.py _add_placement 的 S 默认（WEB-SPEC §2）。用正则不用整标签字面量：
+# option 上可以挂 data-t（i18n 预接线，见 test_datat_keys_resolve），字面量
+# 会因属性增减误红；两版 option 的逐字一致另由 _select_block 门禁盯。
 HTML_DEFAULTS = [
-    ('<option value="全身" selected>', "shot 默认 全身"),
-    ('<option value="满幅" selected>', "frame 默认 满幅"),
-    ('<option value="world" selected>', "rot_basis 默认 world"),
-    ('<option value="ground" selected>', "mode 默认 ground"),
-    ('<option value="0" selected>', "edge_bar 默认 0"),
+    (r'<option value="全身"\s+selected', "shot 默认 全身"),
+    (r'<option value="满幅"\s+selected', "frame 默认 满幅"),
+    (r'<option value="world"\s+selected', "rot_basis 默认 world"),
+    (r'<option value="ground"\s+selected', "mode 默认 ground"),
+    (r'<option value="0"\s+selected', "edge_bar 默认 0"),
 ]
 
 # params schema 十五键（WEB-SPEC §2 / cli.py 逐字同名）；depth_uploaded 由诊断状态自动带
@@ -434,16 +436,20 @@ def test_param_schema_matches_cli():
     for k in PARAM_KEYS:
         assert re.search(r"\b" + re.escape(k) + r"\s*:", js), f"app.js 缺参数键 {k}"
     # shot/frame/rot/mode/edge 的 CLI choices 在 HTML 里齐全
+    # （option 可挂 data-t，判据放宽到「标签存在」；逐字一致走 _select_block）
     for opt in ("全身", "膝上", "腰上", "胸上", "头肩"):
-        assert f'<option value="{opt}"' in html, f"shot 选项缺 {opt}"
+        assert re.search(r'<option value="%s"[^>]*>' % re.escape(opt), html), \
+            f"shot 选项缺 {opt}"
     for opt in ("自由", "1:1", "4:5", "16:9", "9:16", "满幅"):
-        assert f'<option value="{opt}"' in html, f"frame 选项缺 {opt}"
-    assert '<option value="free">' in html and '<option value="frame">' in html
+        assert re.search(r'<option value="%s"[^>]*>' % re.escape(opt), html), \
+            f"frame 选项缺 {opt}"
+    assert re.search(r'<option value="free"[^>]*>', html) and \
+        re.search(r'<option value="frame"[^>]*>', html)
     for v in ("0", "1", "2", "3", "4"):
-        assert f'<option value="{v}"' in html, f"edge-bar 选项缺 {v}"
-    # 默认值 = S 默认
+        assert re.search(r'<option value="%s"[^>]*>' % v, html), f"edge-bar 选项缺 {v}"
+    # 默认值 = S 默认（HTML_DEFAULTS 是正则，见其定义处注释）
     for frag, why in HTML_DEFAULTS:
-        assert frag in html, f"HTML 默认值与 S 不符：{why}"
+        assert re.search(frag, html), f"HTML 默认值与 S 不符：{why}"
     for frag, why in [
         ('id="p-x-num" step="0.05" value="0"', "x 默认 0"),
         ('id="p-d-num" step="0.05" value="4"', "d 默认 4"),
@@ -851,7 +857,7 @@ def test_i18n_tables_match_between_python_and_js():
     # → 190；v1.10.0 英文支持补全再加 102 条（live.*/hud.* 构图提示/app.js 状态
     # 文案）→ 292。改这条断言前先跑：
     #   .venv/bin/python -c "from arcam.i18n import TXT; print(len(TXT))"
-    assert len(PY_TXT) == 292, f"表条数变了：{len(PY_TXT)}（190 + 英文补全 102）"
+    assert len(PY_TXT) == 338, f"表条数变了：{len(PY_TXT)}（292 + 网页全面中文化 51 − 5 个零引用死键）"
 
 
 def test_mmd_3d_wired():
@@ -951,3 +957,275 @@ def test_webui_has_mmd_3d_stack():
     assert 'src="./mmd.js"' in dhtml and 'type="importmap"' in dhtml
     for token in ("window.ARCAM_MMD", "draw3DInto", "attachMmdKey", "bind3D();"):
         assert token in djs, f"docs/app.js 缺 3D 接线 {token}"
+
+
+# ---------------------------------------------------------------- v1.12.0 W5 审计新增门禁
+
+#: i18n 预接线 pending 清单（v1.12.0 W5 深度打磨轮；键名/文案/用途见
+#: artifacts/W5-web/DONE.md §5）。这些键**已在 HTML/JS 里接线**（data-t 或
+#: mmd.js 的 T(key, fallback)），但键本身还没落地——src/arcam/i18n.py 归编排者
+#: （.ai/COLLABORATION.md §2 / docs/AUDIT-CHARTER.md §3 红线，Worker 不许自己加）。
+#: 协议（三条断言共同维持，缺一不可）：
+#:   ① 键既不在语言表也不在 pending → 红（typo / 漏报告，双语无漏的机械化检查）；
+#:   ② 键已落地却没从 pending 删除 → 红（逼着清理，不让 pending 清单腐烂）；
+#:   ③ pending 里的键在两侧 HTML/JS 里找不到接线 → 红（防只报不接、防键名抄错）。
+#: 编排者按 DONE.md 落地全部键后，本集合应被删空。
+PENDING_I18N_KEYS: set[str] = set()
+# v1.12.0：W5 预接的 51 个键已由编排者全部落地（页面骨架/参数面板/opt.*/mmd.*/
+# err.network），登记表清空。机制保留——将来再预接新键时照样先登记后落地，
+# 「落地了却没删登记」和「登记了却没落地」两个方向都有门禁（见下方测试）。
+
+#: 只报告、不预接线的键（DONE.md §5 同清单）：标签里嵌了 `.val` 读数 span
+#: （char-scale/size-pct/阴影方位/阴影浓度/颗粒强度五行），data-t 的
+#: textContent 覆写会把 span 冲掉——要翻得连同标记结构一起改，属编排者裁决项。
+REPORT_ONLY_I18N_KEYS = {
+    "param.charScale", "param.sizePct", "param.shadowAz", "param.shadowOp",
+    "param.grainScale",
+}
+
+# JS 里取语言文案的调用形态（t/tt/liveT/arcamT + mmd.js 的 T 助手）。
+# 只认**字面量键**：t('upload.' + kind) 这类动态拼接匹配不到（故意——
+# 动态键无法静态核对，其基表 upload.* 由 data-t 门禁间接覆盖）。
+_I18N_CALL_RE = re.compile(r"\b(?:t|tt|liveT|arcamT|T)\((['\"])([^'\"]+)\1\s*[\),]")
+
+
+def _i18n_table(folder):
+    """i18n.js 的 ARCAM_TXT 键集合（JSON 解析，``\\uXXXX`` 转义自动还原）。"""
+    import json
+    src = (folder / "i18n.js").read_text(encoding="utf-8")
+    m = re.search(r"window\.ARCAM_TXT = \{(.*?)\n\};", src, re.S)
+    assert m, f"{folder.name}/i18n.js 里找不到 ARCAM_TXT"
+    return set(json.loads("{" + re.sub(r",\s*$", "", m.group(1).strip()) + "}").keys())
+
+
+def test_no_duplicate_dom_ids():
+    """HTML 里不许有重复 id（v1.12.0 审计实修：btn-batch 两个 index.html 各重一次）。
+
+    踩过的坑：「批量出图」钮写了两遍、共用同一个 id——getElementById 只返回
+    第一个，第二个钮整个点不动，而既有门禁（id 解析 / 死 id 扫描）对重复 id
+    完全无感（引用的字符串在、元素也在、两个都能被 querySelectorAll 刷到）。
+    重复 id 同时是非法 HTML（querySelector 行为未定义）。两边都钉死。
+    """
+    for label, folder in (("webui", WEBUI), ("docs", DOCS)):
+        html = (folder / "index.html").read_text(encoding="utf-8")
+        ids = re.findall(r'\bid="([^"]+)"', html)
+        dup = sorted({i for i in ids if ids.count(i) > 1})
+        assert not dup, f"{label}/index.html 有重复 DOM id: {dup}"
+
+
+def test_datat_keys_resolve():
+    """每个 data-t / data-t-title 键都必须能在语言表解析，或在 pending 清单里。
+
+    抓两类事故：① 键名 typo——切英文后 applyLang 的守卫会跳过覆写，标签静默
+    停在中文（裸键会被显示出来，但守卫让 typo 完全不可见）；② 新文案没进
+    i18n 表（「双语无漏」的机械化检查）。反向断言 pending 不许腐烂：键一旦
+    落地就必须从 PENDING_I18N_KEYS 删除。
+    """
+    for label, folder in (("webui", WEBUI), ("docs", DOCS)):
+        html = (folder / "index.html").read_text(encoding="utf-8")
+        table = _i18n_table(folder)
+        keys = set(re.findall(r'data-t="([^"]+)"', html))
+        keys |= set(re.findall(r'data-t-title="([^"]+)"', html))
+        missing = sorted(keys - table - PENDING_I18N_KEYS)
+        assert not missing, \
+            f"{label}/index.html 有解析不了的 i18n 键（typo 或漏报告给编排者）: {missing}"
+        landed = sorted(keys & table & PENDING_I18N_KEYS)
+        assert not landed, \
+            f"{label}: 这些 pending 键已落地，请从 PENDING_I18N_KEYS 删除: {landed}"
+
+
+def test_js_i18n_keys_resolve():
+    """JS 里每个语言文案调用（t/tt/liveT/arcamT/T）的字面量键都要能解析。
+
+    与 test_datat_keys_resolve 互补：那条守 HTML 静态文案，这条守运行时
+    拼接的文案（状态条/提示条/HUD 读数/3D 错误）。先剥注释再扫——注释里
+    提到的键名（如 hud.js 文档里的 t("hud.*")）不算数。动态拼接键
+    （t('upload.' + kind)）静态核不了，其基表由 data-t 门禁间接覆盖。
+    """
+    for label, folder in (("webui", WEBUI), ("docs", DOCS)):
+        table = _i18n_table(folder)
+        used = set()
+        for js in sorted(folder.glob("*.js")):
+            src = _strip_comments(js.read_text(encoding="utf-8"))
+            used |= {m.group(2) for m in _I18N_CALL_RE.finditer(src)}
+        missing = sorted(used - table - PENDING_I18N_KEYS)
+        assert not missing, \
+            f"{label}: JS 里调了语言表没有的键（typo 或漏报告给编排者）: {missing}"
+        landed = sorted(used & table & PENDING_I18N_KEYS)
+        assert not landed, f"{label}: 这些 pending 键已落地，请从 PENDING_I18N_KEYS 删除: {landed}"
+
+
+def test_pending_i18n_keys_are_wired():
+    """pending 清单里的每个键都必须在两侧 HTML/JS 里真接着线。
+
+    防两种腐烂：① 只在 DONE.md 报了、HTML/JS 没接线（编排者落了键也不生效，
+    白等一轮）；② 键名在报告与接线之间抄错（落地后静默不翻）。判据是**原文
+    出现**（子串）而非调用形态——mmd.js 的 T(kind === 'zip' ? 'mmd.noPmxZip'
+    : …) 是三元形式，调用正则抓不到，子串能抓到。
+    """
+    sources = {}
+    for label, folder in (("webui", WEBUI), ("docs", DOCS)):
+        blob = (folder / "index.html").read_text(encoding="utf-8")
+        blob += "\n".join(p.read_text(encoding="utf-8") for p in sorted(folder.glob("*.js")))
+        sources[label] = blob
+    for key in sorted(PENDING_I18N_KEYS):
+        hits = [label for label, blob in sources.items() if f'"{key}"' in blob or f"'{key}'" in blob]
+        assert hits, f"pending 键 {key} 在两侧 HTML/JS 里都找不到接线（只报不接）"
+    # 只报告的键同样要在 DONE.md 清单里有着落（防 REPORT_ONLY 集合腐烂）
+    for key in sorted(REPORT_ONLY_I18N_KEYS):
+        assert key.startswith("param."), f"REPORT_ONLY_I18N_KEYS 出现非参数面板键: {key}"
+
+
+def test_docs_i18n_byte_identical():
+    """docs/i18n.js 与 webui/i18n.js 逐字节相同（两侧同源；i18n.py 同源生成）。
+
+    既有门禁只逐条比对了 webui 侧与 Python 的表（test_i18n_tables_match…），
+    docs 侧只抽查了 hint.fxWeb 一条——整表漂移（某条只在一边改）发现不了。
+    """
+    a = (WEBUI / "i18n.js").read_bytes()
+    b = (DOCS / "i18n.js").read_bytes()
+    assert a == b, "两侧 i18n.js 不一致（同源文件漂移，某一侧漏改）"
+
+
+def test_zip_writer_sections_match():
+    """两侧 app.js 的手写 zip writer 段一致（store 式最小 zip，v1.7.0 同源移植）。
+
+    3D 素材包 / 批量 zip 都走它；两侧各一份实现，改一边漏一边 = 两版产物
+    结构分叉。剥注释后比对（docs 版多一行 JSDoc 注释，无行为差异）。
+    """
+    def section(js, end_marker):
+        i = js.find("const ZIP_DOS_TIME")
+        assert i >= 0, "app.js 里找不到 zip writer 段（const ZIP_DOS_TIME）"
+        j = js.find(end_marker, i)
+        assert j >= 0, f"app.js 里找不到 zip writer 段结尾标记 {end_marker!r}"
+        return re.sub(r"\s+", " ", _strip_comments(js[i:j])).strip()
+
+    w = section(_files()["app.js"], "/* ================= 7.8 MMD")
+    d = section(_pages_files()["app.js"], "/* [ZIP-END] */")
+    assert w == d, "两侧 zip writer 段不一致（同源移植漂移）"
+    # 关键口径抽查：store 不压缩 + 1980 固定时间戳 + CRC 表驱动
+    for frag in ("0x04034b50", "0x02014b50", "0x06054b50", "ZIP_DOS_DATE", "crc32"):
+        assert frag in w, f"zip writer 段缺关键片段 {frag}"
+
+
+def test_webui_canvas_to_blob_rejects():
+    """canvasToBlob 编码失败必须 reject（v1.12.0 审计实修：旧实现 resolve(null)）。
+
+    toBlob 回调收 **null**（编码失败）时旧实现照样 resolve——下游
+    ``new File([null])`` 把字符串 "null" 存成 4 字节的 .png 交给用户
+    （静默坏产物，用户下到的"图"打不开）。docs 版一直是 reject 口径，
+    这里钉死两侧一致 + OffscreenCanvas 的 convertToBlob 分支在位。
+    """
+    for label, js in (("webui", _files()["app.js"]), ("docs", _pages_files()["app.js"])):
+        body = _strip_comments(_fn_body(js, "canvasToBlob"))
+        assert "reject(new Error(t('err.canvasEncode')))" in body, \
+            f"{label}/canvasToBlob 编码失败应 reject(err.canvasEncode)（resolve(null) 会静默产出坏文件）"
+        assert "convertToBlob" in body, f"{label}/canvasToBlob 应支持 OffscreenCanvas"
+        assert "err.canvasNoEncode" in body, f"{label}/canvasToBlob 缺「画布不支持编码」分支"
+
+
+def test_webui_batch_single_body_read():
+    """/api/batch 错误路径只能读一次响应体（v1.12.0 审计实修：先 blob 再 json）。
+
+    响应体只能读一次：旧实现先 ``res.blob()`` 再 ``res.json()``，错误路径的
+    json 必然抛 "body stream already read"，被 .catch 吞成 null → 用户只看到
+    「出错：HTTP 400」，服务端的人话（超 64MB / 没立绘 / dataURI 坏）整个丢。
+    钉死 res.ok 判断在 res.blob() 之前。
+    """
+    body = _strip_comments(_fn_body(_files()["app.js"], "doBatch"))
+    assert body.find("res.ok") >= 0 and body.find("await res.json()") >= 0
+    assert body.find("res.ok") < body.find("res.blob()"), \
+        "doBatch 必须先判 res.ok 再读 blob（顺序反了错误路径的 json 读不出来）"
+
+
+def test_css_state_rules_parity():
+    """3D 面板状态规则两版都要有（v1.12.0 审计实修：webui 缺三条）。
+
+    refresh3dRows 给选中按钮打 ``className='on'``、d3dNote 切 ``error`` 类、
+    model3dLabel/pose3dLabel 是 ``class="sub"``——三者在 webui/style.css 里
+    原先都没有对应规则：选中的模型/姿势看不出来、3D 报错不是红色、行标题掉回
+    正文 13px（docs 版一直有，SITE-SPEC §3 要求两版控件一致）。
+    """
+    for sel in (r"\.hint\.error\s*\{", r"\.fold\s+button\.on\s*\{", r"\.fold\s+\.sub\s*\{"):
+        for label, folder in (("webui", WEBUI), ("docs", DOCS)):
+            css = (folder / "style.css").read_text(encoding="utf-8")
+            assert re.search(sel, css), f"{label}/style.css 缺规则 {sel}（3D 面板状态不可见）"
+
+
+def test_webui_export3d_layer_target():
+    """3D 模式下「下载立绘层」也必须客户端合成（v1.12.0 审计实修：layer 漏 divert）。
+
+    旧代码只 divert png/bundle：layer 带着 base_only 落到服务端，出的是一张
+    和预览无关的 2D 层（纯 3D 用户没上传过 2D 立绘，只会拿到 400）。
+    docs 版走 charDraw 钩子本来就是 3D 层——两侧口径拉齐。
+    """
+    js = _strip_comments(_files()["app.js"])
+    exp = _fn_body(js, "doExport")
+    assert re.search(r"target === 'png' \|\| target === 'layer' \|\| target === 'bundle'", exp), \
+        "doExport 应把 png/layer/bundle 三个 target 都 divert 到 3D 客户端合成"
+    d3 = _fn_body(js, "doExport3D")
+    assert re.search(r"target === 'layer'", d3), "doExport3D 应处理 layer target"
+    assert "ARCAM_MMD.canvas()" in d3, "3D 立绘层应直接存 MMD 层画布"
+
+
+def test_apply_lang_guard_and_title():
+    """applyLang 的两条不变量（v1.12.0 补）：缺键守卫 + data-t-title。
+
+    ① 缺键守卫：arcamT 对缺 key 返回**裸 key 字符串**，无脑覆写会把标签换成
+       "param.x"——比不翻更糟。判据 ``v !== el.dataset.t``（docs 原有，webui 补）。
+    ② data-t-title：原版 index.html 的 tooltip 翻译机制（#local-chip 的 title
+       是中文说明），没有这段循环切英文后 tooltip 停在中文。
+    """
+    for label, js in (("webui", _files()["app.js"]), ("docs", _pages_files()["app.js"])):
+        body = _strip_comments(_fn_body(js, "applyLang"))
+        # ⚠ 断言要带 `) el.textContent` 收尾："v !== el.dataset.t" 是
+        #    "v !== el.dataset.tTitle" 的子串——只查前半截会被 data-t-title
+        #    循环里的同名判据骗过（变异实测复现：删掉标签守卫门禁照样绿）。
+        assert "v !== el.dataset.t) el.textContent" in body, \
+            f"{label}/applyLang 缺「键不存在则保留原文」守卫（裸键会覆盖中文标签）"
+        assert "data-t-title" in body and "dataset.tTitle" in body, \
+            f"{label}/applyLang 不处理 data-t-title（tooltip 切不了语言）"
+
+
+def test_mmd_js_error_i18n_fallback():
+    """mmd.js 的用户可见文案必须走 T(key, fallback) 兜底（v1.12.0 双语无漏）。
+
+    3D 导入的坏 zip / 无 pmx / 坏压缩 / 引擎载入失败等提示原先全是硬编码
+    中文——EN 用户看到中文。T() 助手在键未落地时回落中文原文（不现裸键），
+    编排者按 DONE.md 落地 mmd.* 键后自动变英文。两侧同源，一起钉。
+    """
+    for label, folder in (("webui", WEBUI), ("docs", DOCS)):
+        src = (folder / "mmd.js").read_text(encoding="utf-8")
+        assert re.search(r"function T\(key, fallback\)", src), \
+            f"{label}/mmd.js 缺 T(key, fallback) 兜底助手"
+        # 兜底语义：键不存在（v === key）时用 fallback，不把裸键显示给用户
+        assert "v !== key) return v;" in src, "T() 必须在键缺失时回落 fallback 原文"
+        # 高频用户可见错误点必须已接线（sniff 的 6 条 + 包内 4 条 + 装配/解析 2 条）
+        for key in ("mmd.rar", "mmd.unknown", "mmd.noPmxZip", "mmd.assembleFail",
+                    "mmd.parseFail", "mmd.engineFail"):
+            assert f"'{key}'" in src, f"{label}/mmd.js 未接线 {key}"
+
+
+def test_network_error_humanized():
+    """fetch 失败的英文 TypeError 必须换成人话（v1.12.0：断网 / 服务被杀）。
+
+    本地版最常见事故：用户关掉「启动AR取景器」终端后继续点渲染——浏览器抛
+    "Failed to fetch"（英文 TypeError），旧实现原样显示在状态条，用户不知道
+    下一步干什么。errMsg 识别网络类错误换 T('err.network', …)（键落地前回落
+    中文原文，不现裸键）。两侧都要有；webui 全部 API 错误过 showApiError 单漏斗。
+    """
+    for label, js in (("webui", _files()["app.js"]), ("docs", _pages_files()["app.js"])):
+        body = _strip_comments(_fn_body(js, "errMsg"))
+        # 判据是 e.name === 'TypeError'（fetch 失败的规范形态），不是消息文本正则
+        # ——后者会把后端 error/hint 里带 "fetch" 字样的人话误吞成通用网络错误
+        # （v1.12.0 对抗复核 P3-1）。
+        assert re.search(r"e\s*&&\s*e\.name\s*===\s*['\"]TypeError['\"]", body), \
+            f"{label}/errMsg 不识别网络类错误（浏览器英文 TypeError 会原样上状态条）"
+        assert "T('err.network'" in body, f"{label}/errMsg 未走 T() 兜底取 err.network"
+    webui = _strip_comments(_files()["app.js"])
+    assert "t('note.error', errMsg(e))" in webui, \
+        "webui showApiError 应经过 errMsg（全部 API 错误的单漏斗）"
+    # docs 的五个 API catch 点（render/matte/三个导出）都要过人话化
+    docs = _strip_comments(_pages_files()["app.js"])
+    assert docs.count("errMsg(e)") >= 5, \
+        f"docs 只有 {docs.count('errMsg(e)')} 处 errMsg(e)——render/matte/三个导出的 catch 都要过"

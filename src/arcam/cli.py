@@ -999,13 +999,18 @@ def _load_depth_arg(path, what: str):
     try:
         return load_depth(p)
     except ValueError as e:
-        raise CliError(str(e)) from None
+        # depth.py 的人话报错是中文单语（B4 分区文件，只读）——包一层双语前缀，
+        # --lang en 的用户也看得出"深度文件读不懂"这一类问题（退出码不变，仍 1）
+        raise CliError(_h(f"深度文件读不懂：{e}",
+                          f"Cannot read the depth file: {e}")) from None
 
 
 def _lidar_env_of(depth):
     """fit_ground_plane → camera_env_from_plane（LIDAR-SPEC §4①）。
 
-    懒加载 arcam.plane：模块缺失或点数不够（ValueError）都转人话 CliError。
+    懒加载 arcam.plane：模块缺失、点数不够或拟合不出平面（ValueError）都转人话
+    CliError（退出 1）——不让裸 ValueError 从命令里漏成 traceback，也不让
+    plane.py 的中文单语报错在 --lang en 下不可读。
     """
     try:
         from arcam.plane import camera_env_from_plane, fit_ground_plane
@@ -1014,10 +1019,15 @@ def _lidar_env_of(depth):
             _h(f"读不到 LiDAR 平面拟合模块：{exc}（arcam.plane 应随包一起提供；"
                "若安装被裁剪过，契约见 docs/LIDAR-SPEC.md §3）",
                f"Cannot import the LiDAR plane-fitting module: {exc} (arcam.plane "
-               "ships with the package; if the install was trimmed, see the contract "
-               "in docs/LIDAR-SPEC.md §3)")) from None
-    plane = fit_ground_plane(depth)
-    return camera_env_from_plane(plane, roll_deg=depth.roll_deg)
+               f"ships with the package; if the install was trimmed, see the contract "
+               f"in docs/LIDAR-SPEC.md §3)")) from None
+    try:
+        plane = fit_ground_plane(depth)
+        return camera_env_from_plane(plane, roll_deg=depth.roll_deg)
+    except ValueError as e:
+        raise CliError(_h(f"深度帧拟合不出地面平面：{e}",
+                          f"Cannot fit a ground plane from the depth frame: "
+                          f"{e}")) from None
 
 
 def _compose_kw(args) -> dict:
@@ -1223,6 +1233,11 @@ def cmd_recipe_save(args) -> int:
     else:
         recipe = _recipe_of_args(args)
     if not recipe:
+        # 防御性不可达（v2.1.0 审计逐行确认过两条来源）：_recipe_of_args 收的 14 个
+        # 键里 9 个有非 None 的 argparse 默认值（hp/feq/shot/char_scale/frame/
+        # mode/rot_basis/size_pct/edge_bar），_recipe_from_scene 又恒给出
+        # rot_basis——谁都产不出空 dict。留着是防将来新增"默认全 None"的摆放键，
+        # 真到那天它就是唯一一道"空配方不许静默落盘"的闸。
         raise CliError(_h("配方是空的：给摆放参数（--pitch 12 等）或用 --from scene.json",
                           "The recipe is empty: pass placement flags (e.g. --pitch 12) "
                           "or --from scene.json"))
@@ -1464,14 +1479,21 @@ def cmd_watch(args) -> int:
     """监视素材变化自动重出图（轮询式；跨平台最稳）。
 
     人话输出跟随 ``--lang``（中英双语，见 :func:`_h`）。
+
+    退出码跟随**最后一遍**渲染的成败：``--once`` 的承诺是"等于带日志的 render"，
+    出图失败就必须 exit 1。旧实现里 run_once 把异常吞成一行日志、cmd_watch 恒返
+    0 —— 失败被吞、退出码与事实相反（v2.1.0 审计修复：``watch --once`` 指到
+    坏照片时输出"失败"却 exit 0）。监视循环同理：Ctrl-C 时若最后一遍是失败的，
+    也如实报 1，不让"日志里见过失败"与"退出码说成功"两种结论并存。
     """
     photo_p = _need(args.photo, _h("背景照片", "background photo"))
     char_p = _need(args.char, _h("立绘", "character"))
     out = Path(args.out)
     watched = [photo_p, char_p]
     note: list = []
+    ok = True
 
-    def run_once(reason: str) -> None:
+    def run_once(reason: str) -> bool:
         t0 = time.perf_counter()
         try:
             char01 = image_to_rgba01(char_p)
@@ -1483,13 +1505,17 @@ def cmd_watch(args) -> int:
             print(_h(f"[{_stamp()}] {reason} → {out.name}（{ms:.0f} ms{tail}）",
                      f"[{_stamp()}] {reason} → {out.name} ({ms:.0f} ms{tail})"),
                   flush=True)
+            return True
         except Exception as exc:
+            # 监视循环里单遍失败不该把 watcher 带崩（素材可能正在被写入）——
+            # 但成败要记下来，退出码如实反映最后一遍
             print(_h(f"[{_stamp()}] {reason} → 失败：{exc}",
                      f"[{_stamp()}] {reason} → failed: {exc}"), flush=True)
+            return False
 
-    run_once(_h("首次", "first run"))
+    ok = run_once(_h("首次", "first run"))
     if args.once:
-        return 0
+        return 0 if ok else 1
     print(_h(f"监视中（{photo_p.name} / {char_p.name}，每 {args.interval:g}s 轮询）"
              f"—— Ctrl-C 退出",
              f"Watching ({photo_p.name} / {char_p.name}, polling every "
@@ -1502,12 +1528,12 @@ def cmd_watch(args) -> int:
             now = _sig_of(watched)
             if now != last:
                 changed = [Path(a[0]).name for a, b in zip(now, last) if a != b]
-                run_once(_h("变了：" + "、".join(changed),
-                            "changed: " + ", ".join(changed)))
+                ok = run_once(_h("变了：" + "、".join(changed),
+                                 "changed: " + ", ".join(changed)))
                 last = _sig_of(watched)
     except KeyboardInterrupt:
         print(_h("\n已停止监视。", "\nStopped watching."))
-    return 0
+    return 0 if ok else 1
 
 
 def _stamp() -> str:
@@ -1634,8 +1660,7 @@ def cmd_multi(args) -> int:
         out_img = _paste_layer(out_img, layer, rect)
     img_u8 = _to_u8(out_img)
     out = Path(args.out)
-    if out.parent and not out.parent.exists():
-        out.parent.mkdir(parents=True, exist_ok=True)
+    # 父目录由 save_png 自己建（video.save_png 入口同款）——这里不再重复 mkdir
     save_png(img_u8, out)
     print(_h(f"已合成 {len(layers)} 层 → {out}（{width}×{height}）",
              f"Composited {len(layers)} layers → {out} ({width}×{height})"))
@@ -2139,7 +2164,13 @@ def _flood(arr):
 
 
 def cmd_video(args) -> int:
-    track = load_track(args.track)
+    try:
+        track = load_track(args.track)
+    except ValueError as e:
+        # video.py 的轨道报错是中文单语（同分区但消息表在 i18n.TXT 之外）——包一层
+        # 双语前缀，--lang en 也看得出"轨道读不进去"这一类问题
+        raise CliError(_h(f"轨道读不进去：{e}",
+                          f"Cannot read the track: {e}")) from None
     problems = track_issues(track)
     if problems:
         raise CliError(_h("轨道有问题：\n  - " + "\n  - ".join(problems),
@@ -2204,7 +2235,12 @@ def _print_summary(track) -> None:
 
 
 def cmd_check(args) -> int:
-    track = load_track(args.track)
+    try:
+        track = load_track(args.track)
+    except ValueError as e:
+        # 与 cmd_video 同一口径：轨道读不进去 → 双语人话（内文来自 video.py）
+        raise CliError(_h(f"轨道读不进去：{e}",
+                          f"Cannot read the track: {e}")) from None
     problems = track_issues(track)
     _print_summary(track)
     if problems:
@@ -2329,7 +2365,10 @@ def cmd_lidar_inspect(args) -> int:
         plane = fit_ground_plane(frame)
         env = camera_env_from_plane(plane, roll_deg=frame.roll_deg)
     except ValueError as e:
-        raise CliError(str(e)) from None
+        # depth.py / plane.py 的报错是中文单语（B4 分区文件，只读）——包一层
+        # 双语前缀，--lang en 也看得出是"深度帧读不懂/拟合不出"
+        raise CliError(_h(f"深度帧诊断失败：{e}",
+                          f"Depth diagnostics failed: {e}")) from None
     coverage = float(np.isfinite(np.asarray(frame.depth_m, dtype=np.float64)).mean())
     height, width = int(frame.depth_m.shape[0]), int(frame.depth_m.shape[1])
     info = {

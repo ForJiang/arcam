@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -395,3 +396,329 @@ def test_track_issues_rejects_bad_enums(tmp_path: Path) -> None:
             render_track(np.full((96, 64, 3), 128, dtype=np.uint8), track,
                          make_char(), tmp_path / "never-written")
         assert not (tmp_path / "never-written").exists()
+
+
+# ─────────────────────── 深度打磨轮：校验分支 / bg 解析 / 输出格式 ───────────────────────
+# 编排者体检：video.py 88%（45 语句未覆盖），集中在 load_track 的结构校验分支、
+# track_issues 的越界分支、_fit_rgb01/_resolve_bg 的边界与 mp4/gif 输出路径。
+# 每条新测试都做了变异验证（证据见 artifacts/W1-cli-tests/DONE.md）。
+
+# ---------- load_track：结构校验的剩余分支 ----------
+
+def test_load_rejects_non_dict_top_level(tmp_path: Path) -> None:
+    """顶层是数组/标量 → 人话报错（否则后面 .get 直接 AttributeError）。"""
+    p = tmp_path / "arr.json"
+    p.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    with pytest.raises(ValueError, match="顶层应是一个 JSON 对象"):
+        load_track(p)
+
+
+@pytest.mark.parametrize("data,expect", [
+    ({"mode": "floor", "keys": [{"t": 0, "distance_m": 4}]}, "mode 只能"),
+    ({"shot": "半身", "keys": [{"t": 0, "distance_m": 4}]}, "shot 必须"),
+    ({"fps": 0, "keys": [{"t": 0, "distance_m": 4}]}, "fps 应为正数"),
+    ({"width": 0, "keys": [{"t": 0, "distance_m": 4}]}, "画布尺寸应为正整数"),
+    ({"mode": 5, "keys": [{"t": 0, "distance_m": 4}]}, "应为字符串"),
+])
+def test_load_rejects_bad_top_level_values(tmp_path: Path, data, expect) -> None:
+    """顶层枚举/正数/整数/字符串四类校验各有一条人话错误。"""
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match=expect):
+        load_track(p)
+
+
+@pytest.mark.parametrize("key,expect", [
+    (5, "应是一个 JSON 对象"),
+    ({"t": 0.0}, "缺少字段 'distance_m'"),
+    ({"t": 0.0, "distance_m": "far"}, "应为数字"),
+    ({"t": 0.0, "distance_m": 4, "height_m": "x"}, "应为数字或 null"),
+    ({"t": 0.0, "distance_m": 4, "mode": "floor"}, "mode 只能"),
+])
+def test_load_rejects_bad_key_fields(tmp_path: Path, key, expect) -> None:
+    """键级校验：非对象 / 缺必需数字 / 数字是字符串 / 可选量类型 /  mode 枚举。"""
+    p = tmp_path / "key.json"
+    p.write_text(json.dumps({"keys": [key]}), encoding="utf-8")
+    with pytest.raises(ValueError, match=expect):
+        load_track(p)
+
+
+def test_load_rejects_non_finite_key_value(tmp_path: Path) -> None:
+    """键内可选量是 NaN（json.loads 默认放行 NaN/Infinity 字面量）→ 人话报错。
+
+    放行的话 NaN 会一路插值进 compose，出图静默劣化——与 CLI 侧 _finite 同口径。
+    """
+    p = tmp_path / "nan.json"
+    p.write_text(json.dumps({"keys": [
+        {"t": 0.0, "distance_m": 4.0, "height_m": float("nan")}]}),
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="不是有限数"):
+        load_track(p)
+
+
+def test_reject_unknown_suggests_close_match(tmp_path: Path) -> None:
+    """错别字段名给出相近的正确名（difflib）——不静默忽略用户写错的键。"""
+    p = tmp_path / "typo.json"
+    p.write_text(json.dumps({"widht": 64, "keys": [{"t": 0, "distance_m": 4}]}),
+                    encoding="utf-8")
+    with pytest.raises(ValueError, match="是否想写 'width'"):
+        load_track(p)
+
+
+def test_text_validator_guards() -> None:
+    """_text 的两条守卫：缺字段 / 非字符串。
+
+    ⚠ 缺字段那条经 load_track 走不到（_text_or 先挡了）——与 _num 的守卫对称
+    保留，这里直调钉住行为，防将来有人删掉"防御性"半边。
+    """
+    from arcam.video import _text
+    with pytest.raises(ValueError, match="缺少字段"):
+        _text({}, "mode", "轨道顶层")
+    with pytest.raises(ValueError, match="应为字符串"):
+        _text({"mode": 5}, "mode", "轨道顶层")
+
+
+def test_save_track_creates_parent_dirs(tmp_path: Path) -> None:
+    """save_track 的嵌套路径：父目录自动建，且与 load_track 严格往返。"""
+    track = make_track([PoseKey(t=0.0, distance_m=4.0),
+                        PoseKey(t=1.0, distance_m=5.0, mode="free")])
+    p = tmp_path / "deep" / "deeper" / "t.json"
+    save_track(track, p)
+    assert load_track(p) == track
+
+
+# ---------- track_issues：轨道级标量与键内量的越界分支 ----------
+
+@pytest.mark.parametrize("field,value,expect", [
+    ("fps", 0.0, "fps 应为正数"),
+    ("height_m", 0.0, "相机高度"),
+    ("feq_mm", 0.0, "等效焦距"),
+    ("subject_height_m", 0.0, "人物身高"),
+    ("char_scale", 0.0, "立绘倍率"),
+    ("size_pct", 0.0, "立绘占比"),
+])
+def test_track_issues_rejects_bad_scalars(field, value, expect) -> None:
+    """PoseTrack 可直接构造：轨道级标量越界一条都别放过（渲染前自检拦下）。"""
+    track = PoseTrack(keys=[PoseKey(t=0.0, distance_m=4.0)],
+                      **{**TRACK_KW, field: value})
+    problems = track_issues(track)
+    assert any(expect in m for m in problems), (field, problems)
+
+
+def test_track_issues_rejects_tiny_canvas_and_negative_key_scalar() -> None:
+    """画布 <8px（原版 compositionHints 直接罢工）+ 键内可选量为负。"""
+    tiny = PoseTrack(keys=[PoseKey(t=0.0, distance_m=4.0)],
+                     **{**TRACK_KW, "width": 4})
+    assert any("画布太小" in m for m in track_issues(tiny))
+    neg = make_track([PoseKey(t=0.0, distance_m=4.0, height_m=-1.0)])
+    problems = track_issues(neg)
+    assert any("height_m 应为正数" in m for m in problems), problems
+
+
+# ---------- 图片 IO 的边界 ----------
+
+def test_save_png_rejects_bad_shape(tmp_path: Path) -> None:
+    """数组不是 (H,W,3)/(H,W,4) → 人话 ValueError（不把形状错误带进 PIL）。"""
+    from arcam.video import save_png
+    with pytest.raises(ValueError, match="图片数组"):
+        save_png(np.zeros((5, 5), dtype=np.uint8), tmp_path / "x.png")
+
+
+def test_read_image_missing_files(tmp_path: Path) -> None:
+    """两个读图入口对不存在的文件都是人话 ValueError（不是 FileNotFoundError）。"""
+    from arcam.video import _read_image, image_to_rgba01
+    with pytest.raises(ValueError, match="找不到图片"):
+        _read_image(tmp_path / "nope.png")
+    with pytest.raises(ValueError, match="找不到图片"):
+        image_to_rgba01(tmp_path / "nope.png")
+
+
+def test_save_png_creates_parent_dirs(tmp_path: Path) -> None:
+    """save_png 的嵌套路径：父目录自动建。"""
+    from arcam.video import save_png
+    p = tmp_path / "a" / "b" / "x.png"
+    save_png(np.zeros((4, 4, 3), np.uint8), p)
+    assert p.is_file()
+
+
+# ---------- 背景解析：形状 / alpha / 空目录 ----------
+
+def test_render_bg_bad_shape(tmp_path: Path) -> None:
+    """背景数组形状不合法 → 人话 ValueError（_fit_rgb01 的入口校验）。"""
+    track = make_track([PoseKey(t=0.0, distance_m=4.0)])
+    with pytest.raises(ValueError, match="背景图片应为"):
+        render_track(np.zeros((4, 4, 5), dtype=np.uint8), track, make_char(),
+                     tmp_path / "o")
+
+
+def test_render_bg_rgba_drops_alpha(tmp_path: Path) -> None:
+    """(H,W,4) 背景丢掉 alpha 只用 RGB——alpha=0 也不该让整幅发黑/报错。"""
+    track = make_track([PoseKey(t=0.0, distance_m=4.0)])
+    rgba_bg = np.zeros((96, 64, 4), dtype=np.uint8)
+    rgba_bg[..., 0] = 200
+    rgba_bg[..., 1] = 40
+    rgba_bg[..., 2] = 40
+    rgba_bg[..., 3] = 0
+    frames = render_track(rgba_bg, track, make_char(), tmp_path / "out_rgba")
+    with Image.open(frames[0]) as im:
+        corner = tuple(np.asarray(im.convert("RGB"))[2, 2])
+    assert corner == (200, 40, 40), corner
+
+
+def test_render_bg_dir_without_images(tmp_path: Path) -> None:
+    """帧目录里没有图片（空目录 / 只有非图片）→ 人话 ValueError，不静默出黑帧。"""
+    track = make_track([PoseKey(t=0.0, distance_m=4.0)])
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(ValueError, match="没有图片"):
+        render_track(empty, track, make_char(), tmp_path / "o")
+    txt = tmp_path / "txtdir"
+    txt.mkdir()
+    (txt / "readme.txt").write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError, match="没有图片"):
+        render_track(txt, track, make_char(), tmp_path / "o2")
+
+
+# ---------- 输出格式：gif 防御 / mp4 懒加载与失败回退 ----------
+
+def test_write_gif_no_frames_is_noop(tmp_path: Path) -> None:
+    """帧列表为空 → 不写文件不崩（render_track 只在有帧时调它，防御分支）。"""
+    from arcam.video import _write_gif
+    out = tmp_path / "video.gif"
+    _write_gif([], out, 4.0)
+    assert not out.exists()
+
+
+def test_render_rejects_bad_char_shape(tmp_path: Path) -> None:
+    """立绘不是 (H,W,4) → 人话 ValueError（render_track 的入口校验）。"""
+    track = make_track([PoseKey(t=0.0, distance_m=4.0)])
+    with pytest.raises(ValueError, match="立绘应为"):
+        render_track(np.full((96, 64, 3), 128, dtype=np.uint8), track,
+                     np.zeros((10, 10, 3)), tmp_path / "o")
+
+
+def test_open_mp4_without_imageio(tmp_path: Path, monkeypatch,
+                                  capsys: pytest.CaptureFixture) -> None:
+    """没装 imageio/imageio-ffmpeg：只出 PNG 序列 + 提示怎么补（不报错）。"""
+    monkeypatch.setitem(sys.modules, "imageio", None)
+    track = make_track([PoseKey(t=0.0, distance_m=4.0)])
+    frames = render_track(np.full((96, 64, 3), 128, dtype=np.uint8), track,
+                          make_char(), tmp_path / "out")
+    assert len(frames) == 1
+    assert not (tmp_path / "out" / "video.mp4").exists()
+    assert "没有 mp4 成片" in capsys.readouterr().out
+
+
+def test_open_mp4_retries_without_macro_block_size(tmp_path: Path, monkeypatch,
+                                                   capsys) -> None:
+    """老版本 imageio 不收 macro_block_size：TypeError 后换参数形式重试一次。"""
+    import imageio.v2 as iio
+    calls = {"n": 0}
+
+    def fake_get_writer(path, **kw):
+        calls["n"] += 1
+        if "macro_block_size" in kw:
+            raise TypeError("unexpected keyword argument 'macro_block_size'")
+
+        class _W:
+            def append_data(self, arr):
+                pass
+
+            def close(self):
+                pass
+
+        return _W()
+
+    monkeypatch.setattr(iio, "get_writer", fake_get_writer)
+    track = make_track([PoseKey(t=0.0, distance_m=4.0),
+                        PoseKey(t=0.5, distance_m=4.5)])
+    frames = render_track(np.full((96, 64, 3), 128, dtype=np.uint8), track,
+                          make_char(), tmp_path / "out")
+    assert len(frames) == 3 and calls["n"] == 2
+
+
+def test_open_mp4_gives_up_after_type_error(tmp_path: Path, monkeypatch,
+                                            capsys) -> None:
+    """两种参数形式都 TypeError → 放弃 mp4（只出 PNG），并提示怎么补。"""
+    import imageio.v2 as iio
+
+    def always_type_error(path, **kw):
+        raise TypeError("nope")
+
+    monkeypatch.setattr(iio, "get_writer", always_type_error)
+    track = make_track([PoseKey(t=0.0, distance_m=4.0)])
+    frames = render_track(np.full((96, 64, 3), 128, dtype=np.uint8), track,
+                          make_char(), tmp_path / "out")
+    assert len(frames) == 1
+    assert "没有 mp4 成片" in capsys.readouterr().out
+
+
+def test_render_mp4_append_failure_keeps_png(tmp_path: Path, monkeypatch,
+                                             capsys) -> None:
+    """writer 建成但 append 失败：丢 mp4 保 PNG 序列 + 明确警告（不静默丢帧）。"""
+    import imageio.v2 as iio
+
+    class _BadAppend:
+        def append_data(self, arr):
+            raise RuntimeError("ffmpeg 炸了")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(iio, "get_writer", lambda path, **kw: _BadAppend())
+    track = make_track([PoseKey(t=0.0, distance_m=4.0),
+                        PoseKey(t=0.5, distance_m=4.5)])
+    frames = render_track(np.full((96, 64, 3), 128, dtype=np.uint8), track,
+                          make_char(), tmp_path / "out")
+    assert len(frames) == 3
+    out = capsys.readouterr().out
+    assert "mp4 写入失败" in out and "没有 mp4 成片" in out
+
+
+def test_render_mp4_close_failure_is_contained(tmp_path: Path, monkeypatch,
+                                               capsys) -> None:
+    """close() 抛错也被 finally 吞掉：PNG 序列照常交付（收尾不把整批带崩）。"""
+    import imageio.v2 as iio
+
+    class _BadClose:
+        def append_data(self, arr):
+            pass
+
+        def close(self):
+            raise RuntimeError("close 炸了")
+
+    monkeypatch.setattr(iio, "get_writer", lambda path, **kw: _BadClose())
+    track = make_track([PoseKey(t=0.0, distance_m=4.0)])
+    frames = render_track(np.full((96, 64, 3), 128, dtype=np.uint8), track,
+                          make_char(), tmp_path / "out")
+    assert len(frames) == 1
+    assert "没有 mp4 成片" in capsys.readouterr().out
+
+
+def test_load_rejects_non_finite_required_number(tmp_path: Path) -> None:
+    """必需数字（t/distance_m）是 NaN → 人话报错（与键内可选量同一口径）。
+
+    json.loads 默认放行 NaN/Infinity 字面量，_num 这道有限数闸是插值链的入口。
+    """
+    p = tmp_path / "nan_t.json"
+    p.write_text(json.dumps({"keys": [
+        {"t": 0.0, "distance_m": float("inf")}]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="不是有限数"):
+        load_track(p)
+
+
+def test_open_mp4_gives_up_on_writer_error(tmp_path: Path, monkeypatch,
+                                           capsys) -> None:
+    """get_writer 抛非 TypeError 的异常（ffmpeg 缺失等）→ 放弃 mp4 只出 PNG。"""
+    import imageio.v2 as iio
+
+    def boom(path, **kw):
+        raise RuntimeError("FFMPEG 不可用")
+
+    monkeypatch.setattr(iio, "get_writer", boom)
+    track = make_track([PoseKey(t=0.0, distance_m=4.0)])
+    frames = render_track(np.full((96, 64, 3), 128, dtype=np.uint8), track,
+                          make_char(), tmp_path / "out")
+    assert len(frames) == 1
+    assert not (tmp_path / "out" / "video.mp4").exists()
+    assert "没有 mp4 成片" in capsys.readouterr().out

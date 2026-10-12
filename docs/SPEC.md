@@ -11,9 +11,10 @@
 CLI 把立绘合成进照片/视频帧，并在位姿轨道下逐帧渲染。scene.json 与原版 100% 同构
 （同名字段、同顺序、同单位、同取整语义），使「Python 出的图能和原版工具互认配方」。
 
-不做：实时摄像头（Python 侧只接受已给定的 yaw/pitch/roll 参数，姿态数据源与版式
-布局 Shell 都是浏览器专属）；MMD 3D 运行时（three.js 生态，Python 侧记录接口契约
-与相机矩阵交叉验证，见 §6）。
+不做：实时摄像头（Python 侧只接受已给定的 pitch/roll 参数，姿态数据源与版式
+布局 Shell 都是浏览器专属；原版 `drawFigure` 里的 `yaw` 是恒 0 的常量，
+index.html:1840，Python 侧无对应输入）；MMD 3D 运行时（three.js 生态，Python 侧
+记录接口契约与相机矩阵交叉验证，见 §6）。
 
 ## 1. 共享约定（违反即打回）
 
@@ -29,11 +30,11 @@ CLI 把立绘合成进照片/视频帧，并在位姿轨道下逐帧渲染。sce
    `(W/2, H/2)`；`pitch>0` 俯视、`roll>0` 画面顺时针。
 6. **溯源**：每个公开函数的 docstring 必须注明对应 JS 的 `index.html:<line>` /
    `cutout.js:<line>`（从 artifact 里抄）。
-7. **非有限输入**（v2.0.0 起）：`pitch/roll/feq` 传 inf/nan → `project`/`place`
+7. **非有限输入**（v1.10.0 起）：`pitch/roll/feq` 传 inf/nan → `project`/`place`
    返回 None（对应原版 JS 侧 NaN 传播后比较全假、落位解不出的收口），**不再抛
    ValueError**；`snap_to_edge` 的 `rot=±inf` 归一成 0；`js_to_fixed` 对 nan 抛
    `InvalidOperation`（无法表示，调用方先挡）；`scene.json` 不写 NaN 字面量
-   （`save_scene` 落 null）。CLI 侧 12 个浮点旗标在入口就拒 nan/inf（argparse
+   （`save_scene` 落 null）。CLI 侧 14 个浮点旗标在入口就拒 nan/inf（argparse
    类型函数，人话报错 exit 2）——放行只会出一张没有立绘的图还零提示；
    webapp 对同批键 400，两边同口径。
 8. **风格**：公开函数完整类型标注；模块级 docstring 一段；不写实现过程注释，只写
@@ -42,6 +43,9 @@ CLI 把立绘合成进照片/视频帧，并在位姿轨道下逐帧渲染。sce
    `numeric.py` / `geometry.py`，不得自建副本。
 
 ## 2. 模块划分与归属（互斥分区）
+
+> 本表是 v1.0 并行实现期的分工记录（当时只有 13 个模块）。现行模块清单以
+> `arcam stats` 为准（23 个 Python 模块），历次审计轮的分区见 `docs/AUDIT-CHARTER.md`。
 
 | 归属 | 文件（src/arcam/ 下） | 测试（tests/ 下） |
 |---|---|---|
@@ -112,13 +116,18 @@ class SpritePlacement:
     rot: float           # 弧度，绕图心
 
 def ground_placement(char_rgba: np.ndarray, subj: Subject, cam: Camera,
-                     char_scale: float = 1.0, rot_basis: str = 'world') -> SpritePlacement | None
+                     char_scale: float = 1.0, rot_basis: str = 'world',
+                     shot: str = '全身') -> SpritePlacement | None
 # index.html:2789-2840。yb=(1-SHOTS[shot])·Hp；pb=project(x, yb-h, d)；pt=project(x, Hp-h, d)；
 # span=hypot(pt-pb)；h=span*char_scale；锚点=pb；rot: rot_basis=='frame' → 0  else atan2(ux,-uy)。
-# shot 缺省 '全身'。None 情形：无图/相机后方/span<2。
+# shot 缺省 '全身'（老存档兜底）。None 情形：无图/相机后方/span<2。
 
-def free_placement(char_rgba, subj, cam, size_pct: float = 60.0, rot_deg: float = 0.0) -> SpritePlacement | None
-# index.html:2945-2981（freeRaw/freePlacement）。按画面高度 size_pct% 摆，位置 freeP。
+def free_placement(char_rgba, subj, cam, size_pct: float = 60.0, rot_deg: float = 0.0,
+                   free_p: tuple[float, float] = (0.5, 0.6), edge_bar: int = 0,
+                   rect: Rect | None = None) -> SpritePlacement | None
+# index.html:2945-2981（freeRaw/freePlacement）。按画面高度 size_pct% 摆，位置 free_p。
+# edge_bar 非 0 时过 snap_to_edge 吸附到 rect；rect=None 不吸附——原版的 snapRect
+# 取「取景框 ∩ 可见区」，可见区属浏览器布局外壳，由调用方显式传入（v1.1.0 补）。
 
 def current_placement(char_rgba, subj, cam, *, mode='ground', **kw) -> SpritePlacement | None
 # index.html:2981。mode 分派。
@@ -158,9 +167,16 @@ def measure_region(rgb01: np.ndarray, region: Rect, levels: int = 32) -> LightSa
 
 def light_levels(sample: LightSample) -> tuple[float, float]        # (lo, hi) 或按源码
 def char_lum(char_rgba: np.ndarray) -> float                        # index.html:1262-1283
-def bake_lit(char_rgba: np.ndarray, sample: LightSample, canvas: tuple[int, int]) -> np.ndarray
+def bake_lit(char_rgba: np.ndarray, sample: LightSample | None,
+             canvas: tuple[int, int], *, grain: bool = True,
+             grain_scale: float = 1.0) -> np.ndarray
 # index.html:1285-1447：按立绘自身亮度分桶，把立绘映射到采样到的环境亮度。
-# 三条 LUT 边界的取整必须 js_round。
+# 三条 LUT 边界的取整必须 js_round。grain 只门控颗粒段（v1.9.0 起，曲线/白平衡/
+# 饱和数值不动）；grain_scale=1.0 时与原版逐位一致（golden 有逐字节向量）。
+# sample 为 None → 原样返回立绘（原版「总开关关/采样无效」分支）。
+
+def grain_tile() -> np.ndarray                    # index.html:1168-1180，Float64(65536)
+def lit_scale_bucket(scale: float) -> float       # index.html:1455-1458
 ```
 
 ### 3.5 sprite.py（P2）
@@ -195,16 +211,38 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
                  subj: Subject, cam: Camera, *, frame_key: str,
                  light: LightSample | None = None, mode: str = 'ground',
                  size_pct: float = 60.0, char_scale: float = 1.0,
-                 rot_basis: str = 'world', tone: bool = False) -> ComposedShot
+                 rot_basis: str = 'world', tone: bool = False,
+                 shot: str = '全身', edge_bar: int = 0,
+                 depth: LiDARFrame | None = None,
+                 env_overrides: dict | None = None,
+                 shadow: bool = True, grain: bool = True,
+                 sample_light: bool = True,
+                 shadow_az: float = 0.0, shadow_opacity: float = 1.0,
+                 grain_scale: float = 1.0,
+                 with_char_layer: bool = True) -> ComposedShot
 # index.html:3673-3701 composeShot 六步：R=frameRect → 铺源帧 → 采光（light 优先）
 # → drawCharTo（TONE_ON=!!src 时先 tone 匹配）→ 小数偏移裁切 → 返回。
 # src 为 None（仅立绘层路径）：不铺帧、不采现场光（light 参数给才用）。
+# v1.0 冻结签名之后的追加一律带默认值关键字：shot/edge_bar（景别与贴边）、
+# depth/env_overrides（LiDAR，见 docs/LIDAR-SPEC.md §4）、shadow/grain/
+# sample_light/shadow_az/shadow_opacity/grain_scale（光影三门 + 阴影两参 +
+# 颗粒强度）、with_char_layer（性能开关，False 时不出立绘层）。
 
-def compose_char_layer(char_rgba01: np.ndarray, subj: Subject, cam: Camera,
-                       *, light: LightSample | None = None, mode: str = 'ground',
+def compose_char_layer(char_rgba01: np.ndarray, subj: Subject, cam: Camera, *,
+                       frame_key: str = '满幅',
+                       light: LightSample | None = None, mode: str = 'ground',
                        size_pct: float = 60.0, char_scale: float = 1.0,
-                       tone: bool = False) -> tuple[np.ndarray, Rect]
+                       rot_basis: str = 'world', tone: bool = False,
+                       shot: str = '全身', edge_bar: int = 0,
+                       depth: LiDARFrame | None = None,
+                       env_overrides: dict | None = None,
+                       shadow: bool = True, grain: bool = True,
+                       sample_light: bool = True,
+                       shadow_az: float = 0.0, shadow_opacity: float = 1.0,
+                       grain_scale: float = 1.0
+                       ) -> tuple[np.ndarray, Rect]
 # index.html:3709-3712 buildCharCanvas：同变换、不铺帧的透明立绘层（RGBA uint8）。
+# 参数组与 compose_shot 对齐（裁切框/采光/落位一致，层与出图逐像素对得上）。
 ```
 
 ### 3.7 scene.py（P3）
@@ -212,7 +250,8 @@ def compose_char_layer(char_rgba01: np.ndarray, subj: Subject, cam: Camera,
 ```python
 def build_scene(rect: Rect, placement: SpritePlacement | None, subj: Subject, cam: Camera,
                 *, frame_key: str, char_rgba01: np.ndarray | None, char_name: str,
-                mode: str, edge_bar: int = 0) -> dict
+                mode: str, edge_bar: int = 0, shot: str = '全身',
+                char_scale: float = 1.0) -> dict
 # index.html:3729-3789 buildScene 的 1:1 同构：version/image/frame/camera/subject/
 # ground/shot/charScale/edge/character/mmd。JSON key 顺序一致；mmd=None。
 # 取整语义：image.width=js_round(R.w) 等；camera.focalPx=js_to_fixed(...,2)；
@@ -281,22 +320,37 @@ class PoseTrack:
 def load_track(path) -> PoseTrack       # JSON schema 见 README
 def save_track(track: PoseTrack, path) -> None
 def render_track(bg_source, track: PoseTrack, char_rgba01: np.ndarray,
-                 out_dir, *, tone: bool = False) -> list[Path]
+                 out_dir, *, tone: bool = False, gif: bool = False) -> list[Path]
 # bg_source: 单张 RGB（静止背景）或帧目录（逐帧命名 frame_000001.png…）。
 # 键之间线性插值；每帧走 compose_shot；写 PNG 序列 frame_%06d.png。
 # 轨道超出帧数：bg 不足时最后一帧/背景循环由实现定义并写进 docstring。
+# gif=True（v1.3.0 起）时附带写 animated GIF（纯 PIL，无新依赖）。
 ```
 
 ### 3.11 cli.py（P5）
 
 ```
+# v1.0 冻结时只有 render/char-layer/bundle/matte/video/check 六个；此后各版本
+# 只追加子命令，语义与退出码口径不变。现行 15 个（arcam --help 实测）：
 arcam render PHOTO CHAR -o OUT.png [--x --d --h --hp --feq --pitch --roll --shot
-        --char-scale --frame --rot-basis --mode --size-pct --tone --scene PATH]
+        --char-scale --frame --rot-basis --mode --size-pct --edge-bar --tone
+        --no-light --no-grain --no-shadow --shadow-az --shadow-opacity
+        --grain-scale --overlay LAYER[,LAYER...] --depth DEPTH --scene PATH]
 arcam char-layer CHAR -o OUT.png [同上放置参数]            # RGBA 立绘层
 arcam bundle PHOTO CHAR -o OUT.zip [同上放置参数]           # shot.jpg(q0.95)+scene_*.json+character_*.png
 arcam matte IMG -o OUT.png [--model PATH]
-arcam video TRACK.json CHAR -o OUTDIR [--bg IMG_OR_DIR --tone]
+arcam prep CHAR -o OUT.png [--no-solid --no-trim --no-soften --no-blur]  # 装图自动修图链
+arcam video TRACK.json CHAR -o OUTDIR [--bg IMG_OR_DIR --tone --gif]
 arcam check TRACK.json                                     # 轨道合法性自检
+arcam batch PHOTO_DIR CHAR -o OUTDIR [--pitch 等同上参数 --depth-dir DIR --scene]
+arcam multi PHOTO CHAR... -o OUT.png --spec "x=..;d=..;scale=.."[;...]
+arcam contact-sheet PHOTO CHAR -o OUT.png --vary 键=值[,值...] [--vary ...]
+arcam recipe save|list|show|apply NAME [摆放参数]
+arcam watch PHOTO CHAR -o OUT.png [--interval 秒] [--once]
+arcam stats [--json]                                       # 项目自报
+arcam lidar inspect DEPTH [--json] | lidar serve --port P [--out DIR] | lidar sim ...
+arcam web [--port P] [--open|--no-open]                    # 本地网页界面
+# 全部子命令都收 --lang zh|en（人话输出；数值行为不变）
 ```
 - JPEG q0.95；zip 用 ZIP_DEFLATED 且 date_time=(1980,1,1,0,0,0) 固定（确定性复现）。
 - 所有命令缺立绘/缺背景给出人话报错；退出码 0/1/2。

@@ -22,8 +22,8 @@
 <div id="app">
 
   <header id="topbar">
-    <h1>AR 取景器</h1>
-    <p id="app-sub">让她走出屏幕 · 本地单机工具（照片 + 立绘 + 可选 LiDAR 深度）</p>
+    <h1 data-t="app.h1">AR 取景器</h1>
+    <p id="app-sub" data-t="app.subLocal">让她走出屏幕 · 本地单机工具（照片 + 立绘 + 可选 LiDAR 深度）</p>
     <button type="button" id="btn-lang" class="lang-btn" title="切换语言">EN</button>
   </header>
 
@@ -62,9 +62,8 @@
         <button type="button" id="btn-live" data-t="btn.live">开启相机</button>
         <button type="button" id="btn-batch" data-t="btn.batch">批量出图</button>
         <button type="button" id="btn-matte" data-t="btn.cutAi">抠图</button>
-        <button type="button" id="btn-lidar">LiDAR 诊断</button>
+        <button type="button" id="btn-lidar" data-t="btn.lidar">LiDAR 诊断</button>
         <button type="button" id="btn-rerender" data-t="btn.rerender">重新渲染</button>
-        <button type="button" id="btn-batch" data-t="btn.batch">批量出图…</button>
       </div>
 
       <!-- 修图线（原版折叠区：纯色底 / 裁边 / 还原，index.html:242-246） -->
@@ -192,71 +191,71 @@
 
   <!-- 底部：摆放参数（默认值 = 原版 S 默认，WEB-SPEC §2） -->
   <section id="panel-params">
-    <h2>摆放参数</h2>
+    <h2 data-t="sec.params">摆放参数</h2>
     <div id="param-grid">
 
       <div class="param-row">
-        <label for="p-x-num">x 横向偏移（米）</label>
+        <label for="p-x-num" data-t="param.x">x 横向偏移（米）</label>
         <input type="number" id="p-x-num" step="0.05" value="0">
         <input type="range" id="p-x-rng" min="-6" max="6" step="0.05" value="0">
       </div>
 
       <div class="param-row">
-        <label for="p-d-num">d 人物距离（米）</label>
+        <label for="p-d-num" data-t="param.d">d 人物距离（米）</label>
         <input type="number" id="p-d-num" step="0.05" value="4">
         <input type="range" id="p-d-rng" min="0.5" max="12" step="0.05" value="4">
       </div>
 
       <div class="param-row">
-        <label for="p-h-num">h 相机离地高（米）</label>
+        <label for="p-h-num" data-t="param.h">h 相机离地高（米）</label>
         <input type="number" id="p-h-num" step="0.05" value="1.6">
         <input type="range" id="p-h-rng" min="0.3" max="3" step="0.05" value="1.6">
       </div>
 
       <div class="param-row">
-        <label for="p-hp-num">hp 人物身高（米）</label>
+        <label for="p-hp-num" data-t="param.hp">hp 人物身高（米）</label>
         <input type="number" id="p-hp-num" step="0.01" value="1.65">
         <input type="range" id="p-hp-rng" min="0.4" max="2.5" step="0.01" value="1.65">
       </div>
 
       <div class="param-row">
-        <label for="p-feq-num">feq 等效焦距（mm）</label>
+        <label for="p-feq-num" data-t="param.feq">feq 等效焦距（mm）</label>
         <input type="number" id="p-feq-num" step="0.5" value="23">
         <input type="range" id="p-feq-rng" min="10" max="120" step="0.5" value="23">
       </div>
 
       <div class="param-row">
-        <label for="p-pitch-num">pitch 俯角（度，低头为正）</label>
+        <label for="p-pitch-num" data-t="param.pitch">pitch 俯角（度，低头为正）</label>
         <input type="number" id="p-pitch-num" step="0.5" value="0">
         <input type="range" id="p-pitch-rng" min="-60" max="60" step="0.5" value="0">
       </div>
 
       <div class="param-row">
-        <label for="p-roll-num">roll 横滚（度，顺时针）</label>
+        <label for="p-roll-num" data-t="param.roll">roll 横滚（度，顺时针）</label>
         <input type="number" id="p-roll-num" step="0.5" value="0">
         <input type="range" id="p-roll-rng" min="-90" max="90" step="0.5" value="0">
       </div>
 
       <div class="param-row">
-        <label for="p-shot">shot 景别</label>
+        <label for="p-shot" data-t="param.shot">shot 景别</label>
         <select id="p-shot">
-          <option value="全身" selected>全身</option>
-          <option value="膝上">膝上</option>
-          <option value="腰上">腰上</option>
-          <option value="胸上">胸上</option>
-          <option value="头肩">头肩</option>
+          <option value="全身" selected data-t="shot.全身">全身</option>
+          <option value="膝上" data-t="shot.膝上">膝上</option>
+          <option value="腰上" data-t="shot.腰上">腰上</option>
+          <option value="胸上" data-t="shot.胸上">胸上</option>
+          <option value="头肩" data-t="shot.头肩">头肩</option>
         </select>
       </div>
 
       <div class="param-row">
-        <label for="p-frame">frame 画幅</label>
+        <label for="p-frame" data-t="param.frame">frame 画幅</label>
         <select id="p-frame">
-          <option value="自由">自由</option>
-          <option value="1:1">1:1</option>
-          <option value="4:5">4:5</option>
-          <option value="16:9">16:9</option>
-          <option value="9:16">9:16</option>
-          <option value="满幅" selected>满幅</option>
+          <option value="自由" data-t="frame.自由">自由</option>
+          <option value="1:1" data-t="frame.1:1">1:1</option>
+          <option value="4:5" data-t="frame.4:5">4:5</option>
+          <option value="16:9" data-t="frame.16:9">16:9</option>
+          <option value="9:16" data-t="frame.9:16">9:16</option>
+          <option value="满幅" selected data-t="frame.满幅">满幅</option>
         </select>
         <!-- 取景框读数（原版 frameRead，index.html:1971：hud() 里每帧刷）。
              选完画幅就知道出图裁到多大——不用等渲染完看尺寸。 -->
@@ -264,29 +263,29 @@
       </div>
 
       <div class="param-row">
-        <label for="p-mode">mode 摆放模式</label>
+        <label for="p-mode" data-t="param.mode">mode 摆放模式</label>
         <select id="p-mode">
-          <option value="ground" selected>ground 贴地</option>
-          <option value="free">free 自由半身</option>
+          <option value="ground" selected data-t="opt.mode.ground">ground 贴地</option>
+          <option value="free" data-t="opt.mode.free">free 自由半身</option>
         </select>
       </div>
 
       <div class="param-row">
-        <label for="p-rot">rot-basis 立绘对正基准</label>
+        <label for="p-rot" data-t="param.rot">rot-basis 立绘对正基准</label>
         <select id="p-rot">
-          <option value="world" selected>world 跟随世界竖直</option>
-          <option value="frame">frame 永远画面竖直</option>
+          <option value="world" selected data-t="opt.rot.world">world 跟随世界竖直</option>
+          <option value="frame" data-t="opt.rot.frame">frame 永远画面竖直</option>
         </select>
       </div>
 
       <div class="param-row" id="row-edge-bar" hidden>
-        <label for="p-edge-bar">edge-bar 框条吸附（0–4）</label>
+        <label for="p-edge-bar" data-t="param.edgeBar">edge-bar 框条吸附（0–4）</label>
         <select id="p-edge-bar">
-          <option value="0" selected>0 不吸附</option>
-          <option value="1">1 上</option>
-          <option value="2">2 下</option>
-          <option value="3">3 左</option>
-          <option value="4">4 右</option>
+          <option value="0" selected data-t="opt.edge.0">0 不吸附</option>
+          <option value="1" data-t="opt.edge.1">1 上</option>
+          <option value="2" data-t="opt.edge.2">2 下</option>
+          <option value="3" data-t="opt.edge.3">3 左</option>
+          <option value="4" data-t="opt.edge.4">4 右</option>
         </select>
       </div>
 
@@ -301,7 +300,7 @@
       </div>
 
       <div class="param-row param-row-check">
-        <label for="p-tone">tone 色调匹配</label>
+        <label for="p-tone" data-t="param.tone">tone 色调匹配</label>
         <input type="checkbox" id="p-tone">
       </div>
 
@@ -314,7 +313,7 @@
       <span id="status-msg" role="status">就绪</span>
       <span class="spacer"></span>
       <span id="status-time"></span>
-      <span id="local-chip" title="单用户本机回环，数据不出本机">仅在本地运行</span>
+      <span id="local-chip" data-t="chip.local" data-t-title="chip.localTitle" title="单用户本机回环，数据不出本机">仅在本地运行</span>
     </div>
     <details id="scene-details">
       <summary>scene.json</summary>

@@ -51,8 +51,12 @@ def test_table_is_complete_and_bilingual():
     搬到 Python 侧按代码里的画幅常量改名成 frame.1:1/frame.4:5/frame.9:16/
     frame.16:9 并成对（中英同形，见下面的豁免）；其余 156 条逐字搬运。
     """
-    # 156 条逐字 + 4 条改名 + 26 条新增 = 190；v1.10.0 英文补全 +102 → 292
-    assert len(TXT) == 292, f"表条数变了：{len(TXT)}"
+    # 条目口径：原版 156 条逐字 + frame.* 4 条改名 + v1.3.0 起 30 条新增 = 190
+    # （v1.9.0 实测即 190）；v1.10.0 英文补全 +102 → 292；v1.12.0 网页全面中文化
+    # +51、再删 5 个零引用死键（edge.贴上 那组，界面实际用 opt.edge.0..4）→ 338。
+    # 改这条断言前先跑：
+    #   .venv/bin/python -c "from arcam.i18n import TXT; print(len(TXT))"
+    assert len(TXT) == 338, f"表条数变了：{len(TXT)}"
     for k, (zh, en) in TXT.items():
         assert zh and en, f"{k} 有空白列"
         # 画幅比与"已保存"这类中英本就同形（1:1 / 4:5 / {0} {1}），不算漏翻

@@ -2,25 +2,31 @@
 """API 分步推送（git 协议不通时的备用路径，见 memory: github-api-push-workaround）。
 
 git 协议失败但 api.github.com 正常时：blob → tree(base_tree) → commit(parent=远端
-tip) → PATCH refs。用法：GH_TOKEN=... python3 tools/api-push.py <owner/repo> <branch>
+tip) → PATCH refs。令牌两条来路（先环境变量，后 git 凭据）：
+  GH_TOKEN=... python3 tools/api-push.py <owner/repo> <branch>
+  或先 git credential approve（git credential fill 能返回 password= 即可）。
 """
 import base64
 import json
+import os
 import subprocess
 import sys
 import urllib.request
 
 REPO = sys.argv[1] if len(sys.argv) > 1 else "ForJiang/arcam"
 BRANCH = sys.argv[2] if len(sys.argv) > 2 else "main"
-_fill = subprocess.run(
-    ["git", "credential", "fill"], input="host=github.com\nprotocol=https\n",
-    capture_output=True, text=True).stdout
-# 没配 git 凭据时原来会在这里抛 StopIteration（一串看不懂的调用栈）—— 说人话
-_pw = [l.split("=", 1)[1].strip() for l in _fill.splitlines() if l.startswith("password=")]
-if not _pw or not _pw[0]:
-    sys.exit("拿不到 GitHub 令牌：git credential fill 没返回 password="
-             "（先 git credential approve，或改用 tools/push-to-github.sh 的 GITHUB_TOKEN）")
-TOKEN = _pw[0]
+TOKEN = os.environ.get("GH_TOKEN", "").strip()
+if not TOKEN:
+    _fill = subprocess.run(
+        ["git", "credential", "fill"], input="host=github.com\nprotocol=https\n",
+        capture_output=True, text=True).stdout
+    # 没配 git 凭据时原来会在这里抛 StopIteration（一串看不懂的调用栈）—— 说人话
+    _pw = [l.split("=", 1)[1].strip() for l in _fill.splitlines() if l.startswith("password=")]
+    TOKEN = _pw[0] if _pw else ""
+if not TOKEN:
+    sys.exit("拿不到 GitHub 令牌：GH_TOKEN 环境变量为空，且 git credential fill 没返回 "
+             "password=（先 export GH_TOKEN=ghp_... 或 git credential approve；"
+             "也可改用 tools/push-to-github.sh 的 GITHUB_TOKEN）")
 API = f"https://api.github.com/repos/{REPO}"
 
 
@@ -31,9 +37,16 @@ def api(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     if data:
         req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, data=data) as r:
-        raw = r.read()
-        return json.loads(raw) if raw else {}
+    try:
+        with urllib.request.urlopen(req, data=data) as r:
+            raw = r.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        # 令牌过期/权限不够是这条备用路径最常见的失败，别吐 traceback
+        if e.code in (401, 403):
+            sys.exit(f"GitHub API {e.code}：令牌无效或权限不足"
+                     f"（{API}{path}）——换有效 token 再跑")
+        raise
 
 
 remote = api("GET", f"/git/refs/heads/{BRANCH}")["object"]["sha"]

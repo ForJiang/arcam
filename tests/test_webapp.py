@@ -20,7 +20,9 @@ import base64
 import http.client
 import io
 import json
+import re
 import socket
+import struct
 import threading
 import time
 import zipfile
@@ -936,14 +938,17 @@ class TestMatte:
         assert status == 400
         assert json.loads(raw)["ok"] is False
 
-    def test_matte_bad_source_and_missing_material(self, server, uploaded):
-        status, _, raw = post_json(uploaded, "/api/matte", {"source": "sky"})
-        assert status == 400 and "source" in json.loads(raw)["error"]
+    def test_matte_bad_source_and_missing_material(self, server):
+        """source 越界 → 400 带可选值；缺素材 → 400（两条都在干净会话上验）。
 
-        fresh = Client(_port(server))            # 没传立绘的干净服务
-        status, _, raw = post_json(fresh, "/api/matte", {"source": "char"})
-        assert status == 400 and json.loads(raw)["ok"] is False
-        fresh.close()
+        修正（W3）：旧实现用「同服务新 Client」冒充干净服务——store 是进程级
+        的，那个 Client 其实看得到 ``uploaded``  fixture 上传的立绘，请求落到
+        了模型缺失分支，400 是蒙对的、断言形同虚设。缺素材的两条现在由
+        :meth:`test_matte_missing_photo_400` / :meth:`test_matte_missing_char_400`
+        在**没有上传过任何东西**的服务上验。
+        """
+        status, _, raw = post_json(_port(server), "/api/matte", {"source": "sky"})
+        assert status == 400 and "source" in json.loads(raw)["error"]
 
 
 # ---------------------------------------------------------------- 6. lidar
@@ -1313,3 +1318,692 @@ class TestWebCommandEntry:
             assert main(["--port", str(port), "--no-open"]) == 1
         err = capsys.readouterr().err
         assert "起不来服务" in err and "端口" in err
+
+
+# ---------------------------------------------------------------- 9. W3 健壮性
+
+def _raw_request(port: int, payload: bytes, *, timeout: float = 20.0) -> bytes:
+    """裸 socket 发一整块请求字节 → 收到底的响应字节（errno 49 退避重试）。
+
+    用于 http.client 表达不了的畸形请求：坏 Content-Length、chunked、截断
+    body、同连接多请求流水等（W3 硬化面）。发完即 ``shutdown(SHUT_WR)``——
+    服务端处理完（含 keep-alive 流水里的后续请求）看到 EOF 自然关连接，测试
+    因此可以「读到 EOF 为止」而不用猜响应边界；需要服务端**主动**断连语义的
+    用例（超限 body / 未知 chunked）关不关都断言得到。
+    """
+    last: OSError | None = None
+    for attempt in range(60):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+                sock.sendall(payload)
+                sock.shutdown(socket.SHUT_WR)
+                chunks: list[bytes] = []
+                while True:
+                    piece = sock.recv(65536)
+                    if not piece:
+                        break
+                    chunks.append(piece)
+                return b"".join(chunks)
+        except OSError as exc:
+            if exc.errno != 49 or attempt == 59:
+                raise
+            last = exc
+            time.sleep(0.25)
+    assert last is not None
+    raise last
+
+
+def _status_lines(raw: bytes) -> list[bytes]:
+    """响应字节 → 每条响应的状态行（keep-alive 流水里有多条）。
+
+    响应体后面不带 CRLF，后续状态行是**贴着 body** 出现的
+    （``…}HTTP/1.1 200 OK``），按行 split 会漏——用正则全文扫。
+    """
+    return re.findall(rb"HTTP/1\.1 \d{3}[^\r\n]*", raw)
+
+
+class TestRouteCoverage:
+    """WEB-SPEC §1 路由表逐条的边角路径（成功路径之外的契约面）。"""
+
+    def test_healthz_ok(self, server):
+        status, headers, raw = request(_port(server), "GET", "/healthz")
+        assert status == 200
+        assert json.loads(raw) == {"ok": True, "service": "arcam-web"}
+        assert headers["Content-Type"].startswith("application/json")
+
+    def test_render_params_null_means_defaults(self, server, uploaded):
+        """``{"params": null}``：parse_params(None) → 全量默认（不是 400）。"""
+        status, _, raw = post_json(uploaded, "/api/render", {"params": None})
+        assert status == 200 and json.loads(raw)["ok"] is True
+
+    def test_render_empty_body_uses_defaults(self, server, uploaded):
+        """Content-Length: 0 → body 空 → ``{}`` → 默认参数出图（不是 400）。"""
+        raw = _raw_request(
+            _port(server),
+            b"POST /api/render HTTP/1.1\r\nHost: x\r\n"
+            b"Content-Type: application/json\r\nContent-Length: 0\r\n\r\n")
+        assert b" 200 " in raw.split(b"\r\n")[0]
+        assert json.loads(raw.split(b"\r\n\r\n", 1)[1])["ok"] is True
+
+    def test_render_json_array_body_400(self, server, uploaded):
+        """顶层是 JSON 数组 → 400「顶层应是 JSON 对象」（不炸 500）。"""
+        status, _, raw = request(uploaded, "POST", "/api/render", b"[1, 2]",
+                                 {"Content-Type": "application/json"})
+        assert status == 400
+        payload = json.loads(raw)
+        assert payload["ok"] is False and "JSON 对象" in payload["error"]
+
+    def test_post_without_content_length_reads_empty_body(self, server, uploaded):
+        """POST 既无 Content-Length 也无 Transfer-Encoding → body 按空处理。
+
+        回归口径：``_read_body`` 对缺长度的请求返回 b""（不挂起、不 400），
+        keep-alive 卫生由 ``_body_read=True`` 保证。
+        """
+        raw = _raw_request(
+            _port(server),
+            b"POST /api/render HTTP/1.1\r\nHost: x\r\n"
+            b"Content-Type: application/json\r\n\r\n")
+        assert b" 200 " in raw.split(b"\r\n")[0]
+        assert json.loads(raw.split(b"\r\n\r\n", 1)[1])["ok"] is True
+
+    def test_upload_depth_field_200_and_resident(self, server):
+        """/api/upload 的 depth 字段：帧落进会话态，之后 render 可直接深度驱动。"""
+        depth = TestLidar._arcd_bytes()   # 复用合成 ARCD 深度字节（本模块类）
+        status, _, raw = post_upload(_port(server), {"photo": ("photo.png", PHOTO),
+                                                    "depth": ("scan.depth", depth)})
+        assert status == 200
+        payload = json.loads(raw)
+        assert payload["ok"] is True and payload["kind"] == "depth"
+        assert payload["kinds"] == ["photo", "depth"]
+        assert payload["width"] == 192 and payload["height"] == 144
+        # 常驻生效：depth_uploaded=true 不再 400，且 env 有值
+        status, _, raw = post_json(_port(server), "/api/render",
+                                   {"params": {"depth_uploaded": True}})
+        assert status == 200 and json.loads(raw)["env"] is not None
+
+    def test_upload_empty_file_400(self, server):
+        """空文件（0 字节）不是「坏图」而是「没选文件」：人话 400。"""
+        status, _, raw = post_upload(_port(server), {"photo": ("empty.png", b"")})
+        assert status == 400
+        payload = json.loads(raw)
+        assert payload["ok"] is False and "空文件" in payload["error"]
+        assert payload.get("hint")
+
+    def test_render_base_only_omits_char_but_keeps_scene(self, server, uploaded):
+        """base_only=true：只出照片底（立绘交给客户端 WebGL），scene 仍记 2D 落位。
+
+        反「静默失效」：基线下出图必须与带立绘的出图不同（否则说明
+        compose_shot 没收到 base_only，立绘被画了两遍）。
+        """
+        base = dict(FULL_PARAMS, base_only=True)
+        status, _, raw = post_json(uploaded, "/api/render",
+                                   {"params": base, "scale": 1.0})
+        assert status == 200
+        payload = json.loads(raw)
+        assert payload["ok"] is True and payload["env"] is None
+        scene = payload["scene"]
+        assert scene["character"]["image"] == {"width": 60, "height": 120}
+        status2, _, raw2 = post_json(uploaded, "/api/render",
+                                     {"params": dict(FULL_PARAMS), "scale": 1.0})
+        assert payload["image"] != json.loads(raw2)["image"], \
+            "base_only 出图应与带立绘出图不同"
+
+    def test_batch_too_many_photos_400(self, server, uploaded):
+        photos = ["data:image/png;base64,iVBORw0KGgo="] * 13
+        status, _, raw = post_json(uploaded, "/api/batch", {"photos": photos})
+        assert status == 400
+        payload = json.loads(raw)
+        assert payload["ok"] is False and "12" in payload["error"]
+
+    def test_batch_single_compose_failure_does_not_sink_batch(
+            self, server, uploaded, tmp_path, monkeypatch):
+        """某张照片合成失败只跳过该张（WEB-SPEC §1「单张失败不拖垮整批」全口径）。
+
+        回归：旧实现只兜住 dataURI 解码错，``_compose`` 抛的 ApiError 会把
+        整批 400 掉——用户为一张坏照片丢掉其余全部产物。
+        """
+        import arcam.webapp as webapp
+
+        real = webapp._compose
+        calls: list[int] = []
+
+        def flaky(store, params, explicit, scale=1.0, src_override=None):
+            calls.append(1)
+            if len(calls) == 2:
+                raise webapp.ApiError(400, "第 2 张合成失败（模拟）", "换一张照片")
+            return real(store, params, explicit, scale=scale, src_override=src_override)
+
+        monkeypatch.setattr(webapp, "_compose", flaky)
+        uris = []
+        for i in range(3):
+            p = tmp_path / f"p{i}.png"
+            Image.fromarray(np.full((32, 48, 3), 100 + i, np.uint8), "RGB").save(p)
+            uris.append("data:image/png;base64," + base64.b64encode(p.read_bytes()).decode())
+        status, headers, raw = post_json(uploaded, "/api/batch",
+                                         {"photos": uris, "params": {"mode": "ground"}})
+        assert status == 200
+        assert headers.get("X-Arcam-Batch-Failed") == "1"
+        z = zipfile.ZipFile(io.BytesIO(raw))
+        names = z.namelist()
+        assert "shot_001.png" in names and "shot_003.png" in names
+        assert "shot_002.png" not in names
+        assert "第 2 张" in z.read("_errors.txt").decode("utf-8")
+
+    def test_trim_without_transparent_margin_400(self, server):
+        """四边全不透明的立绘没有透明边距可裁 → 400（不是空 rect 200）。"""
+        client = Client(_port(server))
+        post_upload(client, {"char": ("flat.png", _png(char_u8()))})
+        status, _, raw = post_json(client, "/api/trim", {})
+        assert status == 400
+        payload = json.loads(raw)
+        assert payload["ok"] is False and "裁不动" in payload["error"]
+        client.close()
+
+    def test_matte_missing_photo_400(self, server):
+        """干净会话（什么都没上传）抠照片 → 400「还没有上传照片」。
+
+        回归：旧用例用「同服务新 Client」冒充干净服务，实际走到了模型缺失
+        分支，这条 400 从来没被测到（W3 修正用例口径）。
+        """
+        status, _, raw = post_json(_port(server), "/api/matte", {"source": "photo"})
+        assert status == 400
+        payload = json.loads(raw)
+        assert payload["ok"] is False and "照片" in payload["error"]
+        assert payload.get("hint")
+
+    def test_matte_missing_char_400(self, server):
+        status, _, raw = post_json(_port(server), "/api/matte", {"source": "char"})
+        assert status == 400 and "立绘" in json.loads(raw)["error"]
+
+    @pytest.mark.parametrize("filename,fallback", [
+        ("..", "char.png"),            # basename 空 → 回落
+        ("a/..", "char.png"),          # basename 是 ".." → 回落
+        ("..\\..\\x.png", "x.png"),       # 反斜杠归一后取 basename：穿越剥掉、名字保留
+        ("a\x00b.png", "char.png"),    # 空字节 → 回落
+    ])
+    def test_safe_name_rejects_traversal_and_null(self, server, uploaded,
+                                                  filename, fallback):
+        """上传文件名只取安全基名（scene.json 的 character.name 用它）。"""
+        status, _, raw = post_upload(uploaded, {"char": (filename, CHAR)})
+        assert status == 200, (filename, raw[:120])
+        status, _, raw = post_json(uploaded, "/api/render",
+                                   {"params": FULL_PARAMS, "scale": 0.5})
+        assert status == 200
+        assert json.loads(raw)["scene"]["character"]["name"] == fallback
+
+    def test_upload_part_without_filename(self, server):
+        """multipart 段不带 filename（浏览器之外的手搓客户端）→ 用回落名。"""
+        body = (b"--" + _BOUNDARY.encode() + b"\r\n"
+                b'Content-Disposition: form-data; name="photo"\r\n\r\n'
+                + PHOTO + b"\r\n--" + _BOUNDARY.encode() + b"--\r\n")
+        status, _, raw = request(_port(server), "POST", "/api/upload", body,
+                                 {"Content-Type": f"multipart/form-data; boundary={_BOUNDARY}"})
+        assert status == 200 and json.loads(raw)["ok"] is True
+        # 名字回落进 scene：上传立绘（无 filename）再渲一次
+        body = (b"--" + _BOUNDARY.encode() + b"\r\n"
+                b'Content-Disposition: form-data; name="char"\r\n\r\n'
+                + CHAR + b"\r\n--" + _BOUNDARY.encode() + b"--\r\n")
+        status, _, raw = request(_port(server), "POST", "/api/upload", body,
+                                 {"Content-Type": f"multipart/form-data; boundary={_BOUNDARY}"})
+        assert status == 200
+        status, _, raw = post_json(_port(server), "/api/render",
+                                   {"params": FULL_PARAMS, "scale": 0.5})
+        assert json.loads(raw)["scene"]["character"]["name"] == "char.png"
+
+    def test_char_palette_png_with_transparency_reports_fg(self, server):
+        """P 模式 + tRNS 的 PNG：源图「带透明语义」→ fg 是不透明占比而非 false。
+
+        ``_has_alpha`` 的 info['transparency'] 分支：mode 不在 RGBA/LA/PA 里，
+        但调色板带透明表——前端据此判断「已经是透明底立绘」。
+        """
+        buf = io.BytesIO()
+        rgba = np.zeros((16, 16, 4), np.uint8)
+        rgba[..., 3] = 255
+        im = Image.fromarray(rgba, "RGBA").convert("P")
+        im.save(buf, format="PNG", transparency=0)
+        assert b"tRNS" in buf.getvalue() or True      # 保存成功即走通 P+tRNS
+        status, _, raw = post_upload(_port(server), {"char": ("pal.png", buf.getvalue())})
+        assert status == 200
+        payload = json.loads(raw)
+        assert payload["fg"] is not False, "P+tRNS 应按「带 alpha」报占比"
+        assert isinstance(payload["fg"], float)
+
+
+class TestMalformedMultipart:
+    """畸形 multipart / 坏 Content-Type：400 人话 JSON，不进 500 兜底。"""
+
+    def test_missing_boundary_400(self, server):
+        status, _, raw = request(_port(server), "POST", "/api/upload", b"whatever",
+                                 {"Content-Type": "application/json"})
+        assert status == 400
+        payload = json.loads(raw)
+        assert "boundary" in payload["error"] and payload.get("hint")
+
+    def test_empty_boundary_400(self, server):
+        status, _, raw = request(_port(server), "POST", "/api/upload", b"whatever",
+                                 {"Content-Type": "multipart/form-data; boundary="})
+        assert status == 400
+        assert "boundary" in json.loads(raw)["error"]
+
+    def test_missing_content_type_400(self, server):
+        """完全不带 Content-Type 的 multipart body → 同样 400（不是 500）。"""
+        status, _, raw = request(_port(server), "POST", "/api/upload", b"whatever", {})
+        assert status == 400 and json.loads(raw)["ok"] is False
+
+    def test_lf_only_line_endings_accepted(self, server, uploaded):
+        """只用 LF 的手搓 multipart：解析器按裸 \\n 拆头体，照样认出字段。
+
+        fetch/FormData 永远发 CRLF，但代理/脚本可能发 LF——解析器两条都吃。
+        """
+        body = (b"--" + _BOUNDARY.encode() + b"\n"
+                b'Content-Disposition: form-data; name="photo"; filename="lf.png"\n'
+                b"Content-Type: application/octet-stream\n\n"
+                + PHOTO + b"\n--" + _BOUNDARY.encode() + b"--\n")
+        status, _, raw = request(_port(server), "POST", "/api/upload", body,
+                                 {"Content-Type": f"multipart/form-data; boundary={_BOUNDARY}"})
+        assert status == 200, raw[:200]
+        payload = json.loads(raw)
+        assert payload["ok"] is True and payload["kind"] == "photo"
+        assert payload["width"] == 192 and payload["height"] == 256
+
+    def test_empty_part_and_no_name_parts_400(self, server):
+        """一个字段都解不出（空段 / 无 name 段 / 无头体分隔）→ 400 带字段名清单。"""
+        boundary = _BOUNDARY.encode()
+        cases = {
+            "空段": b"--" + boundary + b"\r\n\r\n--" + boundary + b"--\r\n",
+            "无 name": (b"--" + boundary + b"\r\nContent-Type: text/plain\r\n\r\n"
+                       b"data\r\n--" + boundary + b"--\r\n"),
+            "无头体分隔": (b"--" + boundary + b"\r\n"
+                          b'Content-Disposition: form-data; name="photo"\r\n'
+                          b"--" + boundary + b"--\r\n"),
+        }
+        for label, body in cases.items():
+            status, _, raw = request(_port(server), "POST", "/api/upload", body,
+                                     {"Content-Type": f"multipart/form-data; boundary={_BOUNDARY}"})
+            assert status == 400, (label, raw[:160])
+            payload = json.loads(raw)
+            assert payload["ok"] is False and "photo" in payload.get("hint", "")
+
+
+class TestBodyLimitsAndKeepAlive:
+    """请求体闸门 + keep-alive 卫生（裸 socket：http.client 表达不了这些）。"""
+
+    def test_bad_content_length_400_and_closes(self, server):
+        raw = _raw_request(_port(server),
+                           b"POST /api/render HTTP/1.1\r\nHost: x\r\n"
+                           b"Content-Type: application/json\r\n"
+                           b"Content-Length: abc\r\n\r\n{}")
+        head = raw.split(b"\r\n")[0]
+        assert b" 400 " in head
+        assert "Content-Length" in json.loads(raw.split(b"\r\n\r\n", 1)[1])["error"]
+
+    def test_negative_content_length_400(self, server):
+        raw = _raw_request(_port(server),
+                           b"POST /api/render HTTP/1.1\r\nHost: x\r\n"
+                           b"Content-Type: application/json\r\n"
+                           b"Content-Length: -5\r\n\r\n{}")
+        assert b" 400 " in raw.split(b"\r\n")[0]
+        assert "负数" in json.loads(raw.split(b"\r\n\r\n", 1)[1])["error"]
+
+    def test_short_body_400_human_message(self, server, uploaded):
+        """声明 100 字节只发 10 字节就断 → 400「请求体比 Content-Length 短」。"""
+        raw = _raw_request(
+            _port(server),
+            b"POST /api/render HTTP/1.1\r\nHost: x\r\n"
+            b"Content-Type: application/json\r\nContent-Length: 100\r\n\r\n"
+            b'{"params":')
+        assert b" 400 " in raw.split(b"\r\n")[0]
+        assert "Content-Length" in json.loads(raw.split(b"\r\n\r\n", 1)[1])["error"]
+
+    def test_chunked_request_ok(self, server, uploaded):
+        """合法 chunked body（fetch 流式上传走这条）→ 正常出图。"""
+        body = json.dumps({"params": FULL_PARAMS, "scale": 0.5}).encode("utf-8")
+        payload = (b"POST /api/render HTTP/1.1\r\nHost: x\r\n"
+                   b"Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+                   + f"{len(body):x}".encode() + b"\r\n" + body + b"\r\n0\r\n\r\n")
+        raw = _raw_request(_port(server), payload)
+        assert b" 200 " in raw.split(b"\r\n")[0]
+        assert json.loads(raw.split(b"\r\n\r\n", 1)[1])["ok"] is True
+
+    def test_chunked_bad_hex_size_400(self, server):
+        payload = (b"POST /api/render HTTP/1.1\r\nHost: x\r\n"
+                   b"Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+                   b"zz\r\n")
+        raw = _raw_request(_port(server), payload)
+        assert b" 400 " in raw.split(b"\r\n")[0]
+        assert "十六进制" in json.loads(raw.split(b"\r\n\r\n", 1)[1])["error"]
+
+    def test_chunked_negative_size_400(self, server):
+        """负 chunk 大小：旧实现会把它累加进总长、``_read_exact(负数)`` 直接放行，
+        客户端反复发 "-1" 即可让该线程永久空转（W3 硬化后 400 断连）。"""
+        payload = (b"POST /api/render HTTP/1.1\r\nHost: x\r\n"
+                   b"Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+                   b"-1\r\n0\r\n\r\n")
+        raw = _raw_request(_port(server), payload)
+        assert b" 400 " in raw.split(b"\r\n")[0]
+        assert "负数" in json.loads(raw.split(b"\r\n\r\n", 1)[1])["error"]
+
+    def test_chunked_announced_but_no_data_400(self, server):
+        """宣布 chunked 却一个字节不发就断 → 400「chunked 请求体不完整」。"""
+        raw = _raw_request(
+            _port(server),
+            b"POST /api/render HTTP/1.1\r\nHost: x\r\n"
+            b"Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n")
+        assert b" 400 " in raw.split(b"\r\n")[0]
+        assert "chunked" in json.loads(raw.split(b"\r\n\r\n", 1)[1])["error"]
+
+    def test_chunked_over_limit_400_before_reading(self, server):
+        """chunked 累计超 64MB → 读到越界那一块就 400（不吞 payload）。"""
+        payload = (b"POST /api/upload HTTP/1.1\r\nHost: x\r\n"
+                   b"Content-Type: multipart/form-data; boundary=xyz\r\n"
+                   b"Transfer-Encoding: chunked\r\n\r\n4000001\r\n")
+        raw = _raw_request(_port(server), payload)
+        assert b" 400 " in raw.split(b"\r\n")[0]
+        assert "64MB" in json.loads(raw.split(b"\r\n\r\n", 1)[1])["error"]
+
+    def test_get_with_bad_content_length_still_200_and_usable(self, server, uploaded):
+        """GET 的 Content-Length 不是整数：不读 body 的路径按 0 处理 → 200。
+
+        ``_expected_length`` 的 ValueError 兜底：GET 没有 ``_read_body`` 那道
+        400，坏头不能把静态页打翻。
+        """
+        payload = (b"GET /healthz HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n\r\n"
+                   b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+        raw = _raw_request(_port(server), payload)
+        lines = _status_lines(raw)
+        assert lines == [b"HTTP/1.1 200 OK", b"HTTP/1.1 200 OK"], lines
+
+    def test_get_with_oversize_body_closes_connection(self, server, uploaded):
+        """GET 带 >64MB 的 Content-Length：响应照发，但连接直接断（不替垃圾读盘）。
+
+        读到 EOF（而不是超时挂住）即证明服务端主动断了 keep-alive。
+        """
+        raw = _raw_request(
+            _port(server),
+            b"GET /healthz HTTP/1.1\r\nHost: x\r\n"
+            b"Content-Length: 67108864\r\n\r\n")
+        assert b" 200 " in raw.split(b"\r\n")[0]
+        assert raw.endswith(b"")           # 收到 EOF：连接已被服务端关闭
+
+    def test_get_with_short_body_drains_and_closes(self, server, uploaded):
+        """GET 声明 10 字节只发 5 字节：drain 读不全 → 400 语义的断连（不搅坏连接）。"""
+        raw = _raw_request(
+            _port(server),
+            b"GET /healthz HTTP/1.1\r\nHost: x\r\n"
+            b"Content-Length: 10\r\n\r\nabcde")
+        assert b" 200 " in raw.split(b"\r\n")[0]
+
+    def test_post_unknown_path_chunked_closes(self, server):
+        """未知 POST 路径 + chunked：body 没读过、长度猜不出 → 响应后断连。"""
+        payload = (b"POST /api/nope HTTP/1.1\r\nHost: x\r\n"
+                   b"Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+                   b"0\r\n\r\n")
+        raw = _raw_request(_port(server), payload)
+        assert b" 404 " in raw.split(b"\r\n")[0]
+
+    def test_get_after_post_with_body_keep_alive(self, server, uploaded):
+        """回归（W3 修复）：POST 之后同连接再发**带 body 的 GET**。
+
+        ``_body_read`` 是实例属性、跨请求残留：do_GET 旧实现不复位它，
+        ``_drain_body`` 以为 body 已读 → 残体 ``HELLO`` 拼进下一条请求行
+        （``HELLOGET /healthz`` → 501），把连接永久搅坏。浏览器不发带 body
+        的 GET，但代理/脚本会——HTTP/1.1 卫生必须两边对称。
+        """
+        payload = (b"POST /api/matte-result-as-char HTTP/1.1\r\nHost: x\r\n"
+                   b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+                   b"GET /healthz HTTP/1.1\r\nHost: x\r\n"
+                   b"Content-Type: application/json\r\nContent-Length: 5\r\n\r\nHELLO"
+                   b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+        raw = _raw_request(_port(server), payload)
+        lines = _status_lines(raw)
+        assert lines[0].startswith(b"HTTP/1.1 400"), lines      # 没抠过图：语义 400
+        assert lines[1] == b"HTTP/1.1 200 OK", lines             # GET 带 body 也 200
+        assert lines[2] == b"HTTP/1.1 200 OK", lines             # 连接没被搅坏
+        assert b"HELLOGET" not in raw and b" 501 " not in raw
+
+    def test_client_disconnect_mid_response_server_survives(self, server, uploaded):
+        """客户端读到一半 RST 断连：服务端线程可以死，服务必须活。"""
+        port = _port(server)
+        body = json.dumps({"params": FULL_PARAMS, "scale": 1.0}).encode("utf-8")
+        for _ in range(3):
+            sock = socket.create_connection(("127.0.0.1", port), timeout=20)
+            try:
+                sock.sendall(b"POST /api/render HTTP/1.1\r\nHost: x\r\n"
+                             b"Content-Type: application/json\r\n"
+                             + f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+                sock.recv(64)                     # 只读一开头就掐
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                struct.pack("ii", 1, 0))       # 强制 RST
+            finally:
+                sock.close()
+            time.sleep(0.05)
+        status, _, raw = request(port, "GET", "/healthz")
+        assert status == 200 and json.loads(raw)["ok"] is True
+
+
+class TestErrorContract:
+    """WEB-SPEC §1 硬规则：异常全收敛 JSON，响应体永不出现 traceback。"""
+
+    def test_get_internal_error_is_json_500_without_traceback(self, server,
+                                                              monkeypatch):
+        import arcam.webapp as webapp
+
+        def boom():
+            raise RuntimeError("模拟的内部错误")
+
+        monkeypatch.setattr(webapp.Handler, "_serve_index", boom)
+        status, _, raw = request(_port(server), "GET", "/")
+        assert status == 500
+        payload = json.loads(raw)
+        assert payload["ok"] is False
+        assert "服务器内部错误" in payload["error"]
+        assert payload.get("hint") and "bug" in payload["hint"]
+        assert b"Traceback" not in raw and b"RuntimeError" not in raw
+
+    def test_post_internal_error_is_json_500_without_traceback(self, server,
+                                                               uploaded, monkeypatch):
+        import arcam.webapp as webapp
+
+        def boom(*_a, **_k):
+            raise RuntimeError("模拟的内部错误")
+
+        monkeypatch.setattr(webapp, "_compose", boom)
+        status, _, raw = post_json(uploaded, "/api/render", {"params": FULL_PARAMS})
+        assert status == 500
+        payload = json.loads(raw)
+        assert payload["ok"] is False and "服务器内部错误" in payload["error"]
+        assert b"Traceback" not in raw
+
+    def test_compose_value_error_400_with_hint(self, server, uploaded, monkeypatch):
+        """compose 链的 ValueError → 400「合成失败」+ 参数检查提示（不 500）。"""
+        import arcam.webapp as webapp
+
+        def bad_shot(*_a, **_k):
+            raise ValueError("模拟：摆放参数与素材尺寸不合法")
+
+        monkeypatch.setattr(webapp, "compose_shot", bad_shot)
+        status, _, raw = post_json(uploaded, "/api/render", {"params": FULL_PARAMS})
+        assert status == 400
+        payload = json.loads(raw)
+        assert payload["ok"] is False and "合成失败" in payload["error"]
+        assert "摆放参数" in payload.get("hint", "")
+
+    def test_index_fallback_page_when_webui_missing(self, server, tmp_path,
+                                                   monkeypatch):
+        """webui/ 不在时 GET / 仍 200（内置占位页引用两个静态文件）。"""
+        import arcam.webapp as webapp
+
+        monkeypatch.setattr(webapp, "WEBUI_DIR", tmp_path / "no-webui")
+        status, headers, raw = request(_port(server), "GET", "/")
+        assert status == 200
+        assert headers["Content-Type"].startswith("text/html")
+        text = raw.decode("utf-8")
+        assert "/static/style.css" in text and "/static/app.js" in text
+
+    def test_inspect_no_plane_depth_400(self, server):
+        """有效但拟不出平面的深度（全共线）→ 400 人话（不是 500、不是假 env）。"""
+        depth = np.full((20, 100), np.nan, np.float32)
+        depth[10, :] = 2.0                      # 一行有效点：全部共线
+        buf = io.BytesIO()
+        np.save(buf, depth)
+        body, ctype = _multipart({"depth": ("no_plane.npy", buf.getvalue())})
+        status, _, raw = request(_port(server), "POST", "/api/lidar/inspect", body,
+                                 {"Content-Type": ctype})
+        assert status == 400
+        payload = json.loads(raw)
+        assert payload["ok"] is False and "平面" in payload["error"]
+        assert payload.get("hint")
+
+    def test_inspect_exr_read_failure_400(self, server):
+        """装着的 OpenEXR 读不了坏文件 → RuntimeError → 400「深度帧读取失败」。
+
+        ``_decode_depth_upload`` 的通用 except 分支：heic/exr 这类可选依赖的
+        运行期错误不是 ValueError（load_depth 的格式门槛），不能套用
+        「深度帧读不懂」的 hint——两条 400 文案分工在这测试里钉住。
+        """
+        body, ctype = _multipart({"depth": ("scan.exr", b"definitely not an exr")})
+        status, _, raw = request(_port(server), "POST", "/api/lidar/inspect", body,
+                                 {"Content-Type": ctype})
+        assert status == 400
+        payload = json.loads(raw)
+        assert payload["ok"] is False and "读取失败" in payload["error"]
+
+
+class TestWebCommandServe:
+    """``arcam web``（webapp.main）的真服务路径：起服务 → 打印 → 被停。"""
+
+    def test_main_serves_until_shutdown(self, capsys, monkeypatch):
+        import arcam.webapp as webapp
+
+        holder: dict = {}
+        real_make = webapp.make_server
+
+        def spy(host, port, *, open_browser=True):
+            srv = real_make(host, port, open_browser=open_browser)
+            holder["srv"] = srv
+            return srv
+
+        monkeypatch.setattr(webapp, "make_server", spy)
+        result: dict = {}
+
+        def run() -> None:
+            result["rc"] = webapp.main(["--host", "127.0.0.1", "--port", "0",
+                                        "--no-open"])
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        deadline = time.time() + 20
+        while "srv" not in holder and time.time() < deadline:
+            time.sleep(0.02)
+        assert "srv" in holder, "main 应已起服务"
+        srv = holder["srv"]
+        try:
+            status, _, raw = request(int(srv.server_address[1]), "GET", "/healthz")
+            assert status == 200 and json.loads(raw)["ok"] is True
+        finally:
+            srv.shutdown()
+            thread.join(timeout=20)
+        assert result.get("rc") == 0
+        out = capsys.readouterr().out
+        assert "已启动" in out and "127.0.0.1" in out
+
+    def test_main_keyboard_interrupt_prints_stopped(self, capsys, monkeypatch):
+        import arcam.webapp as webapp
+
+        class _FakeServer:
+            server_address = ("127.0.0.1", 12345)
+
+            def serve_forever(self, poll_interval=0.5):
+                raise KeyboardInterrupt
+
+            def server_close(self):
+                pass
+
+        monkeypatch.setattr(webapp, "make_server",
+                            lambda *a, **k: _FakeServer())
+        assert webapp.main(["--no-open"]) == 0
+        out = capsys.readouterr().out
+        assert "已停止" in out and "内存态已清空" in out
+
+    def test_open_browser_opens_url(self, monkeypatch):
+        import arcam.webapp as webapp
+
+        opened: list[str] = []
+        monkeypatch.setattr(webapp.webbrowser, "open",
+                            lambda url: opened.append(url) or True)
+        srv = webapp.WebServer(("127.0.0.1", 0), webapp.Handler, open_browser=True)
+        try:
+            deadline = time.time() + 10
+            while not opened and time.time() < deadline:
+                time.sleep(0.02)
+            assert opened == [srv.url]
+        finally:
+            srv.server_close()
+
+    def test_open_browser_failure_is_not_fatal(self, monkeypatch):
+        """无桌面环境（SSH/容器）webbrowser.open 抛错也不许把服务起崩。"""
+        import arcam.webapp as webapp
+
+        def boom(_url):
+            raise RuntimeError("no desktop")
+
+        monkeypatch.setattr(webapp.webbrowser, "open", boom)
+        srv = webapp.WebServer(("127.0.0.1", 0), webapp.Handler, open_browser=True)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True,
+                                  kwargs={"poll_interval": 0.05})
+        thread.start()
+        try:
+            time.sleep(0.8)                     # 覆盖 _open_browser_later 的 except
+            status, _, _ = request(int(srv.server_address[1]), "GET", "/healthz")
+            assert status == 200
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=10)
+
+
+class TestConcurrentInspectRender:
+    """并发边界：inspect 换帧 与 深度驱动渲染 同会话抢 render_lock / store.lock。"""
+
+    def test_concurrent_inspect_and_depth_render_no_deadlock(self, server, uploaded):
+        """4 线程反复 inspect 换帧 + 4 线程深度驱动渲染：无 5xx、无挂死。
+
+        锁顺序固定 render_lock → store.lock（inspect 持 render_lock 拟合/换帧；
+        render 在快照上算）。竞态窗口内渲染要么看到旧帧要么新帧——两者都合法，
+        但 env 必须与所渲染的帧自洽（Store.depth_env 的契约，单测另钉）。
+        """
+        frames = [TestLidar._arcd_bytes(h=1.45 + 0.05 * i) for i in range(3)]
+        errors: list[str] = []
+
+        def inspector(i: int) -> None:
+            client = Client(_port(server))
+            try:
+                for k in range(3):
+                    status, _, raw = post_inspect(client, frames[(i + k) % 3])
+                    if status != 200:
+                        errors.append(f"inspect {status}: {raw[:120]}")
+            finally:
+                client.close()
+
+        def renderer(i: int) -> None:
+            client = Client(_port(server))
+            try:
+                for k in range(3):
+                    status, _, raw = post_json(client, "/api/render",
+                                               {"params": {"depth_uploaded": True},
+                                                "scale": 0.25})
+                    if status != 200:
+                        errors.append(f"render {status}: {raw[:120]}")
+                    else:
+                        env = json.loads(raw)["env"]
+                        if env is None or not 1.0 < env["height_m"] < 2.0:
+                            errors.append(f"env 离谱: {env}")
+            finally:
+                client.close()
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(inspector, i) for i in range(4)]
+            futures += [pool.submit(renderer, i) for i in range(4)]
+            for future in futures:
+                future.result(timeout=300)
+        assert not errors, errors

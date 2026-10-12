@@ -371,6 +371,9 @@ window.arcamHud = (function () {
     for (var pi = 0; pi < lines.length; pi++) {
       plateW = Math.max(plateW, ctx.measureText(lines[pi]).width);
     }
+    // 板宽钳到画布内：文本已按 W−2m 断行，但板还要加左右内边距，不钳的话
+    // 最宽那行会把板的右圆角顶出画布（v1.13.0 补）
+    plateW = Math.min(plateW, cam.W - sc.m * 2 - 10);
     textPlate(ctx, sc.m - 5, sc.m - 4, plateW + sc.m * 2 + 10,
               lines.length * sc.lh + sc.m + 4, sc.m);
     for (var i = 0; i < lines.length; i++) {

@@ -3,6 +3,15 @@
  * 深浅色跟随系统 prefers-color-scheme，不写死颜色；反渐变/反阴影/反玻璃拟态。
  * 布局仍按 WEB-SPEC §3：左输入/右预览两栏，<900px 上下堆叠。 */
 
+/* ── [hidden] 兜底（v1.12.1 必修）────────────────────────────────────────
+ * 作者样式在同权重下优先于 UA 样式，所以 .kind-modal{.kind-modal 的 display:flex}
+ * 会把 UA 的 [hidden]{display:none} 盖掉 —— 靠 hidden 属性切换可见性的元素全部
+ * 常驻可见：kind-modal 从进站就盖住整页（用户点不到任何上传区，"卡在全身/半身
+ * 弹窗"）、row-edge-bar 在贴地模式也该藏、model3dRow/pose3dRow/live-row/zoom-cell
+ * 在没模型/没开相机时同样如此。!important 是让属性选择器赢过 class 的标准做法。
+ * ⚠ 新组件只要同时用 hidden 属性和 display 规则，就依赖这条兜底——别删。 */
+[hidden] { display: none !important; }
+
 :root {
   color-scheme: light dark; /* 让原生下拉/复选/滚动条也跟随系统（WEB-STYLE §2） */
   --bg: #ffffff;

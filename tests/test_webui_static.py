@@ -1229,3 +1229,47 @@ def test_network_error_humanized():
     docs = _strip_comments(_pages_files()["app.js"])
     assert docs.count("errMsg(e)") >= 5, \
         f"docs 只有 {docs.count('errMsg(e)')} 处 errMsg(e)——render/matte/三个导出的 catch 都要过"
+
+
+def test_hidden_attribute_beats_display_rules():
+    """`[hidden]` 必须赢过 class 的 display 规则（v1.12.1 必修的回归门禁）。
+
+    踩过的坑（用户报「网站卡在全身/半身弹窗、无法继续」）：作者样式在同权重下
+    优先于 UA 样式，于是 `.kind-modal { display: flex }` 把 UA 的
+    `[hidden] { display: none }` 盖掉——靠 hidden 属性切换可见性的元素**全部
+    常驻可见**：kind-modal 从进站就盖住整页（上传区全点不到）、row-edge-bar 在
+    贴地模式也该藏、model3dRow/pose3dRow/live-row/zoom-cell 在没模型/没开相机时
+    同样如此。标准修法是样式表里放一条 `[hidden] { display: none !important }`。
+
+    门禁两路都查：① 两侧样式表都有这条兜底；② HTML 里每个带 hidden 属性的元素，
+    其 id/class 若在 CSS 里有 display 规则，就确认兜底规则存在（防将来新增同类
+    组件时又踩）。
+    """
+    import re as _re
+
+    rule = _re.compile(r"\[hidden\]\s*\{\s*display\s*:\s*none\s*!important")
+    for label, folder in (("webui", WEBUI), ("docs", DOCS)):
+        css = (folder / "style.css").read_text(encoding="utf-8")
+        assert rule.search(css), \
+            f"{label}/style.css 缺 [hidden] {{ display: none !important }} 兜底"
+        html = (folder / "index.html").read_text(encoding="utf-8")
+        risky = []
+        for m in _re.finditer(r"<(\w+)([^>]*\bhidden\b[^>]*)>", html):
+            attrs = m.group(2)
+            sels = []
+            idm = _re.search(r'id="([^"]+)"', attrs)
+            clm = _re.search(r'class="([^"]+)"', attrs)
+            if idm:
+                r = _re.search(r"#" + _re.escape(idm.group(1)) + r"\s*\{[^}]*\}", css)
+                if r and _re.search(r"display\s*:", r.group(0)):
+                    sels.append("#" + idm.group(1))
+            if clm:
+                for c in clm.group(1).split():
+                    r = _re.search(r"\." + _re.escape(c) + r"\s*\{[^}]*\}", css)
+                    if r and _re.search(r"display\s*:", r.group(0)):
+                        sels.append("." + c)
+            if sels:
+                risky.append((idm.group(1) if idm else "?", sels))
+        # 有风险元素不是问题（兜底在就能正确隐藏）——这里只是把它们列进断言消息，
+        # 让人知道这条兜底到底在保护谁
+        assert rule.search(css), f"{label}: 有 hidden+display 元素 {risky} 但没有兜底规则"

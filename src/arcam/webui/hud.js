@@ -177,8 +177,11 @@
       if (paths[m].label === undefined) continue;
       var lab = project(-1.4, -cam.h, paths[m].label, cam);
       if (!lab || lab.v > cam.H || lab.v < 0) continue;
-      ctx.font = "bold 20px sans-serif";
-      ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,.75)";
+      // 标签字号跟着画布走（hudScale 同公式）：1920 宽下 20px 只占 1%，
+      // 和读数一样会小到看不清；640×480 时算得 13px 与旧行为一致
+      var gl = hudScale(cam.W, cam.H);
+      ctx.font = "bold " + gl.fs + "px sans-serif";
+      ctx.lineWidth = Math.max(3, Math.round(gl.fs / 5)); ctx.strokeStyle = "rgba(0,0,0,.75)";
       ctx.strokeText(paths[m].label + "m", lab.u + 8, lab.v - 8);
       ctx.fillStyle = "rgba(120,255,255,1)";
       ctx.fillText(paths[m].label + "m", lab.u + 8, lab.v - 8);
@@ -200,7 +203,13 @@
     ctx.strokeStyle = "rgba(255,120,120,.8)"; ctx.setLineDash([12, 8]); ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(a.u, a.v); ctx.lineTo(b.u, b.v); ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = "rgba(255,120,120,.95)"; ctx.font = "22px sans-serif";
+    // ⚠ 补描边：红字直接压在亮照片上没有描边几乎看不见（用户实测反馈），
+    //    与读数/网格标签同一口径（黑描边 + 半透明）；字号同样随画布缩放
+    var hl = hudScale(cam.W, cam.H);
+    ctx.font = Math.round(hl.fs * 1.15) + "px sans-serif";
+    ctx.lineWidth = Math.max(3, Math.round(hl.fs / 5)); ctx.strokeStyle = "rgba(0,0,0,.8)";
+    ctx.strokeText(label || tt("horizon"), lab.u + 10, lab.v - 10);
+    ctx.fillStyle = "rgba(255,120,120,.95)";
     ctx.fillText(label || tt("horizon"), lab.u + 10, lab.v - 10);
     ctx.restore();
   }
@@ -287,6 +296,57 @@
     return out;
   }
 
+  // ── HUD 文字尺寸随画布缩放（v1.13.0）─────────────────────────────
+  // 原版 HUD 读数是 HTML 文本（innerHTML + CSS），天然随容器缩放；移植到
+  // canvas 后早年写死 13px：1920 宽下只占画布 0.68%（小到看不清）、480 宽下
+  // 四条构图提示 587px 又直接溢出被 fillText 裁掉（canvas 不换行）。这里按
+  // 画布短边比例算字号，行高/边距/描边都跟着走；640×480 时算得 13px，与旧
+  // 行为一致（常见预览尺寸不变，只有大画布变大）。Python hud.py 同公式。
+  function hudScale(W, H) {
+    var fs = Math.max(11, Math.min(28, Math.round(Math.min(W, H) / 38)));
+    return { fs: fs, lh: fs + 5, m: Math.round(fs * 0.62), stroke: Math.max(2, Math.round(fs / 4)) };
+  }
+
+  // 构图提示按画布宽度贪心断行：每条提示是不可分割的段（内部不断），超宽就
+  // 另起一行；返回的行都已带上前缀/分隔符。maxW = 画布宽 − 两侧边距。
+  function wrapHints(ctx, hints, maxW) {
+    var sep = "\u3000\u00b7\u3000", prefix = "\u26a0 ";
+    var lines = [], cur = "";
+    for (var i = 0; i < hints.length; i++) {
+      var seg = (i === 0 ? prefix : sep) + hints[i];
+      var cand = cur + seg;
+      if (cur && ctx.measureText(cand).width > maxW) {
+        lines.push(cur);
+        cur = prefix + hints[i];
+      } else {
+        cur = cand;
+      }
+    }
+    if (cur) lines.push(cur);
+    return lines;
+  }
+
+  // 读数块背后的半透明圆角暗底：亮照片/嘈杂背景下只靠文字描边不够看
+  // （原版那侧是 HTML 有 CSS 背景，canvas 侧补一层等价物）。
+  function textPlate(ctx, x, y, w, h, r) {
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,.42)";
+    var rr = Math.min(r, h / 2, w / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.lineTo(x + w - rr, y);
+    ctx.arcTo(x + w, y, x + w, y + rr, rr);
+    ctx.lineTo(x + w, y + h - rr);
+    ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+    ctx.lineTo(x + rr, y + h);
+    ctx.arcTo(x, y + h, x, y + h - rr, rr);
+    ctx.lineTo(x, y + rr);
+    ctx.arcTo(x, y, x + rr, y, rr);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
   // ── hud 读数（index.html:1957-1972）─────────────────────────────
   // 四行读数走语言表 hud.*（与 Python hud.py 的 t("hud.*") 同键同名）；表里带
   // <b> 标签，canvas 侧先剥。warns 平行数组记录警告行（黄）—— 不能再用中文
@@ -314,16 +374,25 @@
       warns.push(true);
     }
     var hints = compositionHints(cam, placement, cam.W, cam.H, shot, mode);
-    if (hints.length) { lines.push("⚠ " + hints.join("　·　")); warns.push(true); }
+    var sc = hudScale(cam.W, cam.H);
+    var hintLines = hints.length ? wrapHints(ctx, hints, cam.W - sc.m * 2) : [];
+    for (var hi = 0; hi < hintLines.length; hi++) { lines.push(hintLines[hi]); warns.push(true); }
+    // 暗底铺在整个读数块背后（含提示行）：先按当前 font 量最宽行，再画板
     ctx.save();
-    ctx.font = "13px sans-serif";
+    ctx.font = sc.fs + "px sans-serif";
     ctx.textBaseline = "top";
+    var plateW = 0;
+    for (var pi = 0; pi < lines.length; pi++) {
+      plateW = Math.max(plateW, ctx.measureText(lines[pi]).width);
+    }
+    textPlate(ctx, sc.m - 5, sc.m - 4, plateW + sc.m * 2 + 10,
+              lines.length * sc.lh + sc.m + 4, sc.m);
     for (var i = 0; i < lines.length; i++) {
-      var y = 8 + i * 17;
-      ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,.75)";
-      ctx.strokeText(lines[i], 8, y);
+      var y = sc.m + i * sc.lh;
+      ctx.lineWidth = sc.stroke; ctx.strokeStyle = "rgba(0,0,0,.8)";
+      ctx.strokeText(lines[i], sc.m, y);
       ctx.fillStyle = warns[i] ? "#ffd54f" : "#fff";
-      ctx.fillText(lines[i], 8, y);
+      ctx.fillText(lines[i], sc.m, y);
     }
     ctx.restore();
     return hints;
@@ -340,6 +409,8 @@
     drawHorizon: drawHorizon,
     drawFigure: drawFigure,
     compositionHints: compositionHints,
+    hudScale: hudScale,
+    wrapHints: wrapHints,
     drawHud: drawHud,
     gridPaths: gridPaths
   };

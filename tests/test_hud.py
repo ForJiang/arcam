@@ -15,6 +15,7 @@ from arcam.frames import frame_rect
 from arcam.geometry import Camera, focal_px, project
 from arcam.hud import (
     _COVER_FULL,
+    hud_scale,
     _DIM,
     _flat,
     _FRAME_LINE,
@@ -325,3 +326,23 @@ def test_draw_grid_and_horizon_keep_their_colors():
     red = ((px2[:, 0] > 190) & (px2[:, 1] > 80) & (px2[:, 1] < 110)
            & (px2[:, 2] > 80) & (px2[:, 2] < 110)).sum()
     assert red > 50, f"地平线红色像素应出现（实测 {red}）"
+
+
+@pytest.mark.parametrize("w,h", [(480, 360), (640, 480), (960, 720), (1280, 720),
+                                 (1920, 1080), (3840, 2160), (320, 240), (800, 600)])
+def test_hud_scale_matches_js_formula(w: int, h: int) -> None:
+    """hud_scale 必须与两侧 hud.js 的 hudScale 逐值一致（v1.13.0 双实现公式）。
+
+    公式在 Python 与 JS 各写一份（HUD 文字随画布缩放），两边必须同输入同输出：
+     JS: fs = max(11, min(28, round(min(W,H)/38)))，返回 {fs, lh: fs+5,
+          m: round(fs*0.62), stroke: max(2, round(fs/4))}
+     Python: 同式，返回 (fs, fs+5, round(fs*0.62), max(2, round(fs/4)))
+    Node 侧由 tools/ 的对拍脚本验（见 test_webui_static 的静态门禁）；这里先钉
+    Python 侧的值，防止有人只改一边。
+    """
+    fs, lh, m, sw = hud_scale(w, h)
+    assert fs == max(11, min(28, round(min(w, h) / 38))), (w, h, fs)
+    assert lh == fs + 5 and m == round(fs * 0.62) and sw == max(2, round(fs / 4))
+    # 常见预览尺寸 640×480 必须仍是 13px（与旧行为一致，常见场景不变）
+    if (w, h) == (640, 480):
+        assert fs == 13

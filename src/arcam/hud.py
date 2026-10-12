@@ -260,7 +260,11 @@ def draw_grid(img: np.ndarray, cam: Camera, subject_x: float = 0.0) -> np.ndarra
                 seg.append(q)
             if len(seg) >= 2:
                 draw.line(seg, fill=color, width=width, joint="curve")
-    label_font = _font(20)
+    # 标签字号随画布缩放（与网页侧 hud.js 的 hudScale 同公式）：写死 20px 在
+    # 1920 宽下只占 1%，小到看不清；640×480 时算得 13px 与旧行为一致
+    _gfs, _glh, _gm, _gsw = hud_scale(pil.width, pil.height)
+    label_font = _font(_gfs)
+    _label_sw = max(3, round(_gfs / 5))
     H = pil.height
     for path in paths:
         if path.label is None:
@@ -271,7 +275,8 @@ def draw_grid(img: np.ndarray, cam: Camera, subject_x: float = 0.0) -> np.ndarra
         text = f"{int(path.label)}m"
         x, y = q[0] + 8, q[1] - 8
         draw.text((x, y), text, font=label_font,
-                  fill=_flat((0, 0, 0, 0.75)), stroke_width=4, stroke_fill=_flat((0, 0, 0, 0.75)))
+                  fill=_flat((0, 0, 0, 0.75)), stroke_width=_label_sw,
+                  stroke_fill=_flat((0, 0, 0, 0.75)))
         draw.text((x, y), text, font=label_font, fill=_flat(_GRID_MAJOR))
     return np.asarray(pil)
 
@@ -300,7 +305,14 @@ def draw_horizon(img: np.ndarray, cam: Camera, label: str = "地平线") -> np.n
     color = _flat(_HORIZON)
     _dashed_line(draw, a, b, color, width=2, dash=(12, 8))
     lab = pt(-0.22)
-    draw.text((lab[0] + 10, lab[1] - 10), label, font=_font(22),
+    # 补描边 + 字号随画布缩放（与网页侧 hud.js 同口径）：红字直接压在亮照片上
+    # 没有描边几乎看不见；hudScale 同公式，640×480 时 13px 与旧行为一致
+    _hfs, _hlh, _hm, _hsw = hud_scale(pil.width, pil.height)
+    _hfont = _font(round(_hfs * 1.15))
+    draw.text((lab[0] + 10, lab[1] - 10), label, font=_hfont,
+              fill=_flat((0, 0, 0, 0.8)), stroke_width=max(3, round(_hfs / 5)),
+              stroke_fill=_flat((0, 0, 0, 0.8)))
+    draw.text((lab[0] + 10, lab[1] - 10), label, font=_hfont,
               fill=_flat(_HORIZON_LABEL))
     return np.asarray(pil)
 
@@ -479,15 +491,29 @@ def draw_hud_text(img: np.ndarray, cam: Camera, subject: Subject, *,
             lines.append(t("hud.behind", lang=lang))
     else:
         lines.append(t("hud.nochar", lang=lang))
-    font = _font(15)
-    y = 8
+    fs, lh, m, sw = hud_scale(W, H)
+    font = _font(fs)
+    y = m
     for line in lines:
-        draw.text((8, y), _strip_tags(line), font=font, fill=(255, 255, 255),
-                  stroke_width=2, stroke_fill=(0, 0, 0))
-        y += 20
+        draw.text((m, y), _strip_tags(line), font=font, fill=(255, 255, 255),
+                  stroke_width=sw, stroke_fill=(0, 0, 0))
+        y += lh
     hints = composition_hints(cam, placement, canvas_size=canvas_size,
                               shot=shot, mode=mode, lang=lang)
     return np.asarray(pil), hints
+
+
+def hud_scale(width: int, height: int) -> tuple[int, int, int, int]:
+    """HUD 文字尺寸随画布缩放 —— ``hudScale``（两侧 hud.js）的 Python 对译。
+
+    返回 ``(字号, 行高, 边距, 描边宽)``。为什么需要：原版 HUD 读数是 HTML 文本
+    （innerHTML + CSS）天然随容器缩放；移植到 canvas/PIL 后早年写死 15px，
+    1920 宽下只占画布 0.8%（小到看不清）、480 宽下四条构图提示又会溢出。
+    按画布短边比例算，640×480 时得 13px（与网页侧逐位同公式）；行高/边距/
+    描边都跟着字号走。两侧 hud.js 的 ``hudScale`` 是同一公式，改这里必须同改。
+    """
+    fs = max(11, min(28, round(min(width, height) / 38)))
+    return fs, fs + 5, round(fs * 0.62), max(2, round(fs / 4))
 
 
 def _strip_tags(s: str) -> str:

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """arcam LiDAR E2E 冒烟：可验证合成地面深度 → HEIC 容器 → 平面拟合 → 外参解算 → 深度驱动合成。
 
 真值已知（相机高 1.5m / 俯角 20° / 滚转 -8°），解出值必须回到真值附近，

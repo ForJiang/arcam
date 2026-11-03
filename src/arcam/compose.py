@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """合成入口：把立绘按透视落位画进照片帧，并按画幅裁切出图（composeShot）。
 
 原版六步（index.html:3673-3701）在移植侧被拆成两个公开入口：

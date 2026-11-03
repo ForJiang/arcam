@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: 2026 ForJiang
+   SPDX-License-Identifier: MIT */
 /* arcam web UI（GitHub Pages 版） — 原生 CSS，零依赖。
  * tokens 与组件规格来自 docs/WEB-STYLE.md（挖掘自 sess_0312ae9e）：
  * 深浅色跟随系统 prefers-color-scheme，不写死颜色；反渐变/反阴影/反玻璃拟态。

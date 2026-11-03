@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """arcam 命令行 —— 原版桌面端四件事（出图 / 立绘层 / 素材包 / 抠图）加离线视频、LiDAR 深度。
 
 子命令一览（每个都有中英 --help，--lang 切换；共 15 个，stats 现抓本表不硬编码）::

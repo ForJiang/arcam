@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """LiDAR 深度 IO —— iPhone 激光雷达深度图的读取、对齐与落盘（arcam 接入层 L1）。
 
 约定出处 ``docs/LIDAR-SPEC.md``（本模块无原版 JS 对应实现，是 LiDAR 接入的新约）：

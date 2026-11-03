@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 /* arcam-render.js — 立绘落位合成与 scene.json 配方（canvas 侧，五个导出）。
  *
  * 逐字移植 src/arcam/sprite.py（contact_shadow_layer / composite_sprite）、

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 /* arcam-lighting.js — 环境光采样与立绘烘光（src/arcam/lighting.py 的 Pages 纯 JS 移植）。
  *
  * 零 DOM、零依赖（只有 ./arcam-core.js 的 currentPlacement 参与 lightRegionRect），

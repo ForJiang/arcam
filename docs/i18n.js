@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 // 中英语言表 —— 由 src/arcam/i18n.py 同源生成（index.html:600-830 TXT 逐条搬运
 // + webui 新增键）。两侧表必须一致：tests/test_webui_static.py 有逐条比对门禁。
 window.ARCAM_TXT = {

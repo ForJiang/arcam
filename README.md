@@ -484,3 +484,14 @@ Pages 抠图阈值 1 ulp 翻面等）、v1.1.1 补验可选依赖路径再修 2 
 源码溯源：每个公开函数的 docstring 都注明对应 JS 的 `index.html:<line>` /
 `cutout.js:<line>`；契约全集在 `docs/SPEC.md`，原版逐字事实在
 `oss-teardown/lhso-20261003/artifacts/`。
+
+## 作者与许可
+
+**ForJiang** · [github.com/ForJiang](https://github.com/ForJiang) ·
+[forjiang.github.io/arcam](https://forjiang.github.io/arcam/)
+
+以 [MIT License](LICENSE) 发布（源码文件头部带 SPDX 署名行）。本项目是上述
+原版 AR 取景器投影 / 合成管线的独立移植实现——算法按原版行为重新实现、未复制
+其源代码，原版取景器的创意与设计归其作者所有，特此致谢；仓库内捆绑的第三方
+组件（three.js / MMD 运行时 / ISNet-anime 模型）归各自作者所有、依其自身
+条款分发。

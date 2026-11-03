@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """出图画幅（取景框）—— ``viewRect`` / ``frameRect`` 的离线等价。
 
 原版的 viewRect 量的是**布局**（浏览器 UI 外壳：cover 铺满后画布落在屏幕外的那一圈、

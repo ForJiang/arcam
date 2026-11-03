@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 /**
  * golden 差分夹具：用 Node 跑 docs/tests/golden.json 对 docs/arcam-core.js
  * （Pages 纯 JS 移植）与 docs/arcam-lighting.js（光照烘焙移植）的逐向量数值比对。

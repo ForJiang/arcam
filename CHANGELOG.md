@@ -2,6 +2,35 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.13.2] — 2026-10-11
+
+项目署名：全仓以 **ForJiang** 署名。
+
+### 新增
+
+- **LICENSE**（MIT，© 2026 ForJiang）：含对原版 AR 取景器的致谢（独立移植、
+  未复制源代码）与捆绑第三方组件（three.js / MMD 运行时 / ISNet-anime 模型）
+  的归属声明。
+- **69 个自有源码文件**加 SPDX 头（`SPDX-FileCopyrightText: 2026 ForJiang` +
+  `SPDX-License-Identifier: MIT`）：Python/JS/CSS/HTML/脚本与启动器全覆盖；
+  vendored 的 three.js / mmd/ / vendor/ 模型不碰（有自己的许可证）。
+- `pyproject.toml` 加 `authors`/`license`/`license-files` 与 `[project.urls]`
+  （Homepage/Repository）；wheel 元数据带 Author + License-Expression，LICENSE
+  随包分发（PEP 639，setuptools 下限抬到 77）。`arcam.__author__/__license__`
+  程序化可读。
+- README 加「作者与许可」节；git 提交身份（仓库本地）改为
+  ForJiang <ForJiang@users.noreply.github.com>。
+
+### 备注
+
+- 排查踩的坑（两处都是自己埋的）：① 版权头里的 `<https://github.com/ForJiang>`
+  触发了零 CDN 门禁的 `http://` 扫描（URL 从头里移除，链接走 [project.urls]）；
+  ② `[project.urls]` 表头插错了位置，把 `license`/`license-files` 吞进 urls 表
+  （TOML 表头之后的键都归该表）；③ 有 shebang 的脚本（5 个）版权头必须插在
+  shebang **之后**——shebang 不在第一行，Node/内核就不认。
+- wheel 实测：METADATA 带 `Author: ForJiang` / `License-Expression: MIT` /
+  `License-File: LICENSE`；919 passed / 1 skipped；golden-diff 500 向量 bad=0。
+
 ## [1.13.1] — 2026-10-11
 
 v1.13.0 的收尾修正：**暗板宽度钳到画布内**。读数块的文本已按 `W−2m` 断行，

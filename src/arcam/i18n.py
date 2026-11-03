@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """中英语言表 —— index.html:600-830 ``TXT`` 的逐条搬运 + webui/CLI 新增键（FEATURE-SPEC §3）。
 
 原版是数组形式 [中文, English]：少一条会立刻现形（t() 回退成裸 key），

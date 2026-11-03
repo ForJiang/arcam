@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """matte_tools 真图冒烟：装图自动修图链五步全跑（FEATURE-SPEC §1 门禁 4）。
 
 用原版仓库自带的素材（黑底/白底 JPG、带透明 PNG）过整条链，打印每步结论。

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """JS 数值语义对齐工具 —— 原版在 canvas 上逐像素取整，Python 的 round 是银行家舍入，
 直接搬 round() 会让 bakeLit 的 LUT、footPrint 的 alpha、viewRect 原点全部系统性偏移。
 

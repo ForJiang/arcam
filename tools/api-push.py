@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """API 分步推送（git 协议不通时的备用路径，见 memory: github-api-push-workaround）。
 
 git 协议失败但 api.github.com 正常时：blob → tree(base_tree) → commit(parent=远端

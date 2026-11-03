@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """tests/test_webapp.py —— WEB-SPEC §5 测试门禁（后端 Agent W1）。
 
 ephemeral 端口（``port=0`` 起服务后读实际端口）+ 线程 serve，覆盖 SPEC §5 全部项：

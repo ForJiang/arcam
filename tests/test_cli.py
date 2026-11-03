@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """CLI 冒烟：render / char-layer / bundle / check / video / matte 错误路径。
 
 只在 tmp_path 里落文件；退出码约定 0 正常 / 1 运行期失败 / 2 用法错误。

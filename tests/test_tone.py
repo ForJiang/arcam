@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """tone.py —— 环境融合 ①（toneMatchedLayer，index.html:3501-3620）。
 
 两个层次：

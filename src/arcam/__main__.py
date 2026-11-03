@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """``python -m arcam`` 入口（等价于装好包后的 ``arcam`` 命令）。"""
 
 from __future__ import annotations

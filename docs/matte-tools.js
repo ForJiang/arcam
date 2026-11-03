@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 // 立绘修图工具链 —— cutout.js 非 AI 线的 JS 移植（FEATURE-SPEC §1）。
 // 与 src/arcam/matte_tools.py 逐行对译（同一份算法两个语言）；docs 侧没有
 // 后端，纯色底抠图/裁边/柔边/微糊全在浏览器里跑。

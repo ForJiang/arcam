@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 # ============================================================
 # 启动AR取景器.command —— macOS 一键启动 arcam 网页界面
 #

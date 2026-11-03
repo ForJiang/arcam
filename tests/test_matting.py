@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """matting 模块测试（cutout.js AI 抠图线的 Python 等价实现）。
 
 单测（预处理/后处理/连通域/模型解析）不依赖模型也不依赖 onnxruntime；

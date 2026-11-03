@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """立绘修图工具链 —— cutout.js 非 AI 线的 Python 等价实现（FEATURE-SPEC §1）。
 
 对应原版（`oss-teardown` 仓库 cutout.js / index.html）：

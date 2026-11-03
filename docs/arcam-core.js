@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 /* arcam-core.js — 纯数学内核（针孔投影 / 摆位 / 画幅），零 DOM、零依赖。
  *
  * 逐字移植 src/arcam/geometry.py + src/arcam/placement.py + src/arcam/frames.py，

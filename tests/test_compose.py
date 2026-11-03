@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """compose.py —— composeShot 六步（index.html:3673-3701）与立绘层路径。
 
 端到端用**程序生成**的 320×240 背景 + 64×128 立绘，断言：

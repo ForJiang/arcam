@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """arcam.webapp —— 本地网页界面后端（``arcam web``，契约 = docs/WEB-SPEC.md §1）。
 
 零第三方 web 框架：只用标准库 ``http.server``/``json``/``threading``/``webbrowser``/

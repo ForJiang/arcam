@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 /* arcam web UI（GitHub Pages 版） — 原生 ES2022 module，零依赖、零框架、零 CDN。
  * 契约：docs/SITE-SPEC.md §2/§3（数值口径与 Python 逐字一致，由 arcam-core.js /
  * arcam-render.js 两个模块承载；本文件只做页面接线：上传 → composeShot → 预览/下载）。

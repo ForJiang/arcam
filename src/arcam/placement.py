@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """摆位 —— 贴地/自由两种立绘放置算法 + 三分线摆正 + 贴边吸附（index.html:2903-3025）。
 
 纯数学模块：只依赖 numpy 的类型标注与 ``arcam.numeric`` / ``arcam.geometry``。

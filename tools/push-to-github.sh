@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 # 推送到 GitHub 并开启 GitHub Pages（/docs 目录）。
 #
 # 用法：

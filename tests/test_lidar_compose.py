@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """LiDAR 深度接入 compose（LIDAR-SPEC §4/§5 T5）。
 
 plane.py（L2）未落地时本文件整体 skip（落地后自动生效）。覆盖：

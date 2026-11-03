@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """HUD 取景装饰层 —— index.html:1746-1972 的 PIL 对译（FEATURE-SPEC §2）。
 
 六件套与原版逐字对应：

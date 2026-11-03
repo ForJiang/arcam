@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """arcam.lidar_sim —— 实时流协议模拟器（docs/LIDAR-SPEC §6，测试/无真机调试用）。
 
 合成场景（对应 LIDAR-SPEC §5 T2 的 (h, pitch, roll) 闭环场景）：相机离地 ``h``、

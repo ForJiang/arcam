@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """scene.json 配方（buildScene / saveScene / loadScene）。
 
 配方是与原版**互通**的那一份几何数据：照片之外的相机、人物、落位、画幅。

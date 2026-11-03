@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """sprite.py 单测：接触阴影层与立绘合成（index.html:3044-3166）。
 
 ``_P`` 是 placement.SpritePlacement 同属性协议（u/v/w/h/rot）的轻量替身 ——

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 /**
  * zip writer 对拍夹具：把两侧 app.js 里**手写的 store 式最小 zip**
  * （webui/app.js 与 docs/app.js 各一份同源移植）抠出来，在 Node 里真跑，

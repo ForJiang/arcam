@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """arcam —— 「让她走出屏幕」的 Python 移植。
 
 浏览器原版（AR 取景器）的离线合成管线等价实现：
@@ -7,6 +9,9 @@ scene.json 配方、位姿轨道视频渲染。
 契约与源码溯源见仓库根目录 docs/SPEC.md（对原版 index.html / cutout.js / mmd.js 的
 逐条 file:line 映射）。
 """
+
+__author__ = "ForJiang"
+__license__ = "MIT"
 
 from arcam.numeric import Rect, clampn, js_round, js_to_fixed
 from arcam.geometry import K_LONG, K_SHORT, Camera, focal_px, place, project

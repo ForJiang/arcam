@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """arcam.lidar_live —— iPhone LiDAR 深度实时流的 TCP 接收与服务循环。
 
 协议溯源：docs/LIDAR-SPEC §6（冻结）。坐标/单位约定见 docs/LIDAR-SPEC §1：

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """matte_tools 单测 —— FEATURE-SPEC §1 门禁。
 
 数值断言附手算过程注释（docs/SPEC.md §4.3）；对译证据绑定原版

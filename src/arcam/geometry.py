@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """几何与投影核心 —— 原版 AR 取景器的针孔相机模型（index.html:1041-1057 / 3184-3202）。
 
 所有角度对外用**度**（``Camera.pitch_deg`` / ``Camera.roll_deg``，对应原版 ``S.pitch`` /

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """golden.json 重算门禁：fixture 与 arcam 实现逐向量比对（SITE-SPEC §0）。
 
 docs/tests/golden.json 是 Pages 纯 JS 移植（arcam-core.js / arcam-lighting.js）

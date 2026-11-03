@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """LiDAR 平面与环境量 —— 地平面拟合 → 相机高度/俯仰/横滚 + 采样 + 遮挡（LIDAR-SPEC §3）。
 
 本模块无原版 JS 对应物，是 iPhone 激光雷达深度接入 arcam 的新功能，接口契约以

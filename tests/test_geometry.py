@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """geometry 模块测试：投影 golden（手工推导）、place 反投影、round-trip、mmd 矩阵交叉验证。
 
 golden 用例的期望值全部按 artifact A-projection-core.md §3.1/§3.2 的公式**手工推导**

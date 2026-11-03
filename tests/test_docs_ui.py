@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """docs 静态站（GitHub Pages 版）UI 接线静态检查（v1.9.0，W3 分区交付）。
 
 与 tests/test_webui_static.py **完全独立**（不 import 它的任何东西）：那个文件

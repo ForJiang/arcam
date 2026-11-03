@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """lighting.py 单测：measure_region / char_lum / bake_lit / grain_tile 的手工 golden。
 
 所有 golden 都附手推算式（注释）。对应 JS：measureRegion index.html:1212-1224、

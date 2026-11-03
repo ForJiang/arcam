@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """位姿轨道 · 离线视频渲染。
 
 原版没有「轨道」这个对象：真机取景器把 deviceorientation 的 pitch/roll 实时写进

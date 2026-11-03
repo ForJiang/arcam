@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """placement 模块测试：贴地/自由摆位、三分线摆正、贴边吸附的行为与 golden 值。
 
 golden 期望值按 artifact A-projection-core.md §2.3 / §3.5 的公式手工推导（推导中间量

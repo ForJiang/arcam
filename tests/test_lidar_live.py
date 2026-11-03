@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """tests/test_lidar_live.py —— 实时流协议（docs/LIDAR-SPEC §6）单测。
 
 全部走 127.0.0.1 回环；不依赖真实设备 / iOS App。

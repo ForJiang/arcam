@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 // HUD 取景装饰层 —— index.html:1746-1972 的浏览器侧移植（FEATURE-SPEC §2）。
 // 几何与 Python 侧 arcam/hud.py 同源（focal/project 公式逐字对译
 // index.html:1043-1057），供 webui 预览浮层实时绘制；出图不带 HUD。

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 /* arcam web UI — 原生 JS，零依赖、零框架、零 CDN。
  * 与后端 src/arcam/webapp.py 的接口契约见 docs/WEB-SPEC.md §1/§2。
  *

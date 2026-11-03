@@ -1,7 +1,10 @@
 [project]
 name = "arcam"
-version = "1.13.1"
+version = "1.13.2"
 description = "Python 移植：让她走出屏幕 —— 透视投影立绘合成管线（投影/摆位/合成/抠图/视频）"
+authors = [{ name = "ForJiang" }]
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.14"
 dependencies = [
     "numpy>=2.0",
@@ -14,11 +17,15 @@ lidar = ["pillow-heif>=1.7", "OpenEXR>=3.3"]  # Imath 模块由 OpenEXR wheel �
 video = ["imageio>=2.35", "imageio-ffmpeg>=0.5"]
 dev = ["pytest>=8.0"]
 
+[project.urls]
+Homepage = "https://forjiang.github.io/arcam/"
+Repository = "https://github.com/ForJiang/arcam"
+
 [project.scripts]
 arcam = "arcam.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

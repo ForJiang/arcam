@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 // 实时相机层 —— index.html:3899-4037 的浏览器侧移植（FEATURE-SPEC §4）。
 // docs（Pages）版：与 webui 版逐字同源（仅本行抬头注释不同）；快门帧由调用方
 // 直接收（app.js 的 bindLive：arcamLive.shoot() → toBlob → setPhoto(File)），

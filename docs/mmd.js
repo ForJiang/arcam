@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 ForJiang <https://github.com/ForJiang>
+// SPDX-License-Identifier: MIT
 /**
  * 3D 立绘运行时（MMD：浏览器直读 .zip / .pmx，或导入烘好的 .glb）。
  *

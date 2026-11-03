@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """环境融合 ①：把立绘图层往实拍画面的色域上拉一档（toneMatchedLayer）。
 
 原版只作用在 3D 图层上（``draw3DLayer`` 里 ``TONE_ON = !!src`` 自守卫），

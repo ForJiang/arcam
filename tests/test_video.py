@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """轨道插值 / 渲染 + 图片 IO 单测。
 
 断言取向：能离线算的（插值、帧数、schema 往返）手推；要过 composeShot 管线的用

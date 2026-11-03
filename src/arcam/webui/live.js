@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 // 实时相机层 —— index.html:3899-4037 的浏览器侧移植（FEATURE-SPEC §4）。
 // 摄像头 / 陀螺仪 / 快门 / 变焦；桌面端无传感器时保留手拖参数。
 (function () {

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """frames.py 单测：view_rect / frame_rect（index.html:951-1039）的手工 golden。"""
 
 from __future__ import annotations

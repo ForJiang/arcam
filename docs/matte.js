@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 ForJiang
+// SPDX-License-Identifier: MIT
 /**
  * J4 — AI 抠图（ISNet-anime + onnxruntime-web），ESM 模块，零框架零构建。
  *

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ForJiang
+# SPDX-License-Identifier: MIT
 """前端 webui 静态检查（不起真服务；真服务冒烟由编排者按 WEB-SPEC §5 做）。
 
 覆盖（W2 交付要求 + A5 前端双界面审计加固）：

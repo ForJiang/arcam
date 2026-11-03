@@ -19,18 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
---------------------------------------------------------------------------------
-
-致谢 / Acknowledgement
-
-本项目（arcam）是「让她走出屏幕」AR 取景器（Let-her-step-out-of-the-screen-
-and-into-your-world，https://filomenosnyder-stack.github.io/Let-her-step-out-
-of-the-screen-and-into-your-world/）的透视投影 / 合成管线的独立移植实现：
-投影、摆位、合成、抠图等算法按原版行为重新实现，未复制其源代码。原版取景器
-的创意与界面设计归其作者所有，特此致谢。
-
-Third-party components bundled in this repository retain their own licenses:
-three.js and the MMD runtime files under `arcam/webui/mmd/` / `docs/mmd/`,
-and the ISNet-anime ONNX model under `vendor/`, belong to their respective
-authors and are redistributed here under their own terms.

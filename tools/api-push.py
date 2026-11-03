@@ -32,6 +32,16 @@ if not TOKEN:
 API = f"https://api.github.com/repos/{REPO}"
 
 
+def _git(*args, binary=False):
+    """git 子进程统一走这里：core.quotepath=false —— 默认转义会把非 ASCII
+    文件名（启动AR取景器.command 这类）变成带引号的 "\345..." 串，diff 的
+    输出再传回 git show 就成了不存在的路径（v1.13.2 实测）。blob 取内容那步
+    要 binary=True：base64 编码需要原始字节，text 模式的解码/回编码虽可经
+    surrogateescape 往返，但直取字节更干净。"""
+    return subprocess.run(["git", "-c", "core.quotepath=false", *args],
+                          capture_output=True, text=not binary)
+
+
 def api(method, path, body=None):
     req = urllib.request.Request(API + path, method=method)
     req.add_header("Authorization", f"Bearer {TOKEN}")
@@ -52,8 +62,8 @@ def api(method, path, body=None):
 
 
 remote = api("GET", f"/git/refs/heads/{BRANCH}")["object"]["sha"]
-local = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-parent = subprocess.run(["git", "rev-parse", "HEAD~1"], capture_output=True, text=True).stdout.strip()
+local = _git("rev-parse", "HEAD").stdout.strip()
+parent = _git("rev-parse", "HEAD~1").stdout.strip()
 print(f"远端 {BRANCH}: {remote[:8]}  本地 HEAD: {local[:8]}  parent: {parent[:8]}", flush=True)
 
 # 历史对齐：本工具每轮都经 API 重建提交（author/committer 时间戳与本地不同），
@@ -61,21 +71,19 @@ print(f"远端 {BRANCH}: {remote[:8]}  本地 HEAD: {local[:8]}  parent: {parent
 # 此收口（新提交仍挂 remote 为 parent，下面照旧）；树也不同才是真分叉，拒绝。
 if remote != parent:
     remote_tree = api("GET", f"/git/commits/{remote}")["tree"]["sha"]
-    parent_tree = subprocess.run(["git", "rev-parse", f"{parent}^{{tree}}"],
-                                 capture_output=True, text=True).stdout.strip()
+    parent_tree = _git("rev-parse", f"{parent}^{{tree}}").stdout.strip()
     if remote_tree != parent_tree:
         sys.exit(f"远端与本地父提交内容也不同（{remote[:8]} vs {parent[:8]}）"
                  f"——真分叉，先对齐再推")
-    print(f"注：远端 tip 是上一轮 API 重建的提交（树与本地父提交相同），"
-          f"新提交直接挂它", flush=True)
+    print("注：远端 tip 是上一轮 API 重建的提交（树与本地父提交相同），"
+          "新提交直接挂它", flush=True)
 
-changed = subprocess.run(["git", "diff", "--name-only", f"{parent}..{local}"],
-                         capture_output=True, text=True).stdout.split()
+changed = _git("diff", "--name-only", f"{parent}..{local}").stdout.split()
 print(f"变更 {len(changed)} 个文件", flush=True)
 
 tree_entries = []
 for path in changed:
-    blob = subprocess.run(["git", "show", f"HEAD:{path}"], capture_output=True, check=True).stdout
+    blob = _git("show", f"HEAD:{path}", binary=True).stdout
     b = api("POST", "/git/blobs", {
         "content": base64.b64encode(blob).decode(), "encoding": "base64"})
     tree_entries.append({"path": path, "mode": "100644", "type": "blob", "sha": b["sha"]})
@@ -83,8 +91,7 @@ for path in changed:
 
 tree = api("POST", "/git/trees", {"base_tree": remote, "tree": tree_entries})
 commit = api("POST", "/git/commits", {
-    "message": subprocess.run(["git", "log", "-1", "--format=%B"], capture_output=True,
-                              text=True).stdout.strip(),
+    "message": _git("log", "-1", "--format=%B").stdout.strip(),
     "tree": tree["sha"], "parents": [remote]})
 api("PATCH", f"/git/refs/heads/{BRANCH}", {"sha": commit["sha"], "force": False})
 print(f"已推送 {BRANCH} -> {commit['sha'][:8]}", flush=True)

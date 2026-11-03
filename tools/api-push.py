@@ -15,8 +15,11 @@ import subprocess
 import sys
 import urllib.request
 
-REPO = sys.argv[1] if len(sys.argv) > 1 else "ForJiang/arcam"
-BRANCH = sys.argv[2] if len(sys.argv) > 2 else "main"
+ARGS = sys.argv[1:]
+FORCE = "--force" in ARGS
+POS = [a for a in ARGS if not a.startswith("--")]
+REPO = POS[0] if len(POS) > 0 else "ForJiang/arcam"
+BRANCH = POS[1] if len(POS) > 1 else "main"
 TOKEN = os.environ.get("GH_TOKEN", "").strip()
 if not TOKEN:
     _fill = subprocess.run(
@@ -70,13 +73,17 @@ print(f"远端 {BRANCH}: {remote[:8]}  本地 HEAD: {local[:8]}  parent: {parent
 # 于是远端 tip 与本地父提交 **SHA 不同但树相同**——第二轮起必现。内容一致就在
 # 此收口（新提交仍挂 remote 为 parent，下面照旧）；树也不同才是真分叉，拒绝。
 if remote != parent:
-    remote_tree = api("GET", f"/git/commits/{remote}")["tree"]["sha"]
-    parent_tree = _git("rev-parse", f"{parent}^{{tree}}").stdout.strip()
-    if remote_tree != parent_tree:
-        sys.exit(f"远端与本地父提交内容也不同（{remote[:8]} vs {parent[:8]}）"
-                 f"——真分叉，先对齐再推")
-    print("注：远端 tip 是上一轮 API 重建的提交（树与本地父提交相同），"
-          "新提交直接挂它", flush=True)
+    if FORCE:
+        print(f"⚠ --force：远端 tip 与本地父提交不同（{remote[:8]} vs {parent[:8]}），"
+              f"按你的要求直接覆盖远端——确认本地已包含远端全部内容", flush=True)
+    else:
+        remote_tree = api("GET", f"/git/commits/{remote}")["tree"]["sha"]
+        parent_tree = _git("rev-parse", f"{parent}^{{tree}}").stdout.strip()
+        if remote_tree != parent_tree:
+            sys.exit(f"远端与本地父提交内容也不同（{remote[:8]} vs {parent[:8]}）"
+                     f"——真分叉，先对齐再推（确信本地包含远端全部内容时可用 --force）")
+        print("注：远端 tip 是上一轮 API 重建的提交（树与本地父提交相同），"
+              "新提交直接挂它", flush=True)
 
 changed = _git("diff", "--name-only", f"{parent}..{local}").stdout.split()
 print(f"变更 {len(changed)} 个文件", flush=True)
@@ -93,5 +100,5 @@ tree = api("POST", "/git/trees", {"base_tree": remote, "tree": tree_entries})
 commit = api("POST", "/git/commits", {
     "message": _git("log", "-1", "--format=%B").stdout.strip(),
     "tree": tree["sha"], "parents": [remote]})
-api("PATCH", f"/git/refs/heads/{BRANCH}", {"sha": commit["sha"], "force": False})
+api("PATCH", f"/git/refs/heads/{BRANCH}", {"sha": commit["sha"], "force": FORCE})
 print(f"已推送 {BRANCH} -> {commit['sha'][:8]}", flush=True)

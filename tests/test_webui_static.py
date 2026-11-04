@@ -859,7 +859,7 @@ def test_i18n_tables_match_between_python_and_js():
     # → 190；v1.10.0 英文支持补全再加 102 条（live.*/hud.* 构图提示/app.js 状态
     # 文案）→ 292。改这条断言前先跑：
     #   .venv/bin/python -c "from arcam.i18n import TXT; print(len(TXT))"
-    assert len(PY_TXT) == 338, f"表条数变了：{len(PY_TXT)}（292 + 网页全面中文化 51 − 5 个零引用死键）"
+    assert len(PY_TXT) == 339, f"表条数变了：{len(PY_TXT)}（292 + 网页全面中文化 51 − 5 个零引用死键）"
 
 
 def test_mmd_3d_wired():

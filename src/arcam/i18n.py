@@ -390,6 +390,9 @@ TXT: dict[str, tuple[str, str]] = {
                      "There is no .pmx in this zip — did you download the wrong pack?"),
     "mmd.noPmxDir": ("这个文件夹里没有 .pmx —— 选错文件夹了？",
                      "There is no .pmx in this folder — wrong folder picked?"),
+    # 页脚署名（v1.13.3）：© 版权行中英同形（同 frame.16:9 的豁免口径）
+    "footer.credit": ("© 2026 ForJiang · MIT", "© 2026 ForJiang · MIT"),
+
 }
 
 

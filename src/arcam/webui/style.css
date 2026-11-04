@@ -233,6 +233,11 @@ button:hover { background: var(--btn-bg-hover); }
 #status-bar .spacer { flex: 1; }
 #status-msg.ok { color: var(--ok); }
 #status-msg.error { color: var(--danger); }
+#credit {
+  font-size: 12px;
+  color: var(--muted);
+  text-decoration: none;
+}
 #status-time {
   font-family: ui-monospace, Menlo, Consolas, monospace;
   font-size: 12px;

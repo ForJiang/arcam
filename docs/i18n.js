@@ -341,6 +341,7 @@ window.ARCAM_TXT = {
   "mmd.allDropped": ["这个包里的模型都被你去掉了 —— 刷新页面就回来。", "You removed every model in this pack — refresh the page to get them back."],
   "mmd.noPmxZip": ["这个 zip 里没有 .pmx —— 是不是下错了包？", "There is no .pmx in this zip — did you download the wrong pack?"],
   "mmd.noPmxDir": ["这个文件夹里没有 .pmx —— 选错文件夹了？", "There is no .pmx in this folder — wrong folder picked?"],
+  "footer.credit": ["© 2026 ForJiang · MIT", "© 2026 ForJiang · MIT"],
 };
 
 window.ARCAM_LANGS = ["zh", "en"];

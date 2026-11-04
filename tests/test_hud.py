@@ -59,11 +59,11 @@ def test_table_is_complete_and_bilingual():
     # +51、再删 5 个零引用死键（edge.贴上 那组，界面实际用 opt.edge.0..4）→ 338。
     # 改这条断言前先跑：
     #   .venv/bin/python -c "from arcam.i18n import TXT; print(len(TXT))"
-    assert len(TXT) == 338, f"表条数变了：{len(TXT)}"
+    assert len(TXT) == 339, f"表条数变了：{len(TXT)}"
     for k, (zh, en) in TXT.items():
         assert zh and en, f"{k} 有空白列"
         # 画幅比与"已保存"这类中英本就同形（1:1 / 4:5 / {0} {1}），不算漏翻
-        assert zh != en or k.startswith("frame.") or k == "note.savedOne", \
+        assert zh != en or k.startswith("frame.") or k == "note.savedOne" or k == "footer.credit", \
             f"{k} 中英相同（疑似漏翻）"
 
 

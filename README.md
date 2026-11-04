@@ -1,5 +1,11 @@
 # 让她走出屏幕 · Python 离线版（arcam）
 
+> 把二次元立绘按透视投影方程贴地摆进照片——AR 取景器的离线同构实现：Python CLI 15 个子命令（出图/抠图/素材包/位姿轨道视频/LiDAR/批量/MMD 3D）+ 本机网页界面，scene.json 与浏览器原版 100% 互认配方
+>
+> Place anime characters into photos via perspective projection — offline port of the AR viewfinder: Python CLI (render/matte/bundle/track video/LiDAR/batch/MMD) + local web UI, scene.json 100% compatible with the original
+
+English intro at the bottom: [English](#english)
+
 把二次元立绘按**透视投影方程**摆进你的画面里 —— 浏览器原版的离线同构实现。
 
 原版（[AR 取景器，纯静态零依赖](https://filomenosnyder-stack.github.io/Let-her-step-out-of-the-screen-and-into-your-world/)）
@@ -495,3 +501,132 @@ Pages 抠图阈值 1 ulp 翻面等）、v1.1.1 补验可选依赖路径再修 2 
 其源代码，原版取景器的创意与设计归其作者所有，特此致谢；仓库内捆绑的第三方
 组件（three.js / MMD 运行时 / ISNet-anime 模型）归各自作者所有、依其自身
 条款分发。
+
+---
+
+## English
+
+Place anime characters into photos via perspective projection — this is the offline,
+isomorphic port of the [AR viewfinder](https://filomenosnyder-stack.github.io/Let-her-step-out-of-the-screen-and-into-your-world/)
+(a pure-static, zero-dependency web page). The original drops a character cutout into
+the live phone-camera view: camera at `y = h`, ground at `y = 0`, character at `(x, z)`,
+with the on-screen height and ground contact solved by the pinhole projection equations
+and pitch/roll taken from device orientation. This repo moves the same projection and
+compositing pipeline to Python: feed it a photo and a character image, render by
+parameters, export material bundles, matte the character, or render frame-by-frame
+along a pose track (`track.json` — an offline-only concept: keyframes with linear
+interpolation, every frame through the same pipeline).
+
+**Core promise:** `scene.json` is **100% isomorphic** with the original (same field
+names, same order, same units, same rounding semantics) — recipes produced by the
+Python tool are recognized by the original web tool and vice versa.
+
+### Three ways to use it, one pipeline
+
+| Form | Entry | Notes |
+|---|---|---|
+| Command line | `arcam` / `python -m arcam` | 15 subcommands (render/char-layer/bundle/matte/prep/video/check/recipe/batch/multi/contact-sheet/watch/stats/lidar/web), scriptable, batch-friendly |
+| Local web UI | `arcam web` or the double-click launcher | every parameter adjustable, 300 ms debounced live preview, HUD framing overlays, zh/en toggle, character retouch chain; data never leaves the machine (loopback, single user, uploads live in process memory) |
+| Web app (no install) | [forjiang.github.io/arcam](https://forjiang.github.io/arcam/) | pure client-side JS port of the same pipeline + real-time camera (getUserMedia + gyroscope + shutter + zoom); all computation runs in the visitor's browser. Deploy: repo Settings → Pages → source `main` branch `/docs` |
+
+The macOS/Windows double-click launchers create/reuse a project-local `.venv`, install
+numpy + pillow if needed and start the service on port 8765. Pages-version notes:
+matting works there too (bundled `isnet-anime-q8.onnx` + onnxruntime-web, ~44 MB
+downloaded on first use); what it lacks versus the local web UI is LiDAR depth-driven
+placement, video track rendering, tone matching and occlusion masking (the tone toggle
+stays but is ignored during composition, noted on the page) — ambient-light and grain
+baking (bakeLit) has been live on the Pages front since v1.9.0, byte-aligned with
+Python.
+
+### Highlights
+
+- **iPhone LiDAR environment sensing** — fits the ground plane from depth frames
+  (16-bit PNG / .npy / .depth / portrait HEIC / EXR) to solve camera height, pitch and
+  roll, driving placement and occlusion masking; depth semantics follow Apple's
+  official axial z ("distance from the plane of the camera").
+- **Real-time camera viewfinder** (both web fronts) — getUserMedia plus device
+  orientation sensors drive pitch/roll live; the shutter renders on the spot, with
+  true zoom (`caps.zoom`) and soft screen rotation.
+- **Character matting chain** — solid-background flood-fill matting, auto trim, edge
+  softening, slight lens blur, half-body auto-detection; verbatim parity with the
+  original `autoPrepareChar` five steps (ISNet-anime via onnxruntime, lazy-loaded).
+- **HUD framing overlays** — ground grid / horizon / body skeleton / 11 composition
+  checks; live overlays on the web fronts, `arcam render --overlay` on the CLI.
+- **MMD 3D characters** (both web fronts) — true-perspective three.js rendering: feet
+  on the ground, shadow landing on the ground, pitch following the camera; four import
+  paths (zip/glb/folder/pmx); pose, key light and depth of field adjustable. The local
+  version renders the photo base on the backend and composites the WebGL layer in the
+  browser; models are not distributed with the program.
+- **Shadow controls** — azimuth (slant the shadow sideways) and density multiplier;
+  defaults bit-identical to the original.
+- **Batch rendering** — CLI `arcam batch` and the web "batch render" button
+  (multi-select photos → one zip).
+
+The Python side deliberately does not do live camera input (it only accepts given
+pitch/roll parameters — orientation sources and the layout shell are browser-only) or
+the MMD 3D runtime (three.js ecosystem; the camera-matrix cross-validation contract
+lives in `docs/SPEC.md` §6).
+
+### Install
+
+Requires Python ≥ 3.14. Runtime dependencies are only numpy + pillow (pytest is
+test-only; matting / LiDAR / video are optional extras).
+
+```bash
+uv venv
+.venv/bin/python -m pip install -e .             # core: projection + compositing + render
+.venv/bin/python -m pip install -e ".[matting]"  # optional: onnxruntime matting
+.venv/bin/python -m pip install -e ".[lidar]"    # optional: HEIC/EXR depth input (pillow-heif/OpenEXR)
+.venv/bin/python -m pip install -e ".[video]"    # optional: imageio mp4 writing
+```
+
+After install you have the `arcam` command; without installing, `python -m arcam`
+works too (with `src/` on the path).
+
+### A few example commands
+
+```bash
+# place a character on the ground in a photo and write the scene.json recipe
+arcam render photo.jpg char.png -o shot.png --scene scene.json
+# material bundle: shot.jpg + scene.json + character.png (deterministic timestamps)
+arcam bundle photo.jpg char.png -o pack.zip --pitch 12
+# render a pose track frame by frame (background: single image or frame directory)
+arcam video track.json char.png -o frames/ --bg bg/ --tone
+# matting (ISNet-anime, the same model the web front uses)
+arcam matte photo.jpg -o cut.png --model isnet-anime-q8.onnx
+# batch: a folder of photos x one character, one parameter set (depth frames matched by name)
+arcam batch photos/ char.png -o out/ --pitch 10
+# LiDAR: diagnose a depth frame, then let depth drive the placement (explicit flags still win)
+arcam lidar inspect scan_0001.png
+arcam render photo.jpg char.png -o shot.png --depth scan_0001.png
+# local web UI (defaults to 127.0.0.1:8765 and opens the browser)
+arcam web
+```
+
+Every subcommand has full `--help`; exit codes are **0** ok / **1** runtime failure /
+**2** usage error. Placement flags (`--pitch/--roll/--d/--x/--h/--hp/--feq/--shot/...`)
+default to the original tool's `S` defaults, so omitting them reproduces the original
+defaults.
+
+### Correctness
+
+The GitHub Pages front is pinned to the Python pipeline by a generated golden bench
+(`docs/tests/golden.json`, 503 vectors across focal / project / place / placement /
+scene plus five lighting groups): JS-side deviation < 1e-9, with bakeLit render output
+byte-identical (0 tolerance). The Python test suite currently stands at
+**897 passed / 1 skipped** with 98% coverage (4734 statements / 90 uncovered). Every
+public function's docstring cites its `index.html:<line>` / `cutout.js:<line>` origin;
+the full contract set lives in `docs/SPEC.md`.
+
+### Author & license
+
+**ForJiang** · [github.com/ForJiang](https://github.com/ForJiang) ·
+[forjiang.github.io/arcam](https://forjiang.github.io/arcam/)
+
+Released under the [MIT License](LICENSE) (SPDX attribution line in each source file
+header). This project is an independent reimplementation of the original AR viewfinder's
+projection/compositing pipeline — the algorithms were reimplemented to match its
+behavior, its source code not copied; the original viewfinder's creative work and
+design remain the property of its author, with thanks. Bundled third-party components
+(three.js / MMD runtime / ISNet-anime model) belong to their respective authors and are
+distributed under their own terms.

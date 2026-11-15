@@ -724,3 +724,97 @@ def test_open_mp4_gives_up_on_writer_error(tmp_path: Path, monkeypatch,
     assert len(frames) == 1
     assert not (tmp_path / "out" / "video.mp4").exists()
     assert "没有 mp4 成片" in capsys.readouterr().out
+
+
+# ───────────── 光影六参（v1.13.4：轨道此前无法表达 shadow/grain/采光/阴影两参/颗粒强度） ─────────────
+def test_track_grain_scale_zero_renders_differently(tmp_path: Path) -> None:
+    """轨道级 grain_scale=0（不撒颗粒）与默认轨道的帧必须不同——六参要真通达。"""
+    track_off = make_track([PoseKey(t=0.0, distance_m=4.0)], grain_scale=0.0)
+    track_def = make_track([PoseKey(t=0.0, distance_m=4.0)])
+    bg = np.full((96, 64, 3), 128, dtype=np.uint8)
+    a = render_track(bg, track_off, make_char(), tmp_path / "a")
+    b = render_track(bg, track_def, make_char(), tmp_path / "b")
+    ga = np.asarray(Image.open(a[0]).convert("RGB")).astype(int)
+    gb = np.asarray(Image.open(b[0]).convert("RGB")).astype(int)
+    assert int((np.abs(ga - gb).sum(2) > 0).sum()) > 0, "grain_scale=0 没生效（与默认逐位相同）"
+
+
+def test_track_key_level_grain_scale_overrides(tmp_path: Path) -> None:
+    """键级表态：键 A grain_scale=0、键 B 缺省 → 两帧不同（离散/插值回落链真通）。"""
+    track = make_track([PoseKey(t=0.0, distance_m=4.0, grain_scale=0.0),
+                        PoseKey(t=0.25, distance_m=4.0)])   # 一个区间 → 恰 2 帧
+    bg = np.full((96, 64, 3), 128, dtype=np.uint8)
+    frames = render_track(bg, track, make_char(), tmp_path / "out")
+    assert len(frames) == 2
+    f1 = np.asarray(Image.open(frames[0]).convert("RGB")).astype(int)
+    f2 = np.asarray(Image.open(frames[1]).convert("RGB")).astype(int)
+    assert int((np.abs(f1 - f2).sum(2) > 0).sum()) > 0, "键级 grain_scale 没生效"
+
+
+def test_track_shadow_opacity_zero_matches_no_shadow(tmp_path: Path) -> None:
+    """shadow_opacity=0（不铺阴影）的帧 = 关阴影的帧（同语义两条路径同结果）。"""
+    track_op0 = make_track([PoseKey(t=0.0, distance_m=4.0)], shadow_opacity=0.0)
+    track_off = make_track([PoseKey(t=0.0, distance_m=4.0)], shadow=False)
+    bg = np.full((96, 64, 3), 128, dtype=np.uint8)
+    a = render_track(bg, track_op0, make_char(), tmp_path / "a")[0]
+    b = render_track(bg, track_off, make_char(), tmp_path / "b")[0]
+    assert np.asarray(Image.open(a)).tobytes() == np.asarray(Image.open(b)).tobytes()
+
+
+def test_render_track_cli_flag_beats_track_json(tmp_path: Path) -> None:
+    """显式 render_track 参数压过轨道 JSON（命令行最后一手优先）。"""
+    track = make_track([PoseKey(t=0.0, distance_m=4.0)])          # grain_scale=1（默认）
+    bg = np.full((96, 64, 3), 128, dtype=np.uint8)
+    a = render_track(bg, track, make_char(), tmp_path / "a", grain_scale=0.0)[0]
+    track0 = make_track([PoseKey(t=0.0, distance_m=4.0)], grain_scale=0.0)
+    b = render_track(bg, track0, make_char(), tmp_path / "b")[0]
+    assert np.asarray(Image.open(a)).tobytes() == np.asarray(Image.open(b)).tobytes()
+
+
+def test_load_track_light_fields_roundtrip_and_rejects(tmp_path: Path) -> None:
+    """光影六参 save/load 严格往返；负浓度/负强度/字符串布尔被人话拒绝。"""
+    track = make_track([PoseKey(t=0.0, distance_m=4.0, grain_scale=2.0, shadow=False),
+                        PoseKey(t=1.0, distance_m=4.0, shadow_az=30.0)],
+                       grain_scale=1.5, shadow_az=10.0, sample_light=False)
+    p = tmp_path / "t.json"
+    save_track(track, p)
+    back = load_track(p)
+    assert (back.grain_scale, back.shadow, back.sample_light, back.shadow_az) == \
+        (1.5, True, False, 10.0)
+    assert back.keys[0].grain_scale == 2.0 and back.keys[0].shadow is False
+    assert back.keys[1].shadow_az == 30.0 and back.keys[1].grain_scale is None
+
+    bad = json.loads(p.read_text(encoding="utf-8"))
+    bad["shadow_opacity"] = -0.5
+    p2 = tmp_path / "bad.json"
+    p2.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(ValueError, match="≥ 0"):
+        load_track(p2)
+
+    bad2 = json.loads(p.read_text(encoding="utf-8"))
+    bad2["keys"][0]["grain"] = "yes"
+    p3 = tmp_path / "bad2.json"
+    p3.write_text(json.dumps(bad2, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(ValueError, match="布尔"):
+        load_track(p3)
+
+
+def test_cli_video_light_flags_take_effect(tmp_path: Path) -> None:
+    """CLI --no-grain 真到达渲染（旗标缺省 None=跟轨道走；显式给过压过轨道）。"""
+    from arcam.cli import main
+
+    track = make_track([PoseKey(t=0.0, distance_m=4.0)])
+    track_p = tmp_path / "track.json"
+    save_track(track, track_p)
+    bg = tmp_path / "bg.png"
+    Image.fromarray(np.full((96, 64, 3), 128, dtype=np.uint8)).save(bg)
+    char_p = tmp_path / "char.png"
+    Image.fromarray((make_char() * 255 + 0.5).astype(np.uint8), "RGBA").save(char_p)
+    out_a, out_b = tmp_path / "a", tmp_path / "b"
+    assert main(["video", str(track_p), str(char_p), "-o", str(out_a),
+                 "--bg", str(bg)]) == 0
+    assert main(["video", str(track_p), str(char_p), "-o", str(out_b),
+                 "--bg", str(bg), "--no-grain"]) == 0
+    fa = np.asarray(Image.open(out_a / "frame_000001.png").convert("RGB")).astype(int)
+    fb = np.asarray(Image.open(out_b / "frame_000001.png").convert("RGB")).astype(int)
+    assert int((np.abs(fa - fb).sum(2) > 0).sum()) > 0, "--no-grain 没生效"

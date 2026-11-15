@@ -1563,7 +1563,11 @@ class TestRouteCoverage:
         rgba[..., 3] = 255
         im = Image.fromarray(rgba, "RGBA").convert("P")
         im.save(buf, format="PNG", transparency=0)
-        assert b"tRNS" in buf.getvalue() or True      # 保存成功即走通 P+tRNS
+        # v1.13 审计把 `b"tRNS" in ... or True` 恒真断言换成真判据：本测试钉的是
+        # _has_alpha 的 info['transparency'] 分支,前置条件=PIL 重开后 info 里
+        # 真有 transparency 键（P+tRNS 落盘不落盘由 PIL 版本决定,别钉字节）
+        reopened = Image.open(io.BytesIO(buf.getvalue()))
+        assert "transparency" in reopened.info, "P+tRNS 前置条件失效（PIL 行为变了）"
         status, _, raw = post_upload(_port(server), {"char": ("pal.png", buf.getvalue())})
         assert status == 200
         payload = json.loads(raw)

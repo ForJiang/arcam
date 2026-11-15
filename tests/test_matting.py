@@ -464,6 +464,34 @@ def test_anime_cut_real_model():
     assert r.ms > 0.0
 
 
+@pytest.mark.skipif(
+    not _HAS_ORT or _real_model() is None,
+    reason=f"{_ORT_NOTE} 或 isnet-anime-q8.onnx 模型不存在",
+)
+def test_anime_cut_reuses_cached_session(monkeypatch):
+    """会话缓存（v1.13 优化）：同路径同 intra_op 第二次调用不再重建会话。
+
+    会话构建是秒级、推理百毫秒级——webapp 连续抠图/批量路径曾每次白付构建钱。
+    缓存按 (绝对路径, intra_op) 键控；结果必须与冷启动逐位一致。
+    """
+    M.clear_session_cache()
+    calls: list[int] = []
+    orig = M._load_session
+
+    def spy(path, *, intra_op, simd):
+        calls.append(1)
+        return orig(path, intra_op=intra_op, simd=simd)
+
+    monkeypatch.setattr(M, "_load_session", spy)
+    img = _character_like_image()
+    r1 = anime_cut(img)                                # 冷缓存 → 建会话
+    assert len(calls) == 1
+    r2 = anime_cut(img)                                # 热缓存 → 不再建
+    assert len(calls) == 1, "第二次调用不应重建会话"
+    assert r1.fg == pytest.approx(r2.fg) and r1.ms > 0.0 and r2.ms > 0.0
+    assert np.array_equal(r1.rgba, r2.rgba)
+
+
 def test_import_does_not_pull_onnxruntime(tmp_path):
     """懒加载硬规则：全新解释器里 import matting 不会导入 onnxruntime。
 

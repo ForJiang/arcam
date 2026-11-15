@@ -30,10 +30,16 @@ index.html:1840，Python 侧无对应输入）；MMD 3D 运行时（three.js 生
    `(W/2, H/2)`；`pitch>0` 俯视、`roll>0` 画面顺时针。
 6. **溯源**：每个公开函数的 docstring 必须注明对应 JS 的 `index.html:<line>` /
    `cutout.js:<line>`（从 artifact 里抄）。
-7. **非有限输入**（v1.10.0 起）：`pitch/roll/feq` 传 inf/nan → `project`/`place`
+7. **非有限输入**（v1.10.0 起）：`pitch/roll` 传 inf/nan → `project`/`place`
    返回 None（对应原版 JS 侧 NaN 传播后比较全假、落位解不出的收口），**不再抛
-   ValueError**；`snap_to_edge` 的 `rot=±inf` 归一成 0；`js_to_fixed` 对 nan 抛
-   `InvalidOperation`（无法表示，调用方先挡）；`scene.json` 不写 NaN 字面量
+   ValueError**；`feq` 非有限时**不走 None 收口**——它只是焦距乘数，照原版 JS
+   的 NaN/∞ 传播：`project` 产出非有限坐标（实测 feq=inf → (±inf, ±inf)），
+   `place` 里 `(u−W/2)/F` 全塌成 0 → 视分母退化与否返回 None（pitch=0）或
+   解出有限值（pitch=12 → (0.0, 7.53)，v1.13 审计实测钉准本条）；`snap_to_edge`
+   的 `rot=±inf` 归一成 0；`js_to_fixed` 对非有限入参**原样透传**（JS 的
+   `(NaN).toFixed(n)` 得 `"NaN"`、回解析即 NaN——抛 `InvalidOperation` 是
+   Decimal 的脾气不是 JS 语义，numeric.py 的 docstring 与 test_frames 钉住；
+   v1.13 审计修正本条旧描述）；`scene.json` 不写 NaN 字面量
    （`save_scene` 落 null）。CLI 侧 14 个浮点旗标在入口就拒 nan/inf（argparse
    类型函数，人话报错 exit 2）——放行只会出一张没有立绘的图还零提示；
    webapp 对同批键 400，两边同口径。
@@ -139,7 +145,9 @@ def auto_fix_x(char_rgba, subj, cam, *, mode='ground', **kw) -> tuple[float, str
 def snap_to_edge(c: SpritePlacement, bar: int, rect: Rect, aspect: float,
                  rot: float) -> SpritePlacement
 # index.html:2874-2895（bar 1上/2下/3左/4右）。edgeGeom 旋转后外接盒 bw/bh；
-# fit 钳位两端不排序（图比框大时范围自然反过来）。rot 变化后 rotateBar 换边。
+# fit 钳位的两端由 min/max 自行取序（图比框大时区间自然反转，框始终被图盖住、
+# 可自由平移——"不排序"是旧描述，与实现的 lo/hi 相反，v1.13 审计修正）。
+# rot 变化后 rotateBar 换边。
 ```
 
 ### 3.3 frames.py（P2）

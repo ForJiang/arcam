@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import sys
 import zipfile
@@ -824,6 +825,22 @@ def test_contact_sheet_grid(tmp_path, photo, char):
             assert not np.array_equal(cells[i], cells[j]), f"格 {i} 与 {j} 相同"
 
 
+def test_contact_sheet_vary_frame_takes_effect(tmp_path, photo, char):
+    """--vary frame 扫画幅要真的生效（v1.13 审计修复：contact-sheet 的
+    compose_keys 曾写成 compose 形参名 frame_key——永远匹配不上 --vary 的
+    合法键 frame，值被整体丢弃、标签照打，扫画幅的格子全是同一张图；
+    multi 的 --spec frame 反而生效，两条路径不一致）。"""
+    out = tmp_path / "sheet_frame.png"
+    code = main(["contact-sheet", str(photo), str(char), "-o", str(out),
+                 "--vary", "frame=4:5,16:9", "--cell-w", "160"])
+    assert code == 0 and out.is_file()
+    a = np.asarray(Image.open(out).convert("RGB"))
+    # 两格内容必须不同（画幅裁切不同；修复前两格逐位相同）
+    cell_a = a[26:26 + 100, 0:160]
+    cell_b = a[26:26 + 100, 160:320]
+    assert not np.array_equal(cell_a, cell_b), "--vary frame 的值被丢弃（两格相同）"
+
+
 def test_contact_sheet_rejects_over_wide(tmp_path, photo, char, capsys):
     """笛卡尔积超上限 → 退出码 1 + 人话错误（防手滑炸内存）。"""
     code = main(["contact-sheet", str(photo), str(char), "-o", str(tmp_path / "s.png"),
@@ -936,7 +953,12 @@ def test_watch_detects_change(tmp_path, photo, char):
     proc = subprocess.Popen(
         [sys.executable, "-m", "arcam", "watch", str(photo), str(char),
          "-o", str(out), "--interval", "0.3"],
-        cwd=str(ROOT), env={"PYTHONPATH": str(ROOT / "src"), "PATH": "/usr/bin:/bin"},
+        cwd=str(ROOT),
+        # 继承完整环境再加 PYTHONPATH：曾硬编码 POSIX PATH（/usr/bin:/bin），
+        # Windows 上把 USERPROFILE 一并丢了 → 子进程 RuntimeError("Could not
+        # determine home directory.") 秒退，w.png 永远不存在（POSIX 靠 passwd
+        # 库兜底 HOME 才侥幸通过）
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         time.sleep(2.5)                        # 等首次渲染
@@ -1027,6 +1049,27 @@ def test_multi_spec_size_pct_override(tmp_path, photo, char):
     big = render("x=1.2;d=3.0;mode=free;size_pct=80", "big")
     small = render("x=1.2;d=3.0;mode=free;size_pct=30", "small")
     assert int((np.abs(big - small).sum(2) > 0).sum()) > 100, "spec 的 size_pct 没生效"
+
+
+def test_multi_spec_shorter_than_chars_falls_back(tmp_path, photo, char):
+    """spec 套数少于附加立绘数：按帮助文本的承诺回落主参数（v1.13 审计修复：
+    曾直接 args.spec[i-1] IndexError 裸栈——main 不捕 IndexError，违反
+    "报错一律人话"；帮助文本"不给就用主参数"与实现矛盾）。"""
+    import io, contextlib
+    err = io.StringIO()
+    out = tmp_path / "m_fallback.png"
+    with contextlib.redirect_stderr(err):
+        code = main(["multi", str(photo), str(char), str(char), str(char),
+                     "-o", str(out), "--spec", "x=1.0;d=3.5"])
+    assert code == 0 and out.is_file()
+    assert "Traceback" not in err.getvalue(), "spec 不足时不应裸栈"
+    # spec 只覆盖第二张（x=1.0;d=3.5 与主参数默认不同）→ 与全主参数版必然不同
+    out_b = tmp_path / "m_nospec.png"
+    assert main(["multi", str(photo), str(char), str(char), str(char),
+                 "-o", str(out_b)]) == 0
+    a = np.asarray(Image.open(out).convert("RGB")).astype(int)
+    b = np.asarray(Image.open(out_b).convert("RGB")).astype(int)
+    assert int((np.abs(a - b).sum(2) > 0).sum()) > 0, "spec 完全没生效"
 
 
 def test_multi_scene_records_first_char(tmp_path, photo, char):

@@ -261,6 +261,29 @@ def test_lighting_golden_coverage_floors():
     assert len(g["grainTile"][1]["idx"]) >= 8, "grainTile 抽样下标过少"
 
 
+def test_geometry_golden_coverage_floors():
+    """几何组覆盖下限钉死（v1.13 审计补——曾全 wide 画布、0 个 None 路径向量，
+    K_SHORT 分支与 project/place/placement 的 None 收口全靠单元测试守，fixture
+    削减也不会红）。"""
+    g = _load()
+
+    def _is_wide(spec: list) -> bool:
+        w, h = int(spec[0]), int(spec[1])
+        return max(w, h) / min(w, h) >= 4.0 / 3.0
+
+    assert len(g["focal"]) >= 43, "focal 向量不足 43"
+    assert len(g["project"]) >= 202, "project 向量不足 202"
+    assert len(g["place"]) >= 122, "place 向量不足 122"
+    assert len(g["placement"]) >= 104, "placement 向量不足 104"
+    assert any(not _is_wide(v["cam"]) for v in g["focal"]), "缺非 wide 画布 focal 向量"
+    assert any(not _is_wide(v["cam"]) for v in g["project"]), "project 缺非 wide 画布向量"
+    assert any(not _is_wide(v["cam"]) for v in g["place"]), "place 缺非 wide 画布向量"
+    assert any(not _is_wide(v["cam"]) for v in g["placement"]), "placement 缺非 wide 画布向量"
+    assert any(v["uv"] is None for v in g["project"]), "缺 project None（相机后方）向量"
+    assert any(v["xd"] is None for v in g["place"]), "缺 place 无解（地平线）向量"
+    assert any(v["out"] is None for v in g["placement"]), "缺 placement None 向量"
+
+
 def _assert_scene_equal(got: dict, want: dict, where: str) -> None:
     """逐字段深比较：数字走 TOL，键集合必须一致（字段序由 buildScene 保证）。"""
     if isinstance(want, dict):

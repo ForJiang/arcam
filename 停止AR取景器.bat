@@ -1,4 +1,6 @@
 @echo off
+rem SPDX-FileCopyrightText: 2026 ForJiang
+rem SPDX-License-Identifier: MIT
 rem ============================================================
 rem 停止AR取景器.bat —— Windows：停掉占用端口（默认 8765）的网页服务
 rem

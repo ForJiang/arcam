@@ -599,12 +599,26 @@ def test_load_depth_unreadable_file_raises_value_error(tmp_path: Path) -> None:
         load_depth(missing)
     denied = tmp_path / 'denied.xyz'
     denied.write_bytes(b'ARCD')
-    denied.chmod(0o000)
-    try:
-        with pytest.raises(ValueError, match='无法读取深度文件'):
-            load_depth(denied)
-    finally:
-        denied.chmod(0o644)
+    if sys.platform == 'win32':
+        # Windows 不认 POSIX 权限位（chmod 0o000 后 owner 照样能读）——改用独占
+        # 字节锁制造真实的"读不了"（load_depth 的 read 撞锁 → PermissionError，
+        # 走同一条 OSError → ValueError 包装路径）
+        import msvcrt
+        fh = denied.open('rb')
+        try:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            with pytest.raises(ValueError, match='无法读取深度文件'):
+                load_depth(denied)
+        finally:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            fh.close()
+    else:
+        denied.chmod(0o000)
+        try:
+            with pytest.raises(ValueError, match='无法读取深度文件'):
+                load_depth(denied)
+        finally:
+            denied.chmod(0o644)
 
 
 @pytest.mark.parametrize('fx,cx,match', [

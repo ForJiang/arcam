@@ -2,7 +2,106 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [1.13.3] — 2026-10-11
+## [1.14.0] — 2026-11-15
+
+第四轮全项目审计（project-relay 模式A 拆解 → 修复轮）的落地版：5 个 M 级
+BUG、3 处 Windows 平台问题、一批工具潜伏 bug，外加视频轨道的光影六参与
+两处有 benchmark/golden 背书的性能优化。**门禁：928 passed / 6 skipped /
+0 failed；`node tools/golden-diff.mjs` 509 向量 bad=0；zip-writer-diff
+三判据全绿；CLI 端到端冒烟（render/multi/contact-sheet/stats）通过。**
+
+### 新增
+
+- **视频轨道光影六参**：`track.json` 顶层与键级新增 `shadow` / `grain` /
+  `sample_light` / `shadow_az` / `shadow_opacity` / `grain_scale`——此前轨道
+  完全无法表达光影三门/阴影两参/颗粒强度，同一立绘配方在 render 与 video
+  出不来一致效果。解析口径：键级 > 轨道级 > 库默认（布尔三门离散取左键、
+  三个连续量跨键线性插值）；`arcam video` 另收六个同名旗标，**显式给过才
+  压过轨道 JSON**（缺省跟随文件）。`shadow_opacity`/`grain_scale` 沿用
+  nonnegative 口径（0 有语义）。save/load 严格往返。
+- **golden 几何组 9 个向量 + 覆盖下限门禁**：原 fixture 全 wide 画布、0 个
+  None 路径向量——K_SHORT 短边分支与 project/place/placement 的 None 收口
+  全靠单元测试守。补非 wide 画布 ×4、project 相机后方 None、place 地平线
+  无解、placement 相机后方 None 各一；`test_geometry_golden_coverage_floors`
+  钉数量与场景构成（对齐光照组的既有做法）。
+- **双轨字节同源门禁**：`webui/mmd/` 全树（13 文件）与 `mmd.js` 对 docs 侧
+  逐字节相同——该性质此前只有人工 cmp，任何一侧升级漏掉另一侧都发现不了。
+
+### 修复
+
+- **compose 采光语义反水（本轮最重）**：`compose.py` 曾自建一份预夹版
+  `_clamp_region`（`sw=min(sw,W)`），把 `lighting.py` 按 SPEC §5/README
+  「已知偏离」钉死的「sw>W 越界零填充」在生产采光路径上洗成死代码——立绘
+  投影宽 >58.8% 画布宽时行为与原版分歧。副本已删、直接复用 lighting 的钉死
+  实现（duplicate 即漂移根源），CLI 7 条路径/webapp 三端点同步受益，回归
+  测试附手算推导钉住「不预夹」。
+- **`contact-sheet --vary frame` 静默失效**：combo 循环写的键名是 compose
+  形参名 `frame_key`，而 `--vary` 的合法键是 `frame`——值被整体丢弃、标签
+  照打，扫画幅的格子全是同一张图（`--VARY_ENUMS` 还专门校验 frame，设计
+  意图就是可扫；`multi --spec frame` 反而生效）。现做键名映射。
+- **`multi --spec` 套数不足 IndexError**：曾直接 `args.spec[i-1]` 裸栈
+  （main 不捕 IndexError），违反「报错一律人话」；帮助文本「不给就用主参数」
+  与实现矛盾。现按帮助文本回落主参数。
+- **webui 3D 预览层被异步底图清屏**：`renderNow` 同步画完 MMD 层后，
+  `drawDataUri` 的 onload 才触发、重设画布尺寸=清屏——3D 层被抹掉。
+  拆成 decode（Promise）+ paint 两步，3D/HUD 层改在底图落盘后绘制；过期
+  响应哨兵在解码窗口后二次校验。docs 侧走 charDraw 钩子无此问题（双轨差异
+  即本 bug 的发现线索）。
+- **webui 3D「照片当环境贴图」恒抛**：对 `state.photo`（File 对象）直接
+  `drawImage`——CanvasImageSource 不收 Blob，恒抛恒退 null，IBL 静默失效
+  （docs 版存 photoCanvasFull 所以一直正常）。上传时异步解码为
+  `state.photoBitmap`（ImageBitmap 优先、老浏览器回退 Image），失败静默
+  （IBL 本就允许缺席）。
+- **Windows 三处**：`test_watch_detects_change` 硬编码 POSIX PATH（丢
+  USERPROFILE → 子进程秒退，POSIX 靠 passwd 库兜底 HOME 才侥幸通过）→
+  继承完整环境；`test_load_depth_unreadable_file_raises_value_error` 的
+  `chmod 0o000` 在 Windows 不生效 → msvcrt 独占字节锁分支；
+  `tools/golden-diff.mjs` / `tools/zip-writer-diff.mjs` 的动态 import 用裸
+  Windows 绝对路径（`C:` 被当 URL 协议）→ `pathToFileURL`。工具此前在
+  Windows 上完全跑不起来。
+- **api-push.py 两个潜伏 bug**：增量分支硬编码 `mode:"100644"`（可执行脚本
+  的可执行位被洗掉——`--full` 分支修了、增量漏了）；对「本提交删除的文件」
+  `git show HEAD:path` 拿到空字节、把空文件当内容传上去（静默损坏）——现照
+  ls-files 带真实 mode，删除走 GitHub trees API 的 sha=null 口径。
+- **push-to-github.sh token 残留**：`set -euo pipefail` 下 `git push` 失败
+  即退出、清理行不可达，token 永久残留 `.git/config`（DEPLOY.md 只描述了
+  成功路径）→ trap EXIT 兜底任何退出路径。
+- **文档漂移九处**：SPEC §1.7 两条契约描述与代码脱节（`js_to_fixed` 对非
+  有限入参实为透传不抛、`feq=inf` 的 project 不返回 None——数值行为符合
+  原版 JS，该修的是文档，实测钉准）；`docs/arcam-core.js` 17 处指向 Python
+  的 file:line 交叉引用漂移 2~24 行；`snap_to_edge` docstring「两端不排序」
+  与 fit() 的 lo/hi 实现相反（钳位行为不变，SPEC §3.2 同步）；`--no-light`
+  帮助文本「multi 没有照片可采光」失真；README 摆放旗标清单补 `--edge-bar`；
+  E3「取深度」措辞（实为 `place()` 解析逆，LIDAR-SPEC 与 README 各一处）；
+  `plane.py` 引用 LIDAR-SPEC 不存在的「同焦假设」备注（改指 README 实际
+  记录处）；CHANGELOG 11 个版本的日期对齐 git 提交史（曾把 1.2.0~1.13.3
+  全写成同一天）；`启动/停止` 启动器 3 个补 SPDX 头（v1.13.2 曾声称全覆盖）。
+
+### 优化
+
+- **compose 第二遍引擎整遍消除**：`with_char_layer=True` 时第二遍 `_engine`
+  与第一遍同构图——照片路径构建的 layer 不含底图（tone 只作用于底图合成）、
+  drawn/shadow/occlusion 两遍同参逐位相同，直接按同一裁切框裁切即可。实测
+  1080p：立绘层附加成本 **47% → 4%**（404 ms → 422 ms）；逐位安全由整链
+  md5 与 golden 双背书。
+- **ORT 会话缓存**：`anime_cut` 曾每次调用重建会话（构建秒级、推理百毫秒
+  级）——webapp 连续抠图/batch 路径白白重复付这笔钱。现按 (绝对路径,
+  intra_op) 键控缓存 + 锁防并发冷缓存，`clear_session_cache()` 供测试隔离；
+  结果与冷启动逐位一致（有测试钉）。
+- **仓库卫生**：52KB 的 `.coverage` 构建产物出库并入 `.gitignore`。
+
+### 备注
+
+- 测试基线 911 passed/3 failed（Windows 环境）→ 928 passed/6 skipped/
+  0 failed；净增 17 个测试（RC-2/RC-3/零填充/会话缓存/光影六参×6/golden
+  覆盖下限/字节同源×2/非 wide 判别/恒真断言真伪化 ×2 的回归钉）。
+- 两处恒真断言（`... or True`）真伪化：test_geometry 俯仰+滚转分支改形状
+  契约、test_webapp 的 tRNS 前置条件改 `info['transparency']` 真判据。
+- T5 审计报的 docs 侧 `base_only`「死键」核实为 **parity 门禁的刻意一致项**
+  （`test_param_controls_match_between_versions` 钉两侧 S_DEFAULTS 一致），
+  如实回滚并记 KEEP。
+
+## [1.13.3] — 2026-11-04
 
 署名的可见层：两个网页版页脚加「© 2026 ForJiang · MIT」署名行（语言无关，
 跟随语言切换的 data-t 机制；样式走 muted 弱化、不与状态条抢注意力）。
@@ -10,7 +109,7 @@
 门禁连带修两处：死 id 扫描要求样式以 `#credit` id 选择器命中（类选择器不算
 引用）——顺带把署名样式从类选择器改成 id 选择器。
 
-## [1.13.2] — 2026-10-11
+## [1.13.2] — 2026-11-04
 
 项目署名：全仓以 **ForJiang** 署名。
 
@@ -39,7 +138,7 @@
 - wheel 实测：METADATA 带 `Author: ForJiang` / `License-Expression: MIT` /
   `License-File: LICENSE`；919 passed / 1 skipped；golden-diff 500 向量 bad=0。
 
-## [1.13.1] — 2026-10-11
+## [1.13.1] — 2026-10-12
 
 v1.13.0 的收尾修正：**暗板宽度钳到画布内**。读数块的文本已按 `W−2m` 断行，
 但暗板还要加左右内边距，不钳的话最宽那行会把板的右圆角顶出画布外
@@ -50,7 +149,7 @@ v1.13.0 的收尾修正：**暗板宽度钳到画布内**。读数块的文本�
 本地 webui 侧与 Pages 侧渲染已逐项对平（暗板 34270 / 白字 567 / 琥珀 392 /
 地平线红 920 / 网格青 9891 像素，两侧一致）。
 
-## [1.13.0] — 2026-10-11
+## [1.13.0] — 2026-10-12
 
 预览内文字显示优化（用户要求「优化预览中的文字显示」）：HUD 读数/提示/标签
 全面可读化。**919 passed / 1 skipped**。
@@ -84,7 +183,7 @@ v1.13.0 的收尾修正：**暗板宽度钳到画布内**。读数块的文本�
   提示自动断行不溢出；地平线标签描边后可读。
 
 
-## [1.12.1] — 2026-10-11
+## [1.12.1] — 2026-10-12
 
 热修复（用户报「网站卡在全身/半身弹窗、无法继续」）：**进站即被弹窗盖住整页**。
 
@@ -114,7 +213,7 @@ v1.13.0 的收尾修正：**暗板宽度钳到画布内**。读数块的文本�
   切自由模式时贴边行正确出现。
 
 
-## [1.12.0] — 2026-10-11
+## [1.12.0] — 2026-10-12
 
 深度打磨轮（五分区并行 + 对抗复核 + 浏览器实测）：以「覆盖率 / 性能 / 文档口径 /
 健壮性 / 网页 UX」五个面把项目再推一档。**910 passed / 1 skipped**（进场 691）。
@@ -486,7 +585,7 @@ v1.13.0 的收尾修正：**暗板宽度钳到画布内**。读数块的文本�
   同源，六项全查。
 - 全套 **561 passed / 1 skipped**；golden 差分 462 向量 0 失败。
 
-## [1.6.0] — 2026-10-11
+## [1.6.0] — 2026-10-10
 
 功能再扩充：LiDAR 合成器命令、阴影创作控制、网页批量出图。
 
@@ -532,7 +631,7 @@ v1.13.0 的收尾修正：**暗板宽度钳到画布内**。读数块的文本�
   真图修图冒烟 7 张全过；LiDAR 闭环（sim → inspect）外参精确回真值；
   `/api/batch` 混合好坏图实测 2 ok / 1 failed 且明细正确。
 
-## [1.5.0] — 2026-10-11
+## [1.5.0] — 2026-10-10
 
 全项目审计轮次（五分区并行 + 编排者集成）：修复 30+ 个问题，其中 8 个是
 「开关收了但不生效」类静默失效。
@@ -638,7 +737,7 @@ v1.13.0 的收尾修正：**暗板宽度钳到画布内**。读数块的文本�
   都是「倒数第二行 + >200 + >30%」）
 - AUDIT-CHARTER 增补 v1.5.0 分区表与新代码关注点
 
-## [1.4.0] — 2026-10-11
+## [1.4.0] — 2026-10-10
 
 功能再扩充：三个新 CLI 命令 + 网页全屏取景与参数记忆。
 
@@ -672,7 +771,7 @@ v1.13.0 的收尾修正：**暗板宽度钳到画布内**。读数块的文本�
 - 全套 496 passed / 1 skipped；golden 差分 462 向量 0 失败；浏览器实测参数记忆
   全链路（改 d=7.2 → 防抖存盘 → 重载 → 控件与提示恢复）。
 
-## [1.3.0] — 2026-10-11
+## [1.3.0] — 2026-10-10
 
 功能扩充版：三个新 CLI 子命令、光影开关组、网页拖拽摆位、GIF 导出。
 
@@ -716,7 +815,7 @@ v1.13.0 的收尾修正：**暗板宽度钳到画布内**。读数块的文本�
   就真语法检查）。
 - 全套 490 passed / 1 skipped；golden 差分 462 向量 0 失败。
 
-## [1.2.0] — 2026-10-11
+## [1.2.0] — 2026-10-10
 
 功能对等版：把原版网站的交互能力补进项目（契约 `docs/FEATURE-SPEC.md`）。
 Python 核心拿无设备依赖的部分，两个网页拿浏览器原生能力。

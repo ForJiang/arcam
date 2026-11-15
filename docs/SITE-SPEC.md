@@ -12,11 +12,14 @@
   本身就是半向 +∞，正好等于 Python 的 js_round）；角度公开 API 用度；坐标 Y 上/Z 朝
   观察者/画布 v 向下。**禁止 `toFixed` 之外的任何取整捷径**（scene.json 的
   `toFixed(2)/(3)` 语义与 Python `js_to_fixed` 一致，直接用）。
-- 验收基准：`docs/tests/golden.json`（Python 侧已生成：focal 40 / project 200 /
-  place 120 / placement 102 / scene 3 + v1.9.0 起光照五组 38 向量
+- 验收基准：`docs/tests/golden.json`（Python 侧已生成：focal 43 / project 202 /
+  place 122 / placement 104 / scene 3 + v1.9.0 起光照五组 38 向量
   （measureRegion 7 / bakeLit 17 / charStats 4 / litScaleBucket 8 / grainTile 2，
-  bakeLit 逐字节 0 容差），共 503 向量）。Node 侧夹具 `tools/golden-diff.mjs`
-  逐向量跑其中 500 个（scene 组 3 个无 JS 对拍物，只过 Python 侧重算门禁
+  bakeLit 逐字节 0 容差），共 512 向量；v1.13 审计补齐非 wide 画布与
+  project/place/placement 的 None 路径向量，覆盖下限见
+  `tests/test_golden_recompute.py::test_geometry_golden_coverage_floors`）。
+  Node 侧夹具 `tools/golden-diff.mjs`
+  逐向量跑其中 509 个（scene 组 3 个无 JS 对拍物，只过 Python 侧重算门禁
   `tests/test_golden_recompute.py`）；J1 交付时用 node_repl
   （`mcp__node_repl__js`，纯 Node 内核）加载自己的 JS + golden 做**数值 diff 全过**
   （几何 1e-9 相对误差；光照组 bakeLit 字节全等）。

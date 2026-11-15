@@ -48,7 +48,7 @@
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { crc32 as zlibCrc32 } from 'node:zlib';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -97,7 +97,7 @@ console.log('PARITY ok: 两侧 zip writer 段剥注释后一致');
 // 抠出来的段是 module 级纯代码（无 DOM 依赖），复制成 .mjs 直接 import
 const tmp = join(mkdtempSync(join(tmpdir(), 'arcam-zip-')), 'writer.mjs');
 writeFileSync(tmp, wSec + '\nexport { buildBundleZip, crc32 };\n');
-const { buildBundleZip, crc32 } = await import(tmp);
+const { buildBundleZip, crc32 } = await import(pathToFileURL(tmp).href);
 
 // ② crc32 与 Node zlib 对拍（空串 / ASCII / 二进制 / 长缓冲）
 const cases = [

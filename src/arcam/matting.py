@@ -26,6 +26,7 @@ imageSmoothingQuality='high' 未指定具体核，属 SPEC §5 已记录偏离�
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,7 +84,12 @@ def anime_cut(rgb01: np.ndarray, model_path: str | None = None,
     img = _as_rgb01(rgb01)
     height, width = img.shape[:2]
     path = _resolve_model_path(model_path)
-    sess = _load_session(path, intra_op=intra_op, simd=simd)
+    cache_key = (str(path.resolve()), max(1, int(intra_op)))
+    with _SESSION_LOCK:
+        sess = _SESSION_CACHE.get(cache_key)
+        if sess is None:
+            sess = _load_session(path, intra_op=intra_op, simd=simd)
+            _SESSION_CACHE[cache_key] = sess
     t0 = time.perf_counter()
     tensor, (ox, oy, nw, nh) = seg_preprocess(img)
     in_name = sess.get_inputs()[0].name          # 输入名 'img'，不写死（SPEC §3.9）
@@ -277,6 +283,21 @@ def _resolve_model_path(model_path: str | None) -> Path:
         'logits，需在调用 seg_postprocess 前补 1/(1+exp(-x))，否则窄带二值化'
         '（lo=0.28/hi=0.46）读到的是错误量纲。'
     )
+
+
+#: ORT 会话缓存：anime_cut 曾每次调用重建会话（构建是秒级、推理才百毫秒级，
+#: webapp 连续抠图 / batch 路径白白重复付这笔钱）。键 = (绝对路径, intra_op)；
+#: simd 在 Python 侧无操作（见 _load_session 注释），不进键。同进程内模型文件
+#: 内容变更不自动失效——换模型本来就该换路径（解析顺序四级），与 grain_tile
+#: 单例同款取舍。锁防并发冷缓存时重复构建（ORT 会话本身线程安全）。
+_SESSION_CACHE: dict[tuple[str, int], object] = {}
+_SESSION_LOCK = threading.Lock()
+
+
+def clear_session_cache() -> None:
+    """清空 ORT 会话缓存（测试隔离用；生产进程无需调用——换模型即换键）。"""
+    with _SESSION_LOCK:
+        _SESSION_CACHE.clear()
 
 
 def _load_session(path: Path, *, intra_op: int, simd: bool):

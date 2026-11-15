@@ -109,12 +109,27 @@ if FULL:
 else:
     changed = _git("diff", "--name-only", f"{parent}..{local}").stdout.split()
     print(f"变更 {len(changed)} 个文件", flush=True)
+    # mode/删除态照 ls-files 的实际值带：曾硬编码 "100644"，把可执行脚本
+    # （启动AR取景器.command、tools/*.sh）的可执行位洗掉——当时只有 --full
+    # 分支做对了。本提交里已删除的文件不在 ls-files 里 → 用 sha=None 条目
+    # 删除（GitHub trees API 口径）；曾对删除路径 git show HEAD:file 拿到
+    # 空字节、把空文件当"内容"传上去（静默损坏）。
+    modes = {}
+    for l in _git("ls-files", "-s").stdout.splitlines():
+        meta, path = l.split("\t", 1)
+        modes[path] = meta.split()[0]
     tree_entries = []
     for path in changed:
+        mode = modes.get(path)
+        if mode is None:
+            tree_entries.append({"path": path, "mode": "100644",
+                                 "type": "blob", "sha": None})
+            print(f"  delete {path}", flush=True)
+            continue
         blob = _git("show", f"HEAD:{path}", binary=True).stdout
         b = api("POST", "/git/blobs", {
             "content": base64.b64encode(blob).decode(), "encoding": "base64"})
-        tree_entries.append({"path": path, "mode": "100644", "type": "blob", "sha": b["sha"]})
+        tree_entries.append({"path": path, "mode": mode, "type": "blob", "sha": b["sha"]})
         print(f"  blob {path}", flush=True)
 
 tree_kw = {"tree": tree_entries}

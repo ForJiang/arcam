@@ -68,6 +68,8 @@ var state = {
   lidarEnv: null,          // 最近一次 inspect 的完整 env（含 coverage/inliers/rms）；
                            // render 响应只带 3 个字段，合并进来而不是整体覆盖
   photo: null, char: null, depthFile: null,
+  photoBitmap: null,       // 解码后的照片（ImageBitmap/Image）：3D 的「照片当环境
+                           // 贴图」要 drawImage 它——CanvasImageSource 不收 File
   photoW: 0, photoH: 0,
   renderSeq: 0,            // 序号哨兵：丢弃过期的异步渲染响应，防旧图盖新图
   renderTimer: 0
@@ -158,6 +160,7 @@ async function uploadFile(kind, file) {
       state.photo = file;
       state.photoW = r.width || 0;
       state.photoH = r.height || 0;
+      decodePhotoFile(file); // 异步解码给 3D IBL 用，不阻塞上传回执
       setName('photo-name', file.name + dims);
       $('preview-empty').hidden = true;
       if (state.char) renderNow();
@@ -244,16 +247,25 @@ function previewScale() {
   return Math.min(1, PREVIEW_LONG_EDGE / m);
 }
 
-function drawDataUri(uri) {
-  var img = new Image();
-  img.onload = function () {
-    var c = $('preview-canvas');
-    c.width = img.naturalWidth;
-    c.height = img.naturalHeight;
-    c.getContext('2d').drawImage(img, 0, 0);
-  };
-  img.onerror = function () { setStatus(t('note.imgDecodeFail'), null, true); };
-  img.src = uri;
+/** 解码 dataURI 为 HTMLImageElement（不碰画布——绘制时机由调用方掌握）。
+ *  曾是 onload 里直接画的 drawDataUri：renderNow 同步画完 3D 层后，onload 才
+ *  稍后触发、重设画布尺寸=清屏，MMD 层被底图抹掉（3D 预览闪断）。 */
+function decodeDataUri(uri) {
+  return new Promise(function (resolve, reject) {
+    var img = new Image();
+    img.onload = function () { resolve(img); };
+    img.onerror = function () { reject(new Error('img decode fail')); };
+    img.src = uri;
+  });
+}
+
+/** 把解码好的图铺上预览画布（重设尺寸=清屏；随后调用方再叠 3D/HUD 层）。 */
+function paintPreview(img) {
+  var c = $('preview-canvas');
+  c.width = img.naturalWidth;
+  c.height = img.naturalHeight;
+  c.getContext('2d').drawImage(img, 0, 0);
+  return c;
 }
 
 function showScene(scene) {
@@ -306,9 +318,17 @@ async function renderNow() {
   try {
     var r = await apiJson('/api/render', { params: buildParams(), scale: previewScale() });
     if (seq !== state.renderSeq) return; // 过期响应直接丢弃
-    drawDataUri(r.image);
+    var img;
+    try {
+      img = await decodeDataUri(r.image);
+    } catch (e) {
+      setStatus(t('note.imgDecodeFail'), null, true);
+      return;
+    }
+    if (seq !== state.renderSeq) return; // 解码窗口内来了新渲染 → 本遍过期
+    // 先铺底图、再叠 3D 层：顺序不能反（重设画布尺寸即清屏）
+    var cv = paintPreview(img);
     if (t3dReady()) {
-      var cv = $('preview-canvas');
       if (!drawMmdLayer(cv, cv.width, cv.height)) {
         d3dNote(t('note.3dDrawFail', t('err.renderZero')), true);
       } else {
@@ -316,7 +336,7 @@ async function renderNow() {
       }
     }
     $('preview-empty').hidden = true;
-    showScene(attachMmdKey(r.scene, $('preview-canvas').width, $('preview-canvas').height));
+    showScene(attachMmdKey(r.scene, cv.width, cv.height));
     if (r.env) mergeEnv(r.env, null); // render 的 env 只有三字段，合并进完整 env
     setStatus(t('note.renderDone'), typeof r.ms === 'number' ? r.ms : performance.now() - t0);
     drawHudOverlay();                   // HUD 浮层跟着预览尺寸/参数重画
@@ -339,7 +359,15 @@ async function doMatte() {
   try {
     setStatus(t('note.matteRunning'));
     var r = await apiJson('/api/matte', { source: 'char' });
-    drawDataUri(r.image); // 先把抠图结果画出来：照片没上传也能看到效果
+    // 先把抠图结果画出来：照片没上传也能看到效果（解码失败保持原有人话提示）
+    var mimg;
+    try {
+      mimg = await decodeDataUri(r.image);
+    } catch (e) {
+      setStatus(t('note.imgDecodeFail'), null, true);
+      return;
+    }
+    paintPreview(mimg);
     $('preview-empty').hidden = true;
     await apiJson('/api/matte-result-as-char', {}); // 结果设为当前立绘
     $('input-hint').textContent = t('note.matteDone');
@@ -1300,8 +1328,28 @@ function d3dNoteOk() {
 /** 给 3D 当环境贴图（IBL）的照片缩略图（64×36）。本地版有实拍照片——
  *  照片就是这片环境（与 Pages 版同源）。缓存着，照片换了才重画。 */
 var envFrameCv = null, envFrameSrc = null;
+/** 把照片文件解码成可 drawImage 的源（ImageBitmap 优先，老浏览器退 Image）。
+ *  只服务 mmdEnvFrame 的 IBL 缩略图；失败静默置空——IBL 本来就允许缺席
+ *  （docs 版存 photoCanvasFull 所以一直正常，本机版此前对 File 直接
+ *  drawImage，CanvasImageSource 不收 Blob → 恒抛恒退 null，IBL 静默失效）。 */
+async function decodePhotoFile(file) {
+  try {
+    if (window.createImageBitmap) {
+      state.photoBitmap = await createImageBitmap(file);
+      return;
+    }
+    var url = URL.createObjectURL(file);
+    var img = new Image();
+    img.onload = function () { URL.revokeObjectURL(url); };
+    img.src = url;
+    state.photoBitmap = img;
+  } catch (e) {
+    state.photoBitmap = null;
+  }
+}
+
 function mmdEnvFrame() {
-  var src = state.photo;
+  var src = state.photoBitmap;   // 曾是 state.photo（File 对象）：drawImage 不收
   if (!src) return null;
   if (!envFrameCv) {
     envFrameCv = document.createElement('canvas');

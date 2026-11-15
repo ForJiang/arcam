@@ -402,6 +402,32 @@ def test_free_mode_edge_bar_snaps_in_compose_shot() -> None:
     assert snapped.light.mean != no_snap.light.mean
 
 
+def test_light_region_zero_fill_reaches_production_path() -> None:
+    """采光框越界（sw>W）时 SPEC §5 钉死的零填充分支必须活着。
+
+    v1.13 审计修复：compose 曾自建一份"先缩尺寸"预夹版 _clamp_region
+    （sw=min(sw,W)），把 lighting 里钉死的零填充语义在生产采光路径上洗成
+    死代码——立绘投影宽 >0.588×画布宽（1.7·c.w>W）时行为与原版分歧。
+    现在直接复用 lighting._clamp_region，副本已删；本测试钉住「不预夹」：
+    sw 原样保留、sx 被夹到 0。
+
+    手算：ground 模式 d=4、char_scale=6。span=v_feet−v_head：
+    v_feet=120+F·(2.1413/3.7385)≈241.9、v_head=120+F·(0.5073/3.968)≈147.2
+    （F=(320/2)·23/17.3064≈212.66，p=−8°：sin=−0.1392、cos=0.9903），
+    span≈94.7 → h=568.2 → c.w=284.1 → sw=1.7·284.1≈483 > 320=W。
+    """
+    region = _light_region_rect(CHAR, Subject(1.65, 4.0, -0.35), CAM,
+                                mode="ground", size_pct=60.0, rot_basis="world",
+                                char_scale=6.0)
+    assert region is not None
+    assert region.w > CAM.width, "sw 被预夹回画布宽——零填充分支又被洗成死代码"
+    assert region.x == 0.0                          # W−sw<0 → sx 夹到 0
+    shot = compose_shot(BG, CHAR, Subject(1.65, 4.0, -0.35), CAM,
+                        frame_key="满幅", mode="ground", char_scale=6.0)
+    assert shot.light is not None                   # 越界采光不崩、均值有限
+    assert np.isfinite(shot.light.mean).all()
+
+
 def test_free_mode_edge_bar_ignores_unknown_bar_numbers() -> None:
     """edge_bar=2/3/4 同样生效（下/左/右），且互不相同。"""
     r = frame_rect("1:1", W, H)

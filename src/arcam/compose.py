@@ -43,6 +43,7 @@ import numpy as np
 from arcam.frames import frame_rect
 from arcam.geometry import Camera, project
 from arcam.lighting import LightSample, bake_lit, measure_region
+from arcam.lighting import _clamp_region  # clampRegion 钉死语义的唯一实现（见 SPEC §5）
 from arcam.numeric import Rect, js_round
 from arcam.placement import SpritePlacement, Subject, current_placement
 from arcam.sprite import _warp_layers, composite_sprite, contact_shadow_layer
@@ -155,7 +156,7 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
         env = _lidar_env(depth) if depth is not None else None
         cam, subj, _notes = _merge_env(cam, subj, env_overrides, env,
                                        depth=depth, mode=mode, shot=shot)
-    rect, light_used, shot_rgba, (shot_drawn, shot_shadow) = _engine(
+    rect, light_used, shot_rgba, _reuse, layer_full = _engine(
         src_rgb01, char_rgba01, subj, cam, frame_key,
         light=light, mode=mode, size_pct=size_pct, char_scale=char_scale,
         rot_basis=rot_basis, tone=tone, shot=shot, edge_bar=edge_bar,
@@ -163,21 +164,17 @@ def compose_shot(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
         shadow_az=shadow_az, shadow_opacity=shadow_opacity,
         grain_scale=grain_scale)
     # 立绘层与照片**同一个裁切框**：同一份 frame_key、同一套光，两张图才逐像素对应。
-    # with_char_layer=False（video 逐帧/CLI 出图）整遍跳过：第二遍 _engine 与第一遍
-    # 同构图，只为出那张透明底立绘层，只要 shot 的调用方纯白烧（实测 47%）。
-    # 第二遍还复用第一遍的烘光/阴影产物（drawn/shadow_layer）：bake_lit 与
-    # contact_shadow_layer 都是确定性纯函数，相同入参必然相同输出，没有不算两遍
-    # 的理由（实测 bake_lit 一遍 ≈ 单帧 25%）。
+    # with_char_layer=False（video 逐帧/CLI 出图）不出层：char_layer 为 None。
+    # 第二遍曾整套重跑 _engine（实测 ≈ 单帧 47%）——但照片路径构建的 layer 就是
+    # 立绘层路径的完整产物：layer 不含底图（tone 只在底图合成处生效、不进 layer），
+    # drawn/shadow_layer/occlusion 两遍同参逐位相同，按同一裁切框直接裁即可。
+    # （更早的版本复用烘光/阴影产物 drawn/shadow_layer——确定性纯函数同入参同
+    # 输出；逐级收敛到今天这一刀。）
     layer_rgba = None
     if with_char_layer:
-        _, _, layer_rgba, _ = _engine(
-            None, char_rgba01, subj, cam, frame_key,
-            light=light_used, mode=mode, size_pct=size_pct, char_scale=char_scale,
-            rot_basis=rot_basis, tone=False, shot=shot, edge_bar=edge_bar,
-            depth=depth, shadow=shadow, grain=grain, sample_light=sample_light,
-            shadow_az=shadow_az, shadow_opacity=shadow_opacity,
-            grain_scale=grain_scale,
-            drawn=shot_drawn, shadow_layer=shot_shadow)
+        if layer_full is None:               # 无立绘/落位解不出：透明层（同原第二遍）
+            layer_full = np.zeros((cam.height, cam.width, 4), dtype=np.float64)
+        layer_rgba = _crop_offset(layer_full, rect)
     return ComposedShot(shot=shot_rgba[..., :3], rect=rect,
                         light=light_used, char_layer=layer_rgba, env=env)
 
@@ -228,7 +225,7 @@ def compose_char_layer(char_rgba01: np.ndarray, subj: Subject, cam: Camera, *,
         env = _lidar_env(depth) if depth is not None else None
         cam, subj, _notes = _merge_env(cam, subj, env_overrides, env,
                                        depth=depth, mode=mode, shot=shot)
-    rect, _, layer_rgba, _ = _engine(
+    rect, _, layer_rgba, _, _layer = _engine(
         None, char_rgba01, subj, cam, frame_key,
         light=light, mode=mode, size_pct=size_pct, char_scale=char_scale,
         rot_basis=rot_basis, tone=False, shot=shot, edge_bar=edge_bar,
@@ -250,8 +247,13 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
             grain_scale: float = 1.0,
             drawn: np.ndarray | None = None,
             shadow_layer: np.ndarray | None = None
-            ) -> tuple[Rect, LightSample | None, np.ndarray, tuple]:
-    """composeShot 的公共引擎：返回 ``(rect, light_used, rgba_uint8, reuse)``。
+            ) -> tuple[Rect, LightSample | None, np.ndarray, tuple,
+                       np.ndarray | None]:
+    """composeShot 的公共引擎：返回 ``(rect, light_used, rgba_uint8, reuse, layer)``。
+
+    第 5 个返回值是本遍构建的 **RGBA 层（裁切前，float64 [0,1]）**；照片路径与
+    立绘层路径的 layer 同构（tone 只在底图合成处生效、不进 layer），compose_shot
+    的立绘层直接裁它、不再跑第二遍引擎。无立绘/落位解不出时为 None。
 
     ``frame_key`` 由调用方给出（``compose_char_layer`` 缺省 ``DEFAULT_FRAME``，
     即原版 ``S.frame`` 默认值）—— 照片与立绘层两条路共用同一套取景/落位/裁切
@@ -311,6 +313,7 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
     # （显式 --h/--pitch/--roll 时即显式值，符合 §0「显式优先」）。
     occ = _occlusion_mask(depth, cam, c)
     rgba = None
+    layer = None
     if c is not None and char_rgba01 is not None:
         ambient = m.mean if m is not None else None
         if drawn is None:
@@ -369,8 +372,9 @@ def _engine(src_rgb01: np.ndarray | None, char_rgba01: np.ndarray | None,
     # ⑤ 小数偏移裁切（off 画布；越界目标像素保持透明黑，对应 JPEG 的黑边）
     out = _crop_offset(rgba, rect)
     # ⑥ 把这一遍实际用到的光带出去（立绘层必须跟照片用同一套）；drawn/shadow_layer
-    #    是同构图下一遍的现成产物（确定性纯函数，无副作用）
-    return rect, m, out, (drawn, shadow_layer)
+    #    是同构图下一遍的现成产物（确定性纯函数，无副作用）；layer 是立绘层路径
+    #    的现成产物（见函数 docstring 第 5 返回值）
+    return rect, m, out, (drawn, shadow_layer), layer
 
 
 def _lidar_env(depth: LiDARFrame) -> CameraEnv:
@@ -516,8 +520,8 @@ def _light_region_rect(char_rgba01, subj, cam, *, mode, size_pct, char_scale,
     后的立绘走（原版 lightRegion 读的也是吸附后的 currentPlacement）。
     """
     c = _placement(char_rgba01, subj, cam, mode=mode, size_pct=size_pct,
-                  char_scale=char_scale, rot_basis=rot_basis, shot=shot,
-                  edge_bar=edge_bar, rect=rect)
+                   char_scale=char_scale, rot_basis=rot_basis, shot=shot,
+                   edge_bar=edge_bar, rect=rect)
     if c is None:
         return Rect(0.0, 0.0, float(cam.width), float(cam.height))
     mx = c.w * 0.35
@@ -525,16 +529,10 @@ def _light_region_rect(char_rgba01, subj, cam, *, mode, size_pct, char_scale,
     sy = c.v - c.h / 2 - mx
     sw = c.w + mx * 2
     sh = c.h + mx * 2
-    return _clamp_region(sx, sy, sw, sh, cam.width, cam.height)
-
-
-def _clamp_region(sx: float, sy: float, sw: float, sh: float,
-                  width: int, height: int) -> Rect:
-    """clampRegion（index.html:1244-1251）：先缩尺寸、再夹原点，顺序不能换。"""
-    sw = min(sw, float(width))
-    sh = min(sh, float(height))
-    sx = max(0.0, min(float(width) - sw, sx))
-    sy = max(0.0, min(float(height) - sh, sy))
+    # clampRegion 直接复用 lighting 的钉死实现，不自建副本——曾在此有一份
+    # "先缩尺寸"的预夹版（sw=min(sw,W)），把 SPEC §5/README 已知偏离钉死的
+    # 「sw>W 越界零填充」分支在生产采光路径上洗成死代码；副本即漂移根源。
+    sx, sy, sw, sh = _clamp_region(Rect(sx, sy, sw, sh), cam.width, cam.height)
     return Rect(sx, sy, sw, sh)
 
 

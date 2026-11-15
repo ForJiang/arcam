@@ -263,10 +263,13 @@ def snap_to_edge(c: SpritePlacement, bar: int, rect: Rect, aspect: float,
     （edgeGeom 2864-2872）。
 
     bw/bh 是**旋转后**外接盒（w·|cos|+h·|sin| / w·|sin|+h·|cos|）；rot 变化后
-    rotateBar 换边。沿自由轴用 fit 钳位，两端**不排序**（图比框大时范围自然反过来，
-    ＂让框始终被图盖住＂，可自由平移）。返回的 w = h·aspect、rot 原样带过去
-    （原版 snapToEdge 只产出 {u,v,h}，w 由调用方按 charAspect 另算）。
-    rot 为弧度（与 SpritePlacement.rot 同单位；原版收 charRot() 的弧度值）。
+    rotateBar 换边。沿自由轴用 fit 钳位：两端表达式原样传入，谁大谁小由 fit 的
+    min/max 自己认——图比框大时区间两端自然反转（bw>rect.w 时"右端"小于"左端"），
+    ＂让框始终被图盖住＂、可自由平移（曾写成"两端不排序"：fit 明确取了 lo/hi，
+    描述与实现相反，v1.13 审计修正——钳位行为不变）。返回的 w = h·aspect、
+    rot 原样带过去（原版 snapToEdge 只产出 {u,v,h}，w 由调用方按 charAspect
+    另算）。rot 为弧度（与 SpritePlacement.rot 同单位；原版收 charRot() 的
+    弧度值）。
     """
     h = c.h
     if not (h > 0):

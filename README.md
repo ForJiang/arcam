@@ -113,7 +113,8 @@ arcam render photo.jpg char.png -o shot.png --depth scan_0001.png
 ```
 
 `--pitch 12 --roll -5 --d 4 --x 0.3 --h 1.6 --hp 1.65 --feq 23 --shot 全身
---char-scale 1.2 --frame 满幅 --rot-basis world --mode ground --size-pct 60 --tone`
+--char-scale 1.2 --frame 满幅 --rot-basis world --mode ground --size-pct 60
+--edge-bar 0 --tone`
 这些摆放参数的默认值就是原版 `S` 的默认值（`index.html:921-937`），不填即原版默认。
 每个子命令都有完整 `--help`；退出码 **0** 正常 / **1** 运行期失败（缺文件、素材不
 合法、轨道有问题）/ **2** 用法错误。
@@ -158,14 +159,24 @@ arcam render photo.jpg char.png -o shot.png --depth scan_0001.png
 | `mode` | `"ground"` | `ground`（贴地）/ `free`（自由半身） |
 | `frame_key` | `"满幅"` | 出图画幅，FRAMES 中文 key（存中文，`scene.json` 同值） |
 | `shot` | `"全身"` | 景别，SHOTS 中文 key |
+| `shadow` | `true` | 接触阴影开关（原版 LIGHT_SHD） |
+| `grain` | `true` | 颗粒开关 |
+| `sample_light` | `true` | 采光开关（原版 LIGHT_ON） |
+| `shadow_az` | 0.0 | 阴影方位角（度，斜射拖偏） |
+| `shadow_opacity` | 1.0 | 阴影浓度倍率（≥0，0=不铺） |
+| `grain_scale` | 1.0 | 颗粒强度倍率（≥0，0=不撒） |
 | `keys` | **必填，非空** | 关键帧数组，`t` 必须逐键递增 |
 
 键（`keys[i]`）必需 `t` 与 `distance_m`；`lateral_m` / `pitch_deg` / `roll_deg`
 缺省 0；`height_m` / `feq_mm` / `subject_height_m` / `char_scale` / `size_pct` /
-`mode` 缺省 `null` = **沿用轨道默认**（对应原版「没拖过的滑块保持 S 默认」）。
+`mode` 与光影六参（`shadow` / `grain` / `sample_light` / `shadow_az` /
+`shadow_opacity` / `grain_scale`）缺省 `null` = **沿用轨道默认**（对应原版
+「没拖过的滑块保持 S 默认」）。
 
-数值字段在两键之间线性插值；`mode` 是离散字段，过键即切换、不插值；`t` 早于首键
-停在首键、晚于末键停在末键（不外推）。
+数值字段在两键之间线性插值；`mode` 与三个布尔光影开关是离散字段，过键即切换、
+不插值；`t` 早于首键停在首键、晚于末键停在末键（不外推）。CLI `arcam video`
+另收 `--no-shadow` / `--no-grain` / `--no-light` / `--shadow-az` /
+`--shadow-opacity` / `--grain-scale`——显式给过才压过轨道（缺省跟随 JSON）。
 
 自检范围（`arcam check` / 渲染前强制过一遍）：`pitch ∈ [-60°, 60°]`、
 `roll ∈ [-45°, 45°]`、`distance ∈ (0.05 m, 120 m]`，外加 fps/尺寸/倍率等正数约束。
@@ -183,7 +194,7 @@ arcam render photo.jpg char.png -o shot.png --depth scan_0001.png
 |---|---|---|
 | E1 相机高 `h` | 地面平面拟合（plane offset） | 覆盖 `S.h` |
 | E2 俯仰 `pitch` | 地面平面法向（+ 已知/估计 roll） | 覆盖 `S.pitch` |
-| E3 人物距离 `d` | 立绘足底屏幕位置取深度，按平面几何反解 | 覆盖 `S.d` |
+| E3 人物距离 `d` | 足底屏幕位置经 `place()` 解析逆回世界坐标（针孔逆，不取深度值） | 覆盖 `S.d` |
 | E4 遮挡 | 比「立绘公告板深度」与每像素深度，公告板后方的像素抠掉 | 出图遮挡正确性 |
 | E5 平面质量 | inliers / rms / 覆盖率 | `arcam lidar inspect` 报告 |
 

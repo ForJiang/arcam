@@ -825,8 +825,11 @@ def test_golden_fixture_present():
     import json
     data = json.loads(g.read_text(encoding="utf-8"))
     counts = {k: len(data[k]) for k in ("focal", "project", "place", "placement", "scene")}
-    assert counts == {"focal": 40, "project": 200, "place": 120,
-                      "placement": 102, "scene": 3}, f"golden 分组数量变了：{counts}"
+    # v1.13 审计补 9 个向量（非 wide 画布 ×4、project None ×1、place 无解 ×1、
+    # placement None ×1、非 wide placement ×1），见 docs/SITE-SPEC §0 与
+    # test_golden_recompute 的覆盖下限门禁——数量变化必须过这两道门
+    assert counts == {"focal": 43, "project": 202, "place": 122,
+                      "placement": 104, "scene": 3}, f"golden 分组数量变了：{counts}"
     free = [v for v in data["placement"] if v["kind"] == "free"]
     assert any(v.get("rot_basis") == "frame" for v in free), \
         "free 向量缺 rot_basis=frame 回归钉"
@@ -1087,6 +1090,30 @@ def test_docs_i18n_byte_identical():
     a = (WEBUI / "i18n.js").read_bytes()
     b = (DOCS / "i18n.js").read_bytes()
     assert a == b, "两侧 i18n.js 不一致（同源文件漂移，某一侧漏改）"
+
+
+def test_mmd_runtime_tree_byte_identical():
+    """webui/mmd/ 全树与 docs/mmd/ 逐字节相同（v1.7.0 同源 vendor，13 文件）。
+
+    该性质此前只有人工 cmp、无门禁——three.js/MMD 运行时任何一侧升级/修补
+    漏掉另一侧，3D 行为两版分叉且极难肉眼发现（v1.13 审计补钉）。
+    """
+    wtree = sorted(p.relative_to(WEBUI).as_posix()
+                   for p in (WEBUI / "mmd").rglob("*") if p.is_file())
+    dtree = sorted(p.relative_to(DOCS).as_posix()
+                   for p in (DOCS / "mmd").rglob("*") if p.is_file())
+    assert wtree == dtree, f"两侧 mmd/ 文件清单不同：{sorted(set(wtree) ^ set(dtree))}"
+    assert len(wtree) >= 12, f"mmd/ 文件数异常（{len(wtree)}）——vendored 运行时缺文件"
+    for rel in wtree:
+        assert (WEBUI / rel).read_bytes() == (DOCS / rel).read_bytes(), \
+            f"两侧 {rel} 不一致（同源 vendored 运行时漂移）"
+
+
+def test_mmd_js_byte_identical():
+    """webui/mmd.js 与 docs/mmd.js 逐字节相同（同源移植，此前无门禁）。"""
+    a = (WEBUI / "mmd.js").read_bytes()
+    b = (DOCS / "mmd.js").read_bytes()
+    assert a == b, "两侧 mmd.js 不一致（同源文件漂移，某一侧漏改）"
 
 
 def test_zip_writer_sections_match():

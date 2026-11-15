@@ -332,8 +332,9 @@ def depth_stats(frame: LiDARFrame, plane: GroundPlane) -> DepthStats:
 def _camera_from_frame(frame: LiDARFrame, env: CameraEnv) -> Camera:
     """由深度帧内参 + 环境量构造渲染用 :class:`~arcam.geometry.Camera`。
 
-    ``feq_mm`` 从 ``frame.fx`` 反解（LIDAR-SPEC §3 备注的「深度相机与渲染相机同焦
-    假设」）：arcam 的针孔像素焦距 ``F_px = (max(W,H)/2)·feq/K_LONG``（宽幅，长边）
+    ``feq_mm`` 从 ``frame.fx`` 反解（「深度相机与渲染相机同焦假设」，README
+    「LiDAR 深度」节记录；LIDAR-SPEC 并无此备注，v1.13 审计修正引用悬空）：
+    arcam 的针孔像素焦距 ``F_px = (max(W,H)/2)·feq/K_LONG``（宽幅，长边）
     或 ``F_px = (min(W,H)/2)·feq/K_SHORT``（非宽幅，短边）
     （``focal_px``，index.html:1043-1047 / artifact A §1.6）。反解即
     ``feq = F_px·K_edge/(half_edge)``，宽幅判定按画布长/短边比例 >= 4/3

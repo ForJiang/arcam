@@ -29,6 +29,16 @@ API=https://api.github.com
 AUTH="Authorization: Bearer $TOKEN"
 VER=2022-11-28
 
+# 保密卫生：token 曾只在成功路径撤除——set -e 下 git push 失败即退出，
+# token 永久残留 .git/config。trap 保证**任何**退出路径都把 remote 还原。
+TOKEN_IN_URL=0
+cleanup() {
+  if [ "$TOKEN_IN_URL" = 1 ]; then
+    git remote set-url origin "https://github.com/$USER/$REPO.git" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
 echo "[push] 取用户名…"
 USER=$(curl -sf -H "$AUTH" -H "X-GitHub-Api-Version: $VER" "$API/user" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["login"])')
@@ -44,11 +54,13 @@ if ! git remote get-url origin >/dev/null 2>&1; then
   git remote add origin "https://github.com/$USER/$REPO.git"
 fi
 git remote set-url origin "https://x-access-token:$TOKEN@github.com/$USER/$REPO.git"
+TOKEN_IN_URL=1
 
 echo "[push] 推送 main…"
 git branch -M main
 git push -u origin main --quiet
-git remote set-url origin "https://github.com/$USER/$REPO.git"   # 撤掉 URL 里的 token
+git remote set-url origin "https://github.com/$USER/$REPO.git"   # 撤掉 URL 里的 token（trap EXIT 兜底失败路径）
+TOKEN_IN_URL=0
 
 echo "[push] 开启 Pages（main 分支 /docs）…"
 curl -sf -X POST -H "$AUTH" -H "X-GitHub-Api-Version: $VER" \

@@ -37,7 +37,7 @@
  *   litScaleBucket(scale) → number；grainTile() → Float64Array(65536)
  */
 import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -50,7 +50,8 @@ const TOL = 1e-9;
 const coreSrc = join(root, 'docs/arcam-core.js');
 const coreTmp = join(mkdtempSync(join(tmpdir(), 'arcam-golden-')), 'core.mjs');
 writeFileSync(coreTmp, readFileSync(coreSrc, 'utf8'));
-const { focalPx, project, place, currentPlacement } = await import(coreTmp);
+// Windows 下动态 import 的绝对路径（C:\…）会被当成协议——必须转 file:// URL
+const { focalPx, project, place, currentPlacement } = await import(pathToFileURL(coreTmp).href);
 
 // 光照烘焙组同一技巧。W2 未交付 arcam-lighting.js 时明确报缺失并退出 1
 // （不空跑假过：Python 侧重算门禁已独立覆盖该组，Node 侧待合并后复跑）。
@@ -69,7 +70,7 @@ writeFileSync(join(dirname(litTmp), 'arcam-core.mjs'), readFileSync(coreSrc, 'ut
 // 静态解析，改不了入参文件，就在副本里改这一行说明符）。
 writeFileSync(litTmp, readFileSync(litSrc, 'utf8')
   .replace("from './arcam-core.js'", "from './arcam-core.mjs'"));
-const { measureRegion, bakeLit, charStats, litScaleBucket, grainTile } = await import(litTmp);
+const { measureRegion, bakeLit, charStats, litScaleBucket, grainTile } = await import(pathToFileURL(litTmp).href);
 
 const camOf = s => ({ W: +s[0], H: +s[1], h: +s[2], feq: +s[3], pitch: +s[4], roll: +s[5] });
 const rectOf = r => (r ? { x: r[0], y: r[1], w: r[2], h: r[3] } : null);

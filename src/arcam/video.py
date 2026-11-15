@@ -107,16 +107,24 @@ _TRACK_DEFAULTS: dict[str, object] = {
     "mode": "ground",
     "frame_key": "满幅",
     "shot": "全身",
+    # 光影六参（v1.13.4 起）：此前轨道完全无法表达光影三门/阴影两参/颗粒强度，
+    # 同一立绘配方在 render 与 video 出不来一致效果。默认值 = 原版逐位口径。
+    "shadow": True,
+    "grain": True,
+    "sample_light": True,
+    "shadow_az": 0.0,
+    "shadow_opacity": 1.0,
+    "grain_scale": 1.0,
 }
-"""轨道级默认值。除 width/height/fps 外的八个字段（height_m/feq_mm/
-subject_height_m/char_scale/size_pct/mode/frame_key/shot）与 S 的默认值逐字对齐
-（index.html:921–937）；width/height/fps 是离线新增（原版 canvas 像素 = 视频像素，
-index.html:3941）。"""
+"""轨道级默认值。除 width/height/fps 外的字段与 S 的默认值逐字对齐
+（index.html:921–937；光影六参另见 SPEC §3.6 的追加参数）；width/height/fps
+是离线新增（原版 canvas 像素 = 视频像素，index.html:3941）。"""
 
 _TRACK_FIELDS = tuple(_TRACK_DEFAULTS) + ("keys",)
 _KEY_BASE = ("t", "lateral_m", "distance_m", "pitch_deg", "roll_deg")
 _KEY_FIELDS = _KEY_BASE + (
     "height_m", "feq_mm", "subject_height_m", "char_scale", "size_pct", "mode",
+    "shadow", "grain", "sample_light", "shadow_az", "shadow_opacity", "grain_scale",
 )
 
 
@@ -151,6 +159,19 @@ class PoseKey:
     """自由模式下立绘占画面高度百分比。None = 沿用轨道默认（原版 S.sizePct）。"""
     mode: str | None = None
     """摆放模式 'ground'|'free'。None = 沿用轨道默认（原版 S.mode）。"""
+    shadow: bool | None = None
+    """接触阴影开关（原版 LIGHT_SHD）。None = 沿用轨道默认；布尔键不做插值，
+    经过渡段时取左键（与 mode 同款离散语义）。"""
+    grain: bool | None = None
+    """颗粒开关（原版 GRAIN_ON 门控颗粒段）。None = 沿用轨道默认。"""
+    sample_light: bool | None = None
+    """采光开关（原版 LIGHT_ON）。None = 沿用轨道默认。"""
+    shadow_az: float | None = None
+    """阴影方位角（度）。None = 沿用轨道默认；跨键线性插值。"""
+    shadow_opacity: float | None = None
+    """阴影浓度倍率（≥0，0=不铺）。None = 沿用轨道默认；跨键线性插值。"""
+    grain_scale: float | None = None
+    """颗粒强度倍率（≥0，0=不撒）。None = 沿用轨道默认；跨键线性插值。"""
 
 
 @dataclass(frozen=True)
@@ -177,6 +198,18 @@ class PoseTrack:
     keys: list[PoseKey]
     shot: str = "全身"
     """景别，SHOTS 的中文 key。缺省 '全身' = 原版 S.shot 默认。"""
+    shadow: bool = True
+    """接触阴影开关，键内未表态时用它（原版 LIGHT_SHD 默认开）。"""
+    grain: bool = True
+    """颗粒开关，键内未表态时用它（原版 GRAIN_ON 默认开）。"""
+    sample_light: bool = True
+    """采光开关，键内未表态时用它（原版 LIGHT_ON 默认开）。"""
+    shadow_az: float = 0.0
+    """阴影方位角（度），键内未表态时用它。缺省 0 = 原版逐位一致。"""
+    shadow_opacity: float = 1.0
+    """阴影浓度倍率（≥0），键内未表态时用它。缺省 1 = 原版逐位一致。"""
+    grain_scale: float = 1.0
+    """颗粒强度倍率（≥0），键内未表态时用它。缺省 1 = 原版逐位一致。"""
 
 
 @dataclass(frozen=True)
@@ -194,6 +227,12 @@ class FramePose:
     size_pct: float
     mode: str
     shot: str = "全身"
+    shadow: bool = True
+    grain: bool = True
+    sample_light: bool = True
+    shadow_az: float = 0.0
+    shadow_opacity: float = 1.0
+    grain_scale: float = 1.0
 
     def camera(self, width: int, height: int) -> Camera:
         """按画布尺寸拼相机（index.html:1041–1047 的 focal/project 入参）。"""
@@ -251,6 +290,34 @@ def _num_or(data: dict, name: str, where: str, default: float) -> float:
     return default if name not in data else _num(data, name, where)
 
 
+def _opt_bool(data: dict, name: str, where: str) -> bool | None:
+    value = data.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(f"{where} 字段 {name!r} 应为布尔或 null，得到 {value!r}")
+    return value
+
+
+def _bool_or(data: dict, name: str, where: str, default: bool) -> bool:
+    """轨道顶层布尔：缺字段用默认；显式 null 不接受（省略字段即默认）。"""
+    if name not in data:
+        return default
+    value = _opt_bool(data, name, where)
+    if value is None:
+        raise ValueError(f"{where} 字段 {name!r} 不接受 null（省略字段即用默认 {default}）")
+    return value
+
+
+def _nonneg(value: float, name: str, where: str) -> float:
+    """shadow_opacity / grain_scale 的共端口径：0 是有语义的合法值（关阴影/关颗粒），
+    负数一定是误输入——与 CLI ``_nonneg`` / webapp 校验三方同口径。"""
+    if value < 0:
+        raise ValueError(f"{where} 字段 {name!r} 应 ≥ 0（0 有语义：关阴影/关颗粒），"
+                         f"得到 {value}")
+    return value
+
+
 def _text_or(data: dict, name: str, where: str, default: str) -> str:
     return default if name not in data else _text(data, name, where)
 
@@ -292,6 +359,11 @@ def load_track(path: str | Path) -> PoseTrack:
         kwargs[name] = _num_or(data, name, "轨道顶层", float(defaults[name]))
     for name in ("mode", "frame_key", "shot"):
         kwargs[name] = _text_or(data, name, "轨道顶层", str(defaults[name]))
+    for name in ("shadow", "grain", "sample_light"):
+        kwargs[name] = _bool_or(data, name, "轨道顶层", bool(defaults[name]))
+    for name in ("shadow_az", "shadow_opacity", "grain_scale"):
+        kwargs[name] = _nonneg(_num_or(data, name, "轨道顶层", float(defaults[name])),
+                               name, "轨道顶层")
 
     if kwargs["mode"] not in ("ground", "free"):
         raise ValueError(f"mode 只能是 'ground' 或 'free'，得到 {kwargs['mode']!r}")
@@ -327,6 +399,13 @@ def load_track(path: str | Path) -> PoseTrack:
         }
         for name in ("height_m", "feq_mm", "subject_height_m", "char_scale", "size_pct"):
             key_kwargs[name] = _opt_num(raw, name, where)
+        for name in ("shadow", "grain", "sample_light"):
+            key_kwargs[name] = _opt_bool(raw, name, where)
+        for name in ("shadow_az", "shadow_opacity", "grain_scale"):
+            value = _opt_num(raw, name, where)
+            if value is not None:
+                value = _nonneg(value, name, where)
+            key_kwargs[name] = value
         mode = raw.get("mode")
         if mode is not None and mode not in ("ground", "free"):
             raise ValueError(f"{where} mode 只能是 'ground' 或 'free'，得到 {mode!r}")
@@ -357,6 +436,12 @@ def save_track(track: PoseTrack, path: str | Path) -> None:
         "mode": track.mode,
         "frame_key": track.frame_key,
         "shot": track.shot,
+        "shadow": track.shadow,
+        "grain": track.grain,
+        "sample_light": track.sample_light,
+        "shadow_az": track.shadow_az,
+        "shadow_opacity": track.shadow_opacity,
+        "grain_scale": track.grain_scale,
     }
     keys: list[dict[str, object]] = []
     for k in track.keys:
@@ -368,7 +453,9 @@ def save_track(track: PoseTrack, path: str | Path) -> None:
             "roll_deg": k.roll_deg,
         }
         for name in ("height_m", "feq_mm", "subject_height_m",
-                     "char_scale", "size_pct", "mode"):
+                     "char_scale", "size_pct", "mode",
+                     "shadow", "grain", "sample_light",
+                     "shadow_az", "shadow_opacity", "grain_scale"):
             value = getattr(k, name)
             if value is not None:
                 entry[name] = value
@@ -431,6 +518,15 @@ def sample_track(track: PoseTrack, t: float) -> FramePose:
         size_pct=_mix_opt(k0.size_pct, k1.size_pct, track.size_pct, alpha),
         mode=k0.mode or track.mode,
         shot=track.shot,
+        # 布尔三门是离散字段：取左键表态，未表态回落轨道默认（与 mode 同款语义）
+        shadow=k0.shadow if k0.shadow is not None else track.shadow,
+        grain=k0.grain if k0.grain is not None else track.grain,
+        sample_light=k0.sample_light if k0.sample_light is not None else track.sample_light,
+        # 阴影两参/颗粒强度是连续量：跨键线性插值（同可缺省标量的口径）
+        shadow_az=_mix_opt(k0.shadow_az, k1.shadow_az, track.shadow_az, alpha),
+        shadow_opacity=_mix_opt(k0.shadow_opacity, k1.shadow_opacity,
+                                track.shadow_opacity, alpha),
+        grain_scale=_mix_opt(k0.grain_scale, k1.grain_scale, track.grain_scale, alpha),
     )
 
 
@@ -643,7 +739,13 @@ def _open_mp4(path: Path, fps: float):
 
 def render_track(bg_source: str | Path | np.ndarray, track: PoseTrack,
                  char_rgba01: np.ndarray, out_dir: str | Path,
-                 *, tone: bool = False, gif: bool = False) -> list[Path]:
+                 *, tone: bool = False, gif: bool = False,
+                 shadow: bool | None = None,
+                 grain: bool | None = None,
+                 sample_light: bool | None = None,
+                 shadow_az: float | None = None,
+                 shadow_opacity: float | None = None,
+                 grain_scale: float | None = None) -> list[Path]:
     """按轨道逐帧渲染：每帧解算摆位 → 走 compose_shot → 写 PNG 序列。
 
     :param bg_source: 背景。单张图片路径、帧目录（按文件名排序）、已就绪的
@@ -657,6 +759,13 @@ def render_track(bg_source: str | Path | np.ndarray, track: PoseTrack,
     :param gif:      追加写动画 GIF（``video.gif``，纯 PIL、零依赖）。GIF 只有
         256 色，逐帧自适应调色板（每帧独立 quantize）——比全局调色板耐得住
         光线变化大的轨道；要更小/更通用的文件用 mp4（需 imageio-ffmpeg）。
+    :param shadow:    接触阴影开关；``None``（未给）= 用轨道值（键 > 轨道级默认）。
+        显式给定 = CLI 旗标压过轨道 JSON（"命令行最后一手优先"）。
+    :param grain:     颗粒开关；优先级同 ``shadow``。
+    :param sample_light: 采光开关；优先级同 ``shadow``。
+    :param shadow_az: 阴影方位角（度，有限数）；优先级同 ``shadow``。
+    :param shadow_opacity: 阴影浓度倍率（≥0）；优先级同 ``shadow``。
+    :param grain_scale: 颗粒强度倍率（≥0）；优先级同 ``shadow``。
     :return: 写出的 PNG 帧路径列表（按帧序）。
 
     与原版的差异（如实记录，README 同步）：
@@ -666,11 +775,18 @@ def render_track(bg_source: str | Path | np.ndarray, track: PoseTrack,
       （时间轴由轨道定义）；
     - imageio 可用时追加写 ``video.mp4``（libx264 yuv420p，懒加载，装了才写）。
     """
+    for name, value in (("shadow_az", shadow_az),
+                        ("shadow_opacity", shadow_opacity),
+                        ("grain_scale", grain_scale)):
+        if value is not None:
+            if not math.isfinite(value):
+                raise ValueError(f"{name} 必须是有限数，得到 {value}")
+            _nonneg(float(value), name, "render_track 参数")
+    if char_rgba01 is None:
+        raise ValueError("渲染需要一张立绘（RGBA）")
     problems = track_issues(track)
     if problems:
         raise ValueError("轨道有问题，已拒绝渲染：\n  - " + "\n  - ".join(problems))
-    if char_rgba01 is None:
-        raise ValueError("渲染需要一张立绘（RGBA）")
     char = np.asarray(char_rgba01)
     if char.ndim != 3 or char.shape[2] != 4:
         raise ValueError(f"立绘应为 (H,W,4) RGBA，得到 {char.shape}")
@@ -691,11 +807,20 @@ def render_track(bg_source: str | Path | np.ndarray, track: PoseTrack,
             else:
                 assert bg_files is not None
                 src01 = _fit_rgb01(_read_image(bg_files[min(i, len(bg_files) - 1)]), track)
-            # with_char_layer=False：逐帧只要出图，第二遍 _engine（立绘层）纯白烧
+            # with_char_layer=False：逐帧只要出图。光影六参：显式给过的压过轨道
+            # （键 > 轨道级默认已由 sample_track 收敛进 pose），None = 用轨道值
             shot = compose_shot(
                 src01, char, pose.subject(), pose.camera(track.width, track.height),
                 frame_key=track.frame_key, mode=pose.mode, size_pct=pose.size_pct,
                 char_scale=pose.char_scale, tone=tone, shot=pose.shot,
+                shadow=shadow if shadow is not None else pose.shadow,
+                grain=grain if grain is not None else pose.grain,
+                sample_light=(sample_light if sample_light is not None
+                              else pose.sample_light),
+                shadow_az=shadow_az if shadow_az is not None else pose.shadow_az,
+                shadow_opacity=(shadow_opacity if shadow_opacity is not None
+                                else pose.shadow_opacity),
+                grain_scale=grain_scale if grain_scale is not None else pose.grain_scale,
                 with_char_layer=False,
             ).shot
             frame_path = out / (FRAME_FMT % (i + 1))

@@ -17,26 +17,26 @@
  *     freeP/edgeBar/rect，缺省值与 Python 一致。
  */
 
-export const K_LONG = 17.3064;   // 0.8*43.266/2（mm，传感器长半边长），geometry.py:20
-export const K_SHORT = 12.9798;  // 0.6*43.266/2（mm，传感器短半边长），geometry.py:21
+export const K_LONG = 17.3064;   // 0.8*43.266/2（mm，传感器长半边长），geometry.py:29
+export const K_SHORT = 12.9798;  // 0.6*43.266/2（mm，传感器短半边长），geometry.py:30
 
-/* 景别表：值 = 立绘下沿离地高度 / 人物身高（placement.py:28）。 */
+/* 景别表：值 = 立绘下沿离地高度 / 人物身高（placement.py:31）。 */
 export const SHOTS = Object.assign(Object.create(null), {
   '全身': 1.00, '膝上': 0.72, '腰上': 0.47, '胸上': 0.28, '头肩': 0.20,
 });
 
-/* 出图画幅表：值 = 宽/高，0 = 不裁，-1 = 整块画布（placement.py:31）。 */
+/* 出图画幅表：值 = 宽/高，0 = 不裁，-1 = 整块画布（placement.py:34）。 */
 export const FRAMES = Object.assign(Object.create(null), {
   '自由': 0, '1:1': 1, '4:5': 0.8, '16:9': 16 / 9, '9:16': 9 / 16, '满幅': -1,
 });
 
-/* 自由模式图心的归一化默认位置（placement.py:34）。用数组而非对象：Python 侧是
+/* 自由模式图心的归一化默认位置（placement.py:37）。用数组而非对象：Python 侧是
  * tuple，调用方按下标 [0]/[1] 取，保持索引语义一致。 */
 export const DEFAULT_FREE_P = [0.5, 0.6];
 
 const DEG2RAD = Math.PI / 180.0;
 
-/* clampN(v, a, b)：先夹范围，两端不排序（numeric.py:26，原版同样不排序）。 */
+/* clampN(v, a, b)：先夹范围，两端不排序（numeric.py:36，原版同样不排序）。 */
 function clampN(value, lo, hi) {
   return value < lo ? lo : (value > hi ? hi : value);
 }
@@ -48,7 +48,7 @@ function charSize(charW, charH) {
   return [charW, charH];
 }
 
-/* SHOTS 的取值带「未知/空键回退全身」的兜底（placement.py:103 的 or 链，
+/* SHOTS 的取值带「未知/空键回退全身」的兜底（placement.py:115 的 or 链，
  * 老存档只有一个 '全身' 可用时不能崩）。表本身无原型链，查不到的键一律兜底。 */
 function shotVal(shot) {
   if (shot === '全身') return SHOTS['全身'];
@@ -113,7 +113,7 @@ const _focalFromCam = (cam) => focalPx(cam.W, cam.H, cam.feq);
 
 /**
  * 相机系点 (x, y, d) → 画布像素 (u, v)；Zc <= 0.05（点在相机平面上或背后）
- * 返回 null —— 唯一剔除条件，无 FOV 裁剪（geometry.py:66）。
+ * 返回 null —— 唯一剔除条件，无 FOV 裁剪（geometry.py:90）。
  * y 是相机系 y（= 世界高度 - 相机高），调用方负责换算。
  */
 export function project(x, y, d, cam) {
@@ -132,7 +132,7 @@ export function project(x, y, d, cam) {
 
 /**
  * 画布像素 (u, v) → 世界 (x, d)（米）：project 固定 y = -h 的解析逆。
- * 如实保留的原版写回 clamp：d 夹 [0.5, 20]、x 夹 [-6, 6]（geometry.py:104，
+ * 如实保留的原版写回 clamp：d 夹 [0.5, 20]、x 夹 [-6, 6]（geometry.py:141，
  * 后者的 ±6 与 autoFixX 的 ±20 故意不一致，不许顺手修）。
  * 退化返回 null：|den| < 1e-6（射线与地平面近平行）或 d <= 0.05。
  */
@@ -156,7 +156,7 @@ export function place(u, v, cam) {
 /* ───────────────────────────── 摆位 ───────────────────────────── */
 
 /**
- * 把基准边按旋转量转过去（切口朝向变了 → 要吸的边也换）。placement.py:73
+ * 把基准边按旋转量转过去（切口朝向变了 → 要吸的边也换）。placement.py:85
  * 画面系 y 向下、正向旋转顺时针，故「下」转过 +90° 变「左」：下(2)→左(3)→上(1)→右(4)。
  */
 function rotateBar(bar, rot) {
@@ -168,7 +168,7 @@ function rotateBar(bar, rot) {
 }
 
 /**
- * 贴地摆位：立绘下沿落在景别那个高度上，上沿顶在头顶投影点。placement.py:86
+ * 贴地摆位：立绘下沿落在景别那个高度上，上沿顶在头顶投影点。placement.py:98
  * pb = project(x, yb-h, d)（下沿）；pt = project(x, Hp-h, d)（头顶）；
  * span = hypot(pb→pt)；h = span·charScale；中心 = pb 沿 pb→pt 方向推 h/2
  * （锚点是下沿 pb，charScale=1 时中心正好落回 (pb+pt)/2）；w = h·宽高比；
@@ -198,7 +198,7 @@ export function groundPlacement(charW, charH, subj, cam, opts = {}) {
 }
 
 /**
- * 自由模式：按画面高度 sizePct% 摆，图心在归一化 freeP。placement.py:125
+ * 自由模式：按画面高度 sizePct% 摆，图心在归一化 freeP。placement.py:137
  * 贴边开着（edgeBar 非 0）且给了 rect 时过 snapToEdge 吸附；rect 缺省时不吸附。
  * rotDeg 缺省 0.0（直接调用本函数时不随相机斜；经 currentPlacement 分派时默认
  * 跟随 cam.roll，rotBasis='frame' 时为 0）。
@@ -223,7 +223,7 @@ export function freePlacement(charW, charH, subj, cam, opts = {}) {
 }
 
 /**
- * 按 opts.mode 分派：'free' → freePlacement，其余 → groundPlacement。placement.py:155
+ * 按 opts.mode 分派：'free' → freePlacement，其余 → groundPlacement。placement.py:172
  * free 分支的 rotDeg 缺省跟随 cam.roll（原版 charRot，2930），'frame' 时为 0。
  */
 export function currentPlacement(charW, charH, subj, cam, opts = {}) {
@@ -253,7 +253,7 @@ export function currentPlacement(charW, charH, subj, cam, opts = {}) {
  * 自动摆正：把立绘横向吸到最近的三分线（1/3、1/2、2/3 三选一）。
  * 返回 [newX, status]：status ∈ 'nochar' | 'already' | 'moved:NN'。
  * ground：project() 非线性 → 取数值导数（dx=0.05）一步解，clamp ±20
- * （placement.py:240；与 place 的 ±6 故意不一致，如实保留）。
+ * （placement.py:257；与 place 的 ±6 故意不一致，如实保留）。
  * free：改归一化 freeP.u（clamp [0,1]）后 resnap，newX = 吸附后的 s.u/W。
  * 'nochar'/'already' 时 newX = 未动的当前位置。
  */
@@ -306,7 +306,7 @@ export function autoFixX(charW, charH, subj, cam, opts = {}) {
 }
 
 /**
- * 贴边吸附：把立绘吸到 rect 的某条边（1 上 / 2 下 / 3 左 / 4 右）。placement.py:243
+ * 贴边吸附：把立绘吸到 rect 的某条边（1 上 / 2 下 / 3 左 / 4 右）。placement.py:260
  * bw/bh 是旋转后外接盒（w·|cos|+h·|sin| / w·|sin|+h·|cos|）；rot 变化后
  * rotateBar 换边。沿自由轴用 fit 钳位，两端不排序（图比框大时范围自然反过来，
  * 让框始终被图盖住，可自由平移）。返回的 w = h·aspect、rot 原样带过去。
@@ -351,7 +351,7 @@ export function snapToEdge(c, bar, rect, aspect, rot) {
 
 /* ───────────────────────────── 画幅 ───────────────────────────── */
 
-/** 离线版 viewRect：无布局外壳 → 整块画布（frames.py:22，documented deviation）。 */
+/** 离线版 viewRect：无布局外壳 → 整块画布（frames.py:24，documented deviation）。 */
 export function viewRect(W, H) {
   return { x: 0, y: 0, w: W, h: H };
 }
@@ -359,7 +359,7 @@ export function viewRect(W, H) {
 /**
  * 出图矩形（画布坐标）：'满幅'(-1) → 整块画布；'自由'/未知(0) → viewRect；
  * 否则在 viewRect 内取该宽高比的最大内接矩形居中，宽高保持浮点、
- * 原点取 Math.round（整）。frames.py:32
+ * 原点取 Math.round（整）。frames.py:34
  */
 export function frameRect(key, W, H) {
   let ar = key === undefined || key === null ? undefined : FRAMES[key];

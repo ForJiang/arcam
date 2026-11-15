@@ -22,7 +22,7 @@ import pytest
 from arcam.geometry import Camera
 from arcam.geometry import K_LONG, K_SHORT
 from arcam.numeric import Rect, js_round, js_to_fixed
-from arcam.placement import SpritePlacement, Subject
+from arcam.placement import SpritePlacement, Subject, current_placement
 from arcam.scene import (
     SCENE_IMAGE_FILE,
     build_scene,
@@ -59,7 +59,8 @@ PLACE_A = SpritePlacement(u=136.79661073267874, v=193.36845123657918,
                           w=47.30716781076159, h=94.61433562152318,
                           rot=0.06453692198575127)
 
-# 用例二：高画布（非 wide 分支）、正俯角、负滚转、正值横向
+# 用例二：高画布（竖幅，但 L/Sd = 960/540 ≈ 1.78 ≥ 4/3 → 仍走 wide 分支）、
+# 正俯角、负滚转、正值横向
 CAM_B = Camera(540, 960, 1.45, 35.0, 12.5, -6.25)
 SUBJ_B = Subject(1.72, 2.75, 0.62)
 RECT_B = Rect(0.0, 174.0, 540.0, 960.0)
@@ -115,7 +116,11 @@ def test_ground_segment() -> None:
 def test_foot_and_head_pixel_hand_computed_group_a() -> None:
     """用例一：宽画布 wide 分支。
 
-    focal：L=320、Sd=240，320/240 = 1.3333 < 4/3 → 非 wide，
+    focal：L=320、Sd=240，320/240 恰等于 4/3 → 走 wide 分支
+      （边界上两支数值恰好重合：160·23/17.3064 = 120·23/12.9798——曾把本组
+      标成"非 wide"，实际代码走 wide；v1.13 审计修正描述，分支判别另见
+      test_scene_focal_non_wide_branch_discriminated）。
+      下列手算用非 wide 公式书写，数值与 wide 分支逐位一致：
       F = (240/2)·23/12.9798 = 2760/12.9798
     project(-0.35, -1.6, 4.0)，pitch=-8°、roll=3°：
       Zc = -y·sin p + d·cos p = -(-1.6)·(-0.1391731) + 4·0.9902681 = 3.7383953
@@ -208,6 +213,29 @@ def test_rect_public_surface_is_x_y_w_h_x2_y2() -> None:
     assert (r.x2, r.y2) == (110.0, 70.0)
     assert not hasattr(r, "cx") and not hasattr(r, "cy")
     assert set(Rect.__dataclass_fields__) == {"x", "y", "w", "h"}
+
+
+# ───────────────────────── 真·非 wide 画布（分支判别） ─────────────────────────
+def test_scene_focal_non_wide_branch_discriminated() -> None:
+    """真非 wide 画布（300×240，L/Sd = 1.25 < 4/3）：focalPx 必须走 K_SHORT 公式。
+
+    既有两组"手算"用例的画幅（320×240 恰 =4/3、540×960 ≈1.78）实际都走 wide
+    分支——前者两支数值恰好重合、后者是竖幅但比例仍过 4/3,全文件没有一个真
+    非 wide 画布,分支走错不会红（v1.13 审计补）。两支公式在这画幅下差 ~6.6%：
+      F_nonwide = (240/2)·23/12.9798 = 2760/12.9798 ≈ 212.6354
+      F_wide    = (300/2)·23/17.3064 = 3450/17.3064 ≈ 199.3585
+    """
+    cam = Camera(300, 240, 1.6, 23.0, -8.0, 3.0)
+    subj = Subject(1.65, 4.0, -0.35)
+    pl = current_placement(np.zeros((128, 64, 4)), subj, cam, mode="ground")
+    assert pl is not None
+    d = build_scene(Rect(0.0, 0.0, 300.0, 240.0), pl, subj, cam,
+                    frame_key="满幅", char_rgba01=np.zeros((128, 64, 4)),
+                    char_name="her.png", mode="ground")
+    want = (240 / 2) * 23.0 / K_SHORT
+    assert d["camera"]["focalPx"] == js_to_fixed(want, 2), "非 wide 画布走了 wide 分支"
+    wide_val = (300 / 2) * 23.0 / K_LONG
+    assert abs(wide_val - want) > 10.0, "两支公式在该画幅下应显著不同"
 
 
 # ───────────────────────── character 分支 ─────────────────────────

@@ -455,5 +455,7 @@ def test_project_non_finite_point_never_raises(x, y, d, expect_none):
         assert got is None
     else:
         assert got is not None and not math.isfinite(got[0])
-    # 俯仰+滚转下同样不抛
-    assert project(x, y, d, _cam(pitch=12.0, roll=8.0)) is not None or True
+    # 俯仰+滚转下同样不抛；结果仍满足形状契约（None 或二元组，v1.13 审计把
+    # `is not None or True` 的恒真断言换成真判据）
+    got2 = project(x, y, d, _cam(pitch=12.0, roll=8.0))
+    assert got2 is None or (len(got2) == 2 and all(isinstance(v, float) for v in got2))

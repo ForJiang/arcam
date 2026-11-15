@@ -17,8 +17,7 @@
     arcam contact-sheet PHOTO CHAR -o OUT.png --vary K=V,V,V        # 参数对比网格
     arcam batch PHOTO_DIR CHAR -o OUTDIR [--depth-dir DIR] [--ext png|jpg]  # 批量出图
     arcam stats [--json]                                            # 项目自报体检表
-    arcam lidar inspect DEPTH [--json]                              # LiDAR 深度诊断（h/pitch/roll）
-    arcam lidar serve --port 7707 [--out DIR]                       # 实时流接收（Ctrl-C 停止）
+    arcam lidar inspect|serve|sim …                                 # LiDAR：深度诊断 / 实时流接收 / 合成帧（无真机验证链路）
     arcam web [--host 127.0.0.1] [--port 8765] [--no-open]          # 本地网页界面（标准库 HTTP 服务）
 
 退出码：0 正常；1 运行期失败（缺文件、素材不合法、轨道有问题）；2 用法错误（argparse）。
@@ -201,12 +200,15 @@ def _add_placement(p: argparse.ArgumentParser) -> None:
                            "Tone matching (original TONE_ON; photo path only, "
                            "index.html:3690)"))
     g.add_argument("--no-light", action="store_true",
-                   help=_h("关掉环境光烘焙（bakeLit；只出原色立绘）。char-layer/multi 没有"
-                           "照片可采光、本来就不烘；bundle 与网页导出的立绘层跟随照片光）",
+                   help=_h("关掉环境光烘焙（bakeLit；只出原色立绘）。char-layer 没有照片"
+                           "可采光、本来就不烘；multi 走立绘层路径同样恒不烘（本开关只"
+                           "影响照片路径）；bundle 与网页导出的立绘层跟随照片光）",
                            "Disable ambient-light baking (bakeLit; emits the character "
-                           "in its original colors). char-layer/multi have no photo to "
-                           "sample light from and never bake; bundle and the web "
-                           "export's character layer follow the photo light"))
+                           "in its original colors). char-layer has no photo to sample "
+                           "light from and never bakes; multi composites the char-layer "
+                           "path and never bakes either (this flag affects the photo "
+                           "path only); bundle and the web export's character layer "
+                           "follow the photo light"))
     g.add_argument("--no-grain", action="store_true",
                    help=_h("关掉颗粒匹配（bakeLit 里的颗粒那一段，光仍烘）",
                            "Disable grain matching (the grain stage of bakeLit; "
@@ -765,6 +767,27 @@ Exit codes: 0 ok, 1 runtime failure (missing file / bad input / bad track),
                    help=_h("追加写动画 GIF（video.gif，纯 PIL 零依赖；256 色逐帧自适应）",
                            "Also write an animated GIF (video.gif, pure PIL, no "
                            "dependencies; 256 colors, per-frame adaptive)"))
+    # 光影六参（v1.13.4）：此前轨道无法表达 shadow/grain/sample_light/阴影两参/
+    # 颗粒强度——同一立绘配方在 render 与 video 出不来一致效果。旗标缺省 None
+    # = 不表态（轨道 JSON 的值生效）；显式给过 = 压过轨道（命令行最后一手优先）。
+    g = p.add_argument_group(_h("光影（缺省跟随轨道 JSON）",
+                                "Light & shadow (default: follow track JSON)"))
+    g.add_argument("--no-shadow", action="store_true",
+                   help=_h("关掉接触阴影", "Disable the contact shadow"))
+    g.add_argument("--no-grain", action="store_true",
+                   help=_h("关掉颗粒", "Disable grain"))
+    g.add_argument("--no-light", action="store_true",
+                   help=_h("关掉采光（bakeLit 原样返回立绘）",
+                           "Disable light sampling (bakeLit returns the char as-is)"))
+    g.add_argument("--shadow-az", type=float, default=None, metavar=_h("度", "DEG"),
+                   help=_h("阴影方位角（度，斜射拖偏）",
+                           "Shadow azimuth in degrees"))
+    g.add_argument("--shadow-opacity", type=_nonneg, default=None, metavar=_h("倍", "X"),
+                   help=_h("阴影浓度倍率（0=不铺）",
+                           "Shadow opacity multiplier (0 = none)"))
+    g.add_argument("--grain-scale", type=_nonneg, default=None, metavar=_h("倍", "X"),
+                   help=_h("颗粒强度倍率（0=不撒）",
+                           "Grain intensity multiplier (0 = none)"))
     _add_lang(p, lang)
     p.set_defaults(func=cmd_video)
 
@@ -1643,17 +1666,20 @@ def cmd_multi(args) -> int:
     for i, char_path in enumerate(args.chars):
         char_p = _need(char_path, _h(f"立绘 {i + 1}", f"character {i + 1}"))
         char01 = image_to_rgba01(char_p)
-        # 第一张用主参数；第 i 张用第 i-1 个 spec 覆盖
-        eff_args = args if i == 0 or not args.spec else _SpecArgs(args, _parse_spec(args.spec[i - 1]))
+        # 第一张用主参数；第 i 张用第 i-1 个 spec 覆盖。spec 套数不够时按
+        # 帮助文本的承诺回落主参数（"不给就用主参数"）——曾直接 args.spec[i-1]
+        # IndexError 裸栈（main 不捕 IndexError，违反"报错一律人话"）
+        spec_text = args.spec[i - 1] if i > 0 and i - 1 < len(args.spec) else None
+        eff_args = args if i == 0 or not spec_text else _SpecArgs(args, _parse_spec(spec_text))
         cam, subj = _pose(eff_args, width, height)
         kw = _compose_kw(eff_args)
         # 立绘层路径：src=None → 只出立绘+阴影的透明层（同裁切框）
         layer, rect = compose_char_layer(char01, subj, cam, **kw)
         layers.append((layer, rect, char_p.name))
         print(_h(f"  层 {i + 1}/{len(args.chars)}：{char_p.name}"
-                 + (f"（spec：{args.spec[i - 1]}）" if i > 0 and args.spec else ""),
+                 + (f"（spec：{spec_text}）" if spec_text else ""),
                  f"  Layer {i + 1}/{len(args.chars)}: {char_p.name}"
-                 + (f" (spec: {args.spec[i - 1]})" if i > 0 and args.spec else "")))
+                 + (f" (spec: {spec_text})" if spec_text else "")))
 
     # 顺序 source-over：后画的盖先画的（与逐一合成等价）。每层按自己的裁切框
     # 偏移贴回整幅——满幅时偏移为 0，行为与逐位相同
@@ -1817,13 +1843,17 @@ def cmd_contact_sheet(args) -> int:
         cam = base_cam
         subj = base_subj
         kw = dict(base_params)
-        compose_keys = ("frame_key", "mode", "size_pct", "char_scale",
+        compose_keys = ("frame", "mode", "size_pct", "char_scale",
                         "rot_basis", "shot", "edge_bar")
         for key, v in combo.items():
             # 只有 compose 自己的键进 kw；h/feq/pitch/roll/hp/d/x 走下面的
-            # Camera/Subject 重建（它们是相机与人物位姿，不是 compose 开关）
+            # Camera/Subject 重建（它们是相机与人物位姿，不是 compose 开关）。
+            # combo 的键是 _PLACEMENT_KEYS 口径（frame），compose 形参叫
+            # frame_key——映射过去。曾写成 frame_key 当键：永远匹配不上
+            # --vary 的合法键 frame，值被整体丢弃、标签照打（frame 扫画幅
+            # 的格子全是同一张图；multi --spec frame 反而生效，两条路径不一致）
             if key in compose_keys:
-                kw[key] = _coerce(key, v)
+                kw["frame_key" if key == "frame" else key] = _coerce(key, v)
             if key == "h":
                 cam = Camera(cam.width, cam.height, float(v), cam.feq_mm,
                              cam.pitch_deg, cam.roll_deg)
@@ -2187,7 +2217,14 @@ def cmd_video(args) -> int:
     char01 = image_to_rgba01(char_p)
     out_dir = Path(args.out)
     try:
-        frames = render_track(args.bg, track, char01, out_dir, tone=args.tone, gif=args.gif)
+        frames = render_track(
+            args.bg, track, char01, out_dir, tone=args.tone, gif=args.gif,
+            shadow=False if args.no_shadow else None,
+            grain=False if args.no_grain else None,
+            sample_light=False if args.no_light else None,
+            shadow_az=args.shadow_az,
+            shadow_opacity=args.shadow_opacity,
+            grain_scale=args.grain_scale)
     except PILUnidentifiedImageError as e:
         # --bg 指到非图片（视频文件最常见）：PIL 的原话是 "cannot identify image
         # file"，用户看不出"该拿帧目录来"。补一句用法提示再退出 1。

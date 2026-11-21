@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: 2026 ForJiang
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0
 # ============================================================
 # 停止AR取景器.command —— macOS：停掉占用端口（默认 8765）的网页服务
 #

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ForJiang
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0
 """plane.py 单测 —— LIDAR-SPEC §5 门禁 T2（地平面闭环）/ T3（距离采样）/ T4（遮挡）。
 
 合成场景全部由 :func:`_synth_scene` 生成：给定 (h, pitch, roll) 在**深度相机坐标**

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ForJiang
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0
 """ISNet-anime 抠图 —— cutout.js AI 抠图线的 Python 等价实现。
 
 对应原版（`oss-teardown` 仓库 cutout.js，全局钩子 ``window.ARCAM_CUT``）：

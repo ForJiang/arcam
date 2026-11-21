@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ForJiang
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0
 """tests run against the source tree without installing the package."""
 
 import atexit

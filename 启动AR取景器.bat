@@ -1,6 +1,6 @@
 @echo off
 rem SPDX-FileCopyrightText: 2026 ForJiang
-rem SPDX-License-Identifier: MIT
+rem SPDX-License-Identifier: GPL-3.0
 rem ============================================================
 rem 启动AR取景器.bat —— Windows 一键启动 arcam 网页界面
 rem

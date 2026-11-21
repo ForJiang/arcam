@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ForJiang
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0
 """hud / i18n 单测 —— FEATURE-SPEC §2/§3 门禁。
 
 对译证据绑定原版 oss-teardown repo index.html 的 file:line；数值断言附手算

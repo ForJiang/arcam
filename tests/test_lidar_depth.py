@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ForJiang
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0
 """L1 LiDAR 深度 IO 测试 —— LIDAR-SPEC §5 门禁 T1（读取/格式/对齐）。
 
 覆盖：

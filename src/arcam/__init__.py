@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ForJiang
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0
 """arcam —— 「让她走出屏幕」的 Python 移植。
 
 浏览器原版（AR 取景器）的离线合成管线等价实现：

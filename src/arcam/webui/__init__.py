@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ForJiang
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0
 """arcam 的本机网页前端（webui）：静态三件套 + 3D 运行时。
 
 这个包**只装数据文件**（index.html / *.js / *.css / mmd/ 整个 3D 运行时），

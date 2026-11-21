@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ForJiang
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0
 """环境光采样与立绘烘光 —— 原版「光线匹配」（index.html:1161-1465）的离线等价。
 
 三条主线，全部逐字对应原版：

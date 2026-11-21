@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ForJiang
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0
 """立绘层合成 —— 接触阴影与立绘落位（``drawCharTo`` 的 Python 等价）。
 
 两条公开入口：

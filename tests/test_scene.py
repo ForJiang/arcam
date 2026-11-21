@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ForJiang
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0
 """scene.py —— scene.json 配方（buildScene，index.html:3729-3789）。
 
 三条主线：

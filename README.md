@@ -1,8 +1,8 @@
 # 让她走出屏幕 · Python 离线版（arcam）
 
-> 把二次元立绘按透视投影方程贴地摆进照片——AR 取景器的离线同构实现：Python CLI 15 个子命令（出图/抠图/素材包/位姿轨道视频/LiDAR/批量/MMD 3D）+ 本机网页界面，scene.json 与浏览器原版 100% 互认配方
+> 把二次元立绘按透视投影贴地摆进照片的 AR 取景器：Python CLI + 网页版
 >
-> Place anime characters into photos via perspective projection — offline port of the AR viewfinder: Python CLI (render/matte/bundle/track video/LiDAR/batch/MMD) + local web UI, scene.json 100% compatible with the original
+> AR viewfinder that places anime characters into photos with perspective projection — Python CLI & web
 
 English intro at the bottom: [English](#english)
 
@@ -507,7 +507,7 @@ Pages 抠图阈值 1 ulp 翻面等）、v1.1.1 补验可选依赖路径再修 2 
 **ForJiang** · [github.com/ForJiang](https://github.com/ForJiang) ·
 [forjiang.github.io/arcam](https://forjiang.github.io/arcam/)
 
-以 [MIT License](LICENSE) 发布（源码文件头部带 SPDX 署名行）。本项目是上述
+以 [GPL-3.0](LICENSE) 发布 © 2026 ForJiang。本项目是上述
 原版 AR 取景器投影 / 合成管线的独立移植实现——算法按原版行为重新实现、未复制
 其源代码，原版取景器的创意与设计归其作者所有，特此致谢；仓库内捆绑的第三方
 组件（three.js / MMD 运行时 / ISNet-anime 模型）归各自作者所有、依其自身
@@ -634,8 +634,7 @@ the full contract set lives in `docs/SPEC.md`.
 **ForJiang** · [github.com/ForJiang](https://github.com/ForJiang) ·
 [forjiang.github.io/arcam](https://forjiang.github.io/arcam/)
 
-Released under the [MIT License](LICENSE) (SPDX attribution line in each source file
-header). This project is an independent reimplementation of the original AR viewfinder's
+Released under the [GPL-3.0](LICENSE) © 2026 ForJiang. This project is an independent reimplementation of the original AR viewfinder's
 projection/compositing pipeline — the algorithms were reimplemented to match its
 behavior, its source code not copied; the original viewfinder's creative work and
 design remain the property of its author, with thanks. Bundled third-party components
